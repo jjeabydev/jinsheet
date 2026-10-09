@@ -31,7 +31,7 @@
     ]
   },
   "scripts": {
-    "test": "node --test test/*.test.js",
+    "test": "node --test test/csv.test.js test/document.test.js test/office.test.js test/xlsx.test.js",
     "check": "node --check src/extension.js && node --check src/csv.js && node --check src/xlsx.js && node --check src/office.js && node --check test/runExtensionTests.js && node --check test/host/suite.js",
     "test:host": "node test/runExtensionTests.js",
     "package": "vsce package --no-dependencies"

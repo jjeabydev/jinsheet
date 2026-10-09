@@ -32,7 +32,11 @@ jobs:
         run: npm run check
       - name: Dependency audit
         run: npm audit --audit-level=high
-      - name: VS Code Extension Host tests
+      - name: VS Code Extension Host tests (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:host
+      - name: VS Code Extension Host tests (macOS and Windows)
+        if: runner.os != 'Linux'
         run: npm run test:host
       - name: Build VSIX
         run: npm run package

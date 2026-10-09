@@ -1,0 +1,10 @@
+.git/**
+.github/**
+.vscode-test/**
+.test-user-data/**
+test/**
+*.vsix
+fixture.csv
+fixture.xlsx
+patched.csv
+patched.xlsx

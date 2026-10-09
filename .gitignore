@@ -1,0 +1,8 @@
+/node_modules/
+.vscode-test/
+.test-user-data/
+coverage/
+*.vsix
+*.tmp
+.DS_Store
+Thumbs.db

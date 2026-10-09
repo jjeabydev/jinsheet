@@ -1,0 +1,41 @@
+{
+  "name": "jinsheet",
+  "displayName": "JinSheet — Excel & CSV Editor, Office Text Preview",
+  "description": "로컬 CSV·TSV·XLSX 편집기와 Word·PowerPoint 읽기 전용 미리보기",
+  "version": "0.1.0",
+  "publisher": "jjeabydev",
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Visualization"],
+  "keywords": ["csv", "tsv", "xlsx", "excel", "docx", "docm", "pptx", "pptm", "spreadsheet", "viewer", "editor"],
+  "activationEvents": ["onCustomEditor:jinsheet.editor"],
+  "main": "./src/extension.js",
+  "icon": "media/icon.png",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/jjeabydev/jinsheet.git" },
+  "contributes": {
+    "customEditors": [{
+      "viewType": "jinsheet.editor",
+      "displayName": "JinSheet",
+      "selector": [
+        { "filenamePattern": "*.csv" }, { "filenamePattern": "*.tsv" },
+        { "filenamePattern": "*.xlsx" }, { "filenamePattern": "*.xlsm" },
+        { "filenamePattern": "*.docx" }, { "filenamePattern": "*.docm" },
+        { "filenamePattern": "*.pptx" }, { "filenamePattern": "*.pptm" },
+        { "filenamePattern": "*.doc" }, { "filenamePattern": "*.ppt" }
+      ],
+      "priority": "option"
+    }],
+    "commands": [
+      { "command": "jinsheet.open", "title": "JinSheet: Open File" },
+      { "command": "jinsheet.editAsText", "title": "JinSheet: Open as Text" }
+    ]
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check": "node --check src/extension.js && node --check src/csv.js && node --check src/xlsx.js && node --check src/office.js && node --check test/runExtensionTests.js && node --check test/host/suite.js",
+    "test:host": "node test/runExtensionTests.js",
+    "package": "vsce package --no-dependencies"
+  },
+  "dependencies": { "fflate": "0.8.3", "saxes": "6.0.0" },
+  "devDependencies": { "@vscode/test-electron": "3.1.0", "@vscode/vsce": "4.0.0", "mocha": "^12.0.3" }
+}

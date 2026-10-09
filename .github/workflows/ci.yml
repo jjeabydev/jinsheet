@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Unit and security regression tests
+        run: npm test
+      - name: Syntax checks
+        run: npm run check
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+      - name: VS Code Extension Host tests
+        run: npm run test:host
+      - name: Build VSIX
+        run: npm run package
+      - name: Retain platform package
+        uses: actions/upload-artifact@v4
+        with:
+          name: jinsheet-vsix-${{ matrix.os }}
+          path: jinsheet-*.vsix
+          if-no-files-found: error
+          retention-days: 14

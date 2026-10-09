@@ -6,6 +6,11 @@ const os = require('node:os');
 const path = require('node:path');
 const { zipSync } = require('../../vendor/node_modules/fflate');
 
+function normalizePath(value) {
+  const resolved = path.resolve(value);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
 suite('JinSheet Extension Host', () => {
   test('activate command and open CSV in the registered Custom Editor', async () => {
     const extension = vscode.extensions.getExtension('jjeabydev.jinsheet');
@@ -22,7 +27,7 @@ suite('JinSheet Extension Host', () => {
       const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
       assert.ok(tab, 'custom editor tab opened');
       assert.equal(tab.input.viewType, 'jinsheet.editor');
-      assert.equal(tab.input.uri.fsPath, file);
+      assert.equal(normalizePath(tab.input.uri.fsPath), normalizePath(file));
     } finally {
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
       await fs.rm(directory, { recursive: true, force: true });
@@ -52,7 +57,7 @@ suite('JinSheet Extension Host', () => {
         const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
         assert.ok(tab, `${extensionName} custom editor tab opened`);
         assert.equal(tab.input.viewType, 'jinsheet.editor');
-        assert.equal(tab.input.uri.fsPath, file);
+        assert.equal(normalizePath(tab.input.uri.fsPath), normalizePath(file));
         await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
       }
     } finally {

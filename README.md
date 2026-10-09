@@ -49,4 +49,4 @@ npm run package
 
 프로젝트는 MIT License를 사용합니다. 실행 의존성은 `fflate`(MIT)와 `saxes`(ISC)이며, 정확한 버전을 lockfile에 고정합니다. 타사 저작권 고지는 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)에 있습니다.
 
-`publisher: jjeabydev`와 GitHub 저장소 URL은 게시 후보입니다. 계정 소유권, Marketplace ID와 저장소 생성은 공개 전에 확인해야 합니다. `npm run package`로 로컬 검증 VSIX를 만들 수 있으나, 이 저장소는 아직 공개·게시되지 않았고 이 빌드는 Marketplace 공개 승인이 아닙니다.
+공개 소스 저장소는 [github.com/jjeabydev/jinsheet](https://github.com/jjeabydev/jinsheet)이며 MIT License로 배포합니다. `test/fixtures/`에는 로컬 VS Code에서 기본 파일 연결과 읽기 전용 미리보기를 확인할 샘플 XLSX·DOCX·PPTX가 있습니다. `npm run package` 또는 GitHub Actions에서 VSIX를 만들 수 있습니다. VS Code Marketplace 게시는 아직 진행하지 않았습니다.

@@ -12,6 +12,29 @@ function normalizePath(value) {
 }
 
 suite('JinSheet Extension Host', () => {
+  test('opens PPTX with JinSheet from the default editor association', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-pptx-default-'));
+    const file = path.join(directory, 'default-smoke.pptx');
+    const bytes = zipSync({
+      '[Content_Types].xml': new TextEncoder().encode('<Types/>'),
+      'ppt/presentation.xml': new TextEncoder().encode('<p:presentation xmlns:p="urn:p" xmlns:r="urn:r"><p:sldIdLst><p:sldId r:id="r1"/></p:sldIdLst></p:presentation>'),
+      'ppt/_rels/presentation.xml.rels': new TextEncoder().encode('<Relationships><Relationship Id="r1" Type="urn/slide" Target="slides/slide1.xml"/></Relationships>'),
+      'ppt/slides/slide1.xml': new TextEncoder().encode('<p:sld xmlns:p="urn:p" xmlns:a="urn:a"><a:p><a:r><a:t>Preview</a:t></a:r></a:p></p:sld>')
+    });
+    await fs.writeFile(file, bytes);
+    try {
+      await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(file));
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+      assert.ok(tab, 'PPTX editor tab opened');
+      assert.equal(tab.input.viewType, 'jinsheet.editor');
+      assert.equal(normalizePath(tab.input.uri.fsPath), normalizePath(file));
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test('activate command and open CSV in the registered Custom Editor', async () => {
     const extension = vscode.extensions.getExtension('jjeabydev.jinsheet');
     assert.ok(extension, 'JinSheet extension is registered');

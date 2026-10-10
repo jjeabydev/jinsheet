@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { applyEdits, decode, detectDelimiter, encode, load, parse } = require('../src/csv');
+const { applyEdits, decode, detectDelimiter, encode, load, parse, transformStructure } = require('../src/csv');
 
 test('인용 필드 안의 줄바꿈과 escape quote를 파싱한다', () => {
   const text = 'a,b\r\n"line 1\nline 2","say ""hi"""\r\n';
@@ -36,4 +36,27 @@ test('필드 source offset으로 수정 영역만 교체한다', () => {
   const text = 'left," keep ",right\n';
   const rows = parse(text, ',');
   assert.equal(applyEdits(text, rows, [{ row: 0, column: 1, value: 'new' }], ','), 'left,"new",right\n');
+});
+
+test('CSV/TSV 행·열 구조 변경은 원래 필드와 혼합 개행을 보존한다', () => {
+  const original = Buffer.from([0xef, 0xbb, 0xbf, ...Buffer.from('name,value\r\n"keep,as is",1\nbeta,2')]);
+  const state = load(original, '.csv');
+  const rowInserted = transformStructure(state, '.csv', { axis: 'row', action: 'insert', index: 1 });
+  assert.equal(rowInserted.text, 'name,value\r\n,\n"keep,as is",1\nbeta,2');
+  const rowDeleted = transformStructure(state, '.csv', { axis: 'row', action: 'delete', index: 1 });
+  assert.equal(rowDeleted.text, 'name,value\r\nbeta,2');
+  const columnInserted = transformStructure(state, '.csv', { axis: 'column', action: 'insert', index: 1 });
+  assert.equal(columnInserted.text, 'name,,value\r\n"keep,as is",,1\nbeta,,2');
+  const columnDeleted = transformStructure(state, '.csv', { axis: 'column', action: 'delete', index: 1 });
+  assert.equal(columnDeleted.text, 'name\r\n"keep,as is"\nbeta');
+  assert.deepEqual(encode(rowDeleted.text, rowDeleted.encoding, rowDeleted.bom).subarray(0, 3), Buffer.from([0xef, 0xbb, 0xbf]));
+});
+
+test('빈 TSV에서 첫 행 또는 열을 삽입하면 빈 셀 하나가 생성된다', () => {
+  const state = load(Buffer.alloc(0), '.tsv');
+  for (const axis of ['row', 'column']) {
+    const inserted = transformStructure(state, '.tsv', { axis, action: 'insert', index: 0 });
+    assert.equal(inserted.text, '""');
+    assert.deepEqual(inserted.rows.map(row => row.map(cell => cell.value)), [['']]);
+  }
 });

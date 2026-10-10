@@ -34,9 +34,18 @@ function detectDelimiter(text, preferred) {
 
 function parse(text, delimiter, maxCells = 100000) {
   const rows = [];
-  let row = [], value = '', start = 0, i = 0, quoted = false, fieldQuoted = false, justClosed = false, cellCount = 0;
+  let row = [], value = '', start = 0, rowStart = 0, i = 0, quoted = false, fieldQuoted = false, justClosed = false, cellCount = 0;
   const pushField = (end) => { if (++cellCount > maxCells) throw new Error(`초기 버전은 ${maxCells.toLocaleString()}셀을 넘는 CSV/TSV 파일을 열지 않습니다.`); row.push({ value, start, end, quoted: fieldQuoted }); value = ''; fieldQuoted = false; justClosed = false; start = end + 1; };
-  const pushRow = (end) => { pushField(end); rows.push(row); row = []; };
+  const pushRow = (end, recordEnd = end) => {
+    pushField(end);
+    Object.defineProperties(row, {
+      start: { value: rowStart },
+      contentEnd: { value: end },
+      end: { value: recordEnd },
+      terminator: { value: text.slice(end, recordEnd) }
+    });
+    rows.push(row); row = []; rowStart = recordEnd;
+  };
   while (i < text.length) {
     const ch = text[i];
     if (quoted) {
@@ -49,7 +58,7 @@ function parse(text, delimiter, maxCells = 100000) {
     if (ch === delimiter) { pushField(i); i++; start = i; continue; }
     if (ch === '\r' || ch === '\n') {
       const width = ch === '\r' && text[i + 1] === '\n' ? 2 : 1;
-      pushRow(i); i += width; start = i; continue;
+      pushRow(i, i + width); i += width; start = i; continue;
     }
     if (ch === '"') throw new Error(`따옴표가 잘못된 레코드입니다 (문자 위치 ${i}).`);
     value += ch; i++;
@@ -98,4 +107,69 @@ function load(bytes, extension, preferredDelimiter) {
   return { ...decoded, delimiter, rows };
 }
 
-module.exports = { applyEdits, decode, detectDelimiter, encode, load, parse, quote };
+function applyStructure(text, patches) {
+  let result = text;
+  const ordered = [...patches].sort((a, b) => b.start - a.start);
+  let previousStart = text.length + 1;
+  for (const patch of ordered) {
+    if (patch.start < 0 || patch.end < patch.start || patch.end > previousStart) throw new Error('CSV 구조 변경 범위가 겹치거나 유효하지 않습니다.');
+    result = result.slice(0, patch.start) + patch.replacement + result.slice(patch.end);
+    previousStart = patch.start;
+  }
+  return result;
+}
+
+function recordEnding(state, index) {
+  for (let i = index; i < state.rows.length; i++) if (state.rows[i].terminator) return state.rows[i].terminator;
+  for (let i = Math.min(index - 1, state.rows.length - 1); i >= 0; i--) if (state.rows[i].terminator) return state.rows[i].terminator;
+  if (state.text.includes('\r\n')) return '\r\n';
+  if (state.text.includes('\r')) return '\r';
+  return '\n';
+}
+
+function transformStructure(state, extension, operation) {
+  const { axis, action, index } = operation || {};
+  if (!['row', 'column'].includes(axis) || !['insert', 'delete'].includes(action) || !Number.isInteger(index) || index < 0) throw new RangeError('CSV 행·열 구조 변경 요청이 유효하지 않습니다.');
+  const rows = state.rows;
+  const columnCount = rows.reduce((count, row) => Math.max(count, row.length), 0);
+  const patches = [];
+  if (axis === 'row') {
+    if (action === 'insert') {
+      if (index > rows.length || rows.length >= 10000) throw new RangeError('CSV에서 행을 삽입할 위치 또는 행 수 제한이 유효하지 않습니다.');
+      const width = Math.max(1, columnCount), record = Array(width).fill('').join(state.delimiter);
+      if (!rows.length) patches.push({ start: 0, end: 0, replacement: quote('', state.delimiter, true) });
+      else if (index < rows.length) patches.push({ start: rows[index].start, end: rows[index].start, replacement: record + recordEnding(state, index) });
+      else {
+        const last = rows[rows.length - 1];
+        patches.push({ start: state.text.length, end: state.text.length, replacement: last.terminator ? record : recordEnding(state, index) + record });
+      }
+    } else {
+      if (index >= rows.length) throw new RangeError('삭제할 CSV 행을 찾을 수 없습니다.');
+      const row = rows[index];
+      if (row.terminator) patches.push({ start: row.start, end: row.end, replacement: '' });
+      else if (index > 0) patches.push({ start: rows[index - 1].contentEnd, end: row.end, replacement: '' });
+      else patches.push({ start: row.start, end: row.end, replacement: '' });
+    }
+  } else {
+    if (action === 'insert') {
+      if (index > columnCount || columnCount >= 1000) throw new RangeError('CSV에서 열을 삽입할 위치 또는 열 수 제한이 유효하지 않습니다.');
+      if (!rows.length) patches.push({ start: 0, end: 0, replacement: quote('', state.delimiter, true) });
+      for (const row of rows) {
+        if (index < row.length) patches.push({ start: row[index].start, end: row[index].start, replacement: state.delimiter });
+        else if (index === columnCount && row.length === columnCount && row.length) patches.push({ start: row.contentEnd, end: row.contentEnd, replacement: state.delimiter });
+      }
+    } else {
+      if (index >= columnCount) throw new RangeError('삭제할 CSV 열을 찾을 수 없습니다.');
+      for (const row of rows) {
+        if (index >= row.length) continue;
+        if (row.length === 1) patches.push({ start: row[0].start, end: row[0].end, replacement: '' });
+        else if (index === 0) patches.push({ start: row[0].start, end: row[1].start, replacement: '' });
+        else patches.push({ start: row[index - 1].end, end: row[index].end, replacement: '' });
+      }
+    }
+  }
+  const text = applyStructure(state.text, patches);
+  return load(encode(text, state.encoding, state.bom), extension, state.delimiter);
+}
+
+module.exports = { applyEdits, transformStructure, decode, detectDelimiter, encode, load, parse, quote };

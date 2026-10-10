@@ -1,8 +1,8 @@
 {
   "name": "jinsheet",
-  "displayName": "JinSheet — Excel & CSV Editor, Office Text Preview",
-  "description": "로컬 CSV·TSV·XLSX 편집기와 Word·PowerPoint 읽기 전용 미리보기",
-  "version": "0.1.0",
+  "displayName": "%displayName%",
+  "description": "%description%",
+  "version": "0.1.2",
   "publisher": "jjeabydev",
   "engines": {
     "vscode": "^1.90.0"
@@ -19,7 +19,11 @@
     "viewer",
     "editor",
     "docx",
-    "pptx"
+    "pptx",
+    "pdf",
+    "word",
+    "powerpoint",
+    "document"
   ],
   "activationEvents": [
     "onCustomEditor:jinsheet.editor"
@@ -60,6 +64,9 @@
           },
           {
             "filenamePattern": "*.pptm"
+          },
+          {
+            "filenamePattern": "*.pdf"
           }
         ],
         "priority": "default"
@@ -77,18 +84,30 @@
     ]
   },
   "scripts": {
-    "test": "node --test test/csv.test.js test/document.test.js test/office.test.js test/xlsx.test.js",
-    "check": "node --check src/extension.js && node --check src/csv.js && node --check src/xlsx.js && node --check src/office.js && node --check test/runExtensionTests.js && node --check test/host/suite.js",
-    "test:host": "node test/runExtensionTests.js",
-    "package": "vsce package --no-dependencies"
+    "test": "node --test test/csv.test.js test/document.test.js test/grid.test.js test/i18n.test.js test/manifest.test.js test/office.test.js test/pdf.test.js test/xlsx.test.js",
+    "check": "node --check src/i18n.js && node --check src/extension.js && node --check src/csv.js && node --check src/xlsx.js && node --check src/office.js && node --check src/pdf.js && node --check src/grid.js && node --check test/runExtensionTests.js && node --check test/host/suite.js && node --check test/manifest.test.js && node --check scripts/build-renderers.js && node --check test/helpers/pdf-fixture.js",
+    "test:host": "npm run build:renderers && node test/runExtensionTests.js",
+    "package": "npm run build:renderers && vsce package --no-dependencies",
+    "build:renderers": "node scripts/build-renderers.js"
   },
   "dependencies": {
     "fflate": "0.8.3",
     "saxes": "6.0.0"
   },
   "devDependencies": {
+    "@file-viewer/pptx": "^3.1.2",
     "@vscode/test-electron": "3.1.0",
     "@vscode/vsce": "4.0.0",
-    "mocha": "^12.0.3"
+    "docx-preview": "^0.4.1",
+    "esbuild": "^0.28.2",
+    "mocha": "^12.0.3",
+    "pdfjs-dist": "^4.10.38"
+  },
+  "author": {
+    "name": "jelly",
+    "url": "https://jellybeanz.medium.com"
+  },
+  "overrides": {
+    "dompurify": "3.4.16"
   }
 }

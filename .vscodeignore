@@ -8,3 +8,5 @@ fixture.csv
 fixture.xlsx
 patched.csv
 patched.xlsx
+.serena/**
+media/pdf.worker.min.js

@@ -1,6 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const { zipSync } = require('../vendor/node_modules/fflate');
 const { analyzeOffice } = require('../src/office');
 const Module = require('node:module');
@@ -37,7 +38,7 @@ test('DOCX와 DOCM에서 문단 텍스트를 추출하고 편집을 비활성화
   for (const extension of ['.docx', '.docm']) {
     const state = analyzeOffice(bytes, extension);
     assert.deepEqual(state.sections[0].paragraphs, ['Hello\tWord', 'Next']);
-    const document = new JinSheetDocument(uri(extension), 'office', state, bytes, false, 'Office 문서는 텍스트 미리보기 전용입니다.');
+    const document = new JinSheetDocument(uri(extension), 'office', state, bytes, false, 'Office 문서는 JinSheet 내부 렌더러로 표시하며 읽기 전용입니다.');
     assert.equal(document.writable, false);
     assert.equal(viewModel(document).kind, 'office');
     assert.throws(() => document.applyCellEdit(0, 0, 'changed'), /전용/);
@@ -66,4 +67,12 @@ test('Office ZIP 안의 DTD와 패키지 밖 관계 경로를 거부한다', () 
 test('구형 바이너리 .doc/.ppt를 OOXML 파일로 오인하지 않는다', () => {
   assert.throws(() => analyzeOffice(Buffer.from('legacy'), '.doc'), /구형/);
   assert.throws(() => analyzeOffice(Buffer.from('legacy'), '.ppt'), /구형/);
+});
+
+test('수동 DOCX 샘플은 페이지·서식·표 렌더링을 확인할 콘텐츠를 포함한다', () => {
+  const bytes = fs.readFileSync(require('node:path').join(__dirname, 'fixtures/JinSheet-Sample.docx'));
+  const state = analyzeOffice(bytes, '.docx');
+  assert.ok(state.sections[0].paragraphs.includes('JinSheet Word 렌더링 샘플'));
+  assert.ok(state.sections[0].paragraphs.includes('페이지 레이아웃과 표 렌더링을 확인하는 문서입니다.'));
+  assert.ok(state.sections[0].paragraphs.includes('문서 요소'));
 });

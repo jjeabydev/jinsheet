@@ -5,6 +5,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { zipSync } = require('../../vendor/node_modules/fflate');
+const { onePagePdf } = require('../helpers/pdf-fixture');
 
 function normalizePath(value) {
   const resolved = path.resolve(value);
@@ -32,6 +33,42 @@ suite('JinSheet Extension Host', () => {
     } finally {
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
       await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+
+  test('opens PDF with JinSheet from the default editor association', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-pdf-default-'));
+    const file = path.join(directory, 'default-smoke.pdf');
+    await fs.writeFile(file, onePagePdf());
+    try {
+      await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(file));
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+      assert.ok(tab, 'PDF editor tab opened');
+      assert.equal(tab.input.viewType, 'jinsheet.editor');
+      assert.equal(normalizePath(tab.input.uri.fsPath), normalizePath(file));
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('opens XLSX fixtures in JinSheet through the default editor association', async () => {
+    const fixtures = ['JinSheet-Sample.xlsx', 'JinSheet-Styled-Sample.xlsx'];
+    try {
+      for (const name of fixtures) {
+        const file = path.join(__dirname, '..', 'fixtures', name);
+        await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(file));
+        await new Promise(resolve => setTimeout(resolve, 500));
+        const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+        assert.ok(tab, `${name} custom editor tab opened`);
+        assert.equal(tab.input.viewType, 'jinsheet.editor');
+        assert.equal(normalizePath(tab.input.uri.fsPath), normalizePath(file));
+        await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      }
+    } finally {
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
     }
   });
 

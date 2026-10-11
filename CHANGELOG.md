@@ -2,6 +2,14 @@
 
 ## 1.0.2
 
+### English
+
+- Fixed direct cell entry for English keyboard input and Korean IME composition.
+- Improved the in-cell editor text and background colors for readability.
+- Clarified the supported editing and local preview features in the Marketplace descriptions.
+
+### 한국어
+
 - 셀을 바로 입력할 때 영문 키 입력과 한글 IME 입력이 편집기에 전달되도록 수정
 - 셀 편집 입력칸의 글자와 배경 색상을 명확하게 표시
 - Marketplace 설명을 영어와 한국어로 다듬어 편집 및 미리보기 범위를 명확히 안내

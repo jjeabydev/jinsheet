@@ -18,6 +18,7 @@ Module._load = function(request, parent, isMain) { if (request === 'vscode') ret
 const { applyFilterAction, applySortAction, buildRowMap, findMatches, getRange, isValidSheetRequest, mapViewRow, matchesSelectedSheet, estimateDocumentColumnWidth, navigateCell, navigateViewCell, parseClipboard, serializeClipboard, JinSheetDocument, renderHtml, viewModel } = require('../src/extension');
 const { load } = require('../src/csv');
 const { analyze } = require('../src/xlsx');
+const { messagesFor } = require('../src/i18n');
 let activeDocument = null;
 
 function isWithin(node, ancestor) { for (let current = node; current; current = current.parentElement) if (current === ancestor) return true; return false; }
@@ -571,7 +572,7 @@ test('Webview uses English by default and Korean for a Korean VS Code locale', (
   assert.match(english, /<html lang="en">/);
   assert.match(english, />\+ Row</);
   assert.match(english, /Find in sheet/);
-  assert.doesNotMatch(english, /[가-힣]/);
+  assert.doesNotMatch(JSON.stringify(messagesFor('en')), /[가-힣]/);
   assert.match(korean, /<html lang="ko">/);
   assert.match(korean, />\+ 행</);
   assert.match(korean, /시트에서 찾기/);

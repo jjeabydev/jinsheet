@@ -15,7 +15,7 @@ class EventEmitter {
 }
 const originalLoad = Module._load;
 Module._load = function(request, parent, isMain) { if (request === 'vscode') return { EventEmitter }; return originalLoad.call(this, request, parent, isMain); };
-const { applyFilterAction, applySortAction, buildRowMap, findMatches, getRange, isValidSheetRequest, mapViewRow, matchesSelectedSheet, estimateDocumentColumnWidth, navigateCell, navigateViewCell, parseClipboard, serializeClipboard, JinSheetDocument, renderHtml, viewModel } = require('../src/extension');
+const { applySortAction, buildRowMap, findMatches, getRange, isValidSheetRequest, mapViewRow, matchesSelectedSheet, estimateDocumentColumnWidth, navigateCell, navigateViewCell, parseClipboard, serializeClipboard, JinSheetDocument, renderHtml, viewModel } = require('../src/extension');
 const { load } = require('../src/csv');
 const { analyze } = require('../src/xlsx');
 const { messagesFor } = require('../src/i18n');
@@ -459,26 +459,25 @@ test('시트 범위 메시지는 선택한 시트의 정수 인덱스만 통과�
   assert.equal(matchesSelectedSheet({}, 0), false);
 });
 
-test('정렬·필터 화면은 원본 행 주소를 유지해 편집·복사·검색 범위를 연결한다', () => {
+test('정렬된 화면은 원본 행 주소를 유지해 편집·복사·검색 범위를 연결한다', () => {
   const bytes = Buffer.from('product,quantity\npear,12\napple,2\npear,4\n');
-  const document = new JinSheetDocument(uri('/tmp/sort-filter.csv'), 'csv', load(bytes, '.csv'), bytes, true, '');
+  const document = new JinSheetDocument(uri('/tmp/sorted.csv'), 'csv', load(bytes, '.csv'), bytes, true, '');
   document.setInitialCsvState(document.state);
-  const view = { sortColumn: 1, sortDirection: 'asc', filterColumn: 0, filterText: 'pear', hasHeader: true };
+  const view = { sortColumn: 1, sortDirection: 'asc' };
   const rowMap = buildRowMap(document, 0, view);
-  assert.deepEqual(rowMap, [0, 3, 1]);
-  assert.equal(mapViewRow(1, rowMap), 3);
-  assert.throws(() => mapViewRow(3, rowMap), /범위를 벗어났습니다/);
-  const range = getRange(document, { requestId: 1, rowStart: 1, columnStart: 0, rowCount: 2, columnCount: 2 }, rowMap);
-  assert.deepEqual(range.rowIndexes, [3, 1]);
-  assert.deepEqual(range.rows.map(row => row.map(cell => cell.value)), [['pear', '4'], ['pear', '12']]);
-  assert.equal(serializeClipboard(document, { startRow: 1, endRow: 2, startColumn: 0, endColumn: 1 }, 0, rowMap), 'pear\t4\r\npear\t12');
-  assert.deepEqual(findMatches(document, 'pear', 0, rowMap).matches.map(match => [match.row, match.address]), [[1, 'A4'], [2, 'A2']]);
+  assert.deepEqual(rowMap, [0, 2, 3, 1]);
+  assert.equal(mapViewRow(1, rowMap), 2);
+  assert.throws(() => mapViewRow(4, rowMap), /범위를 벗어났습니다/);
+  const range = getRange(document, { requestId: 1, rowStart: 1, columnStart: 0, rowCount: 3, columnCount: 2 }, rowMap);
+  assert.deepEqual(range.rowIndexes, [2, 3, 1]);
+  assert.deepEqual(range.rows.map(row => row.map(cell => cell.value)), [['apple', '2'], ['pear', '4'], ['pear', '12']]);
+  assert.equal(serializeClipboard(document, { startRow: 1, endRow: 3, startColumn: 0, endColumn: 1 }, 0, rowMap), 'apple\t2\r\npear\t4\r\npear\t12');
+  assert.deepEqual(findMatches(document, 'pear', 0, rowMap).matches.map(match => [match.row, match.address]), [[2, 'A4'], [3, 'A2']]);
   assert.deepEqual(navigateViewCell(document, { row: 1, column: 0, direction: 'right', requestId: 2 }, rowMap), { type: 'navigation', requestId: 2, row: 1, column: 1, extend: false });
-  assert.deepEqual(viewModel(document, 0, 'en', view).rowMap, rowMap);
-  document.applyCellEdit(mapViewRow(1, rowMap), 0, 'pear updated');
+  document.applyCellEdit(mapViewRow(1, rowMap), 0, 'apple updated');
   const saved = load(document.createOutput(), '.csv');
-  assert.equal(saved.rows[3][0].value, 'pear updated');
-  assert.equal(saved.rows[2][0].value, 'apple');
+  assert.equal(saved.rows[2][0].value, 'apple updated');
+  assert.equal(saved.rows[1][0].value, 'pear');
   document.dispose();
 });
 
@@ -496,36 +495,12 @@ test('정렬 키 추가·방향 전환·해제·교체가 우선순위를 올바
   assert.deepEqual(view.sortKeys, [{ column: 2, direction: 'asc' }]);
 });
 
-test('열별 필터 조건은 누적되고 빈 조건은 해당 열에서만 제거된다', () => {
-  const view = { filterRules: [] };
-  applyFilterAction(view, { column: 0, query: 'pear' });
-  applyFilterAction(view, { column: 1, query: '1' });
-  assert.deepEqual(view.filterRules, [{ column: 0, query: 'pear' }, { column: 1, query: '1' }]);
-  applyFilterAction(view, { column: 1, query: '' });
-  assert.deepEqual(view.filterRules, [{ column: 0, query: 'pear' }]);
-  applyFilterAction(view, { column: 0, query: ' ' });
-  assert.deepEqual(view.filterRules, []);
-});
-
-test('다중 열 필터는 모든 조건을 만족하는 행만 남기고 머리글은 유지한다', () => {
-  const bytes = Buffer.from('fruit,quantity,color\npear,12,green\napple,12,red\npear,4,green\npear,21,red\n');
-  const document = new JinSheetDocument(uri('/tmp/multi-filter.csv'), 'csv', load(bytes, '.csv'), bytes, true, '');
-  document.setInitialCsvState(document.state);
-  const rowMap = buildRowMap(document, 0, {
-    filterRules: [{ column: 0, query: 'pear' }, { column: 1, query: '1' }],
-    hasHeader: true
-  });
-  assert.deepEqual(rowMap, [0, 1, 4]);
-  document.dispose();
-});
-
 test('여러 열 정렬은 우선순위를 적용하고 같은 값은 원본 순서를 보존한다', () => {
   const bytes = Buffer.from('fruit,quantity,label\npear,12,a\napple,12,b\npear,4,c\napple,2,d\npear,12,e\n');
   const document = new JinSheetDocument(uri('/tmp/multi-sort.csv'), 'csv', load(bytes, '.csv'), bytes, true, '');
   document.setInitialCsvState(document.state);
   const rowMap = buildRowMap(document, 0, {
     sortKeys: [{ column: 0, direction: 'asc' }, { column: 1, direction: 'desc' }],
-    hasHeader: true
   });
   assert.deepEqual(rowMap, [0, 2, 4, 1, 5, 3]);
   assert.deepEqual(viewModel(document, 0, 'en', { sortKeys: [{ column: 0, direction: 'asc' }, { column: 1, direction: 'desc' }] }).sortKeys,
@@ -533,7 +508,7 @@ test('여러 열 정렬은 우선순위를 적용하고 같은 값은 원본 순
   document.dispose();
 });
 
-test('정렬·필터는 행 제한을 넘으면 명확히 거절한다', () => {
+test('정렬은 행 제한을 넘으면 명확히 거절한다', () => {
   const bytes = Buffer.from('');
   const cells = new Map(Array.from({ length: 100001 }, (_, row) => ['A' + (row + 1), { row, column: 0, address: 'A' + (row + 1), value: String(row) }]));
   const document = new JinSheetDocument(uri('/tmp/large-view.xlsx'), 'xlsx', { sheets: [{ cells }] }, bytes, true, '');
@@ -541,18 +516,22 @@ test('정렬·필터는 행 제한을 넘으면 명확히 거절한다', () => {
   document.dispose();
 });
 
-test('정렬·필터된 실제 XLSX 편집은 표시 행이 아니라 원본 셀을 저장한다', async t => {
-  const bytes = await fs.readFile(path.join(__dirname, 'fixtures', 'JinSheet-Sample.xlsx'));
-  const document = new JinSheetDocument(uri('/tmp/sort-filter.xlsx'), 'xlsx', analyze(bytes), bytes, true, '');
+test('정렬된 XLSX는 값과 셀 서식을 같은 원본 행에서 가져온다', async t => {
+  const bytes = await fs.readFile(path.join(__dirname, 'fixtures', 'JinSheet-Styled-Sample.xlsx'));
+  const document = new JinSheetDocument(uri('/tmp/sorted-styled.xlsx'), 'xlsx', analyze(bytes), bytes, true, '');
   t.after(() => document.dispose());
-  const view = { sortColumn: 1, sortDirection: 'asc', filterColumn: 0, filterText: '배', hasHeader: true };
-  const rowMap = buildRowMap(document, 0, view);
-  assert.deepEqual(rowMap, [0, 2]);
+  const rowMap = buildRowMap(document, 0, { sortColumn: 1, sortDirection: 'asc' });
+  assert.deepEqual(rowMap, [0, 2, 1, 3]);
+  const range = getRange(document, { requestId: 1, rowStart: 1, columnStart: 0, rowCount: 3, columnCount: 4 }, rowMap);
+  assert.deepEqual(range.rows.map(row => row[0].value), ['Pears', 'Apples', 'Total (static sample)']);
+  assert.deepEqual(range.rows.map(row => row[0].style.fill), ['#D9EAF7', '#D9EAF7', '#D9EAF7']);
+  assert.deepEqual(range.rows.map(row => row[1].value), ['7', '12', '19']);
+  assert.deepEqual(range.rows.map(row => row[1].style.fill), [undefined, undefined, undefined]);
   document.applyCellEdit(mapViewRow(1, rowMap), 1, '8');
   const reopened = analyze(document.createOutput());
-  assert.equal(reopened.sheets[0].cells.get('B2').value, '12');
-  assert.equal(reopened.sheets[0].cells.get('A3').value, '배');
   assert.equal(reopened.sheets[0].cells.get('B3').value, '8');
+  assert.equal(reopened.sheets[0].cells.get('B3').styleProperties.fill, undefined);
+  assert.equal(reopened.sheets[0].cells.get('A3').styleProperties.fill, '#D9EAF7');
 });
 
 test('Ctrl+방향키는 현재 데이터 블록 또는 다음 데이터 영역의 끝으로 이동한다', () => {
@@ -653,8 +632,11 @@ test('Webview HTML의 스크립트 문법을 검사하고 원격 출처를 허�
   assert.match(html, /e\.key === 'Home'/);
   assert.match(html, /model.gridRowCount=model.rowMap\?model.rowMap.length:XLSX_MAX_ROWS/);
   assert.match(html, /type:'sort'/);
-  assert.match(html, /type:'filter'/);
-  assert.match(html, /id="headerRow"/);
+  assert.doesNotMatch(html, /type:'filter'/);
+  assert.doesNotMatch(html, /id="headerRow"|header-row/);
+  assert.match(html, /\.cell\.in-range\{box-shadow:inset 0 0 0 9999px rgba\(0,100,220,\.14\)\}/);
+  assert.match(html, /if\(style\.fill\)cell\.style\.backgroundColor=style\.fill/);
+  assert.match(html, /getElementById\('clearSort'\)\.disabled=\!\(model\.sortKeys\|\|\[\]\)\.length/);
   assert.match(html, /const XLSX_MAX_ROWS=1048576;const XLSX_MAX_COLUMNS=16384/);
   assert.match(html, /visibleColumnRange\(columnOffsets,grid\.scrollLeft,grid\.clientWidth\)/);
   assert.match(html, /col-resize-handle/);
@@ -724,25 +706,33 @@ test('그리드 스크롤에서도 열 머리글·행 번호·모서리 머리�
   assert.equal(corner.style.transform, 'translate(432px,260px)');
 });
 
-test('셀 직접 입력은 영문 키와 한글 IME 입력을 편집기에 전달하고 셀 값으로 저장한다', () => {
+test('셀 직접 입력에서 연속 키와 한글 IME 이벤트가 같은 편집기를 유지한다', () => {
   const english = runGridWebview(renderHtml());
   english.respondToRange();
   const englishCell = english.document.querySelector('[data-row="0"][data-column="0"]');
-  englishCell.onkeydown({ key: 'x', ctrlKey: false, metaKey: false, altKey: false, preventDefault() {}, stopPropagation() {} });
+  englishCell.onkeydown({ target: englishCell, key: 'x', ctrlKey: false, metaKey: false, altKey: false, preventDefault() {}, stopPropagation() {} });
   const englishInput = englishCell.children[0];
   assert.equal(englishInput.value, 'x');
   assert.equal(englishInput.className, 'cell-editor');
+  englishCell.onkeydown({ target: englishInput, key: 'y', ctrlKey: false, metaKey: false, altKey: false, preventDefault() {}, stopPropagation() {} });
+  assert.strictEqual(englishCell.children[0], englishInput);
+  englishInput.value += 'y';
+  englishCell.onkeydown({ target: englishInput, key: 'z', ctrlKey: false, metaKey: false, altKey: false, preventDefault() {}, stopPropagation() {} });
+  assert.strictEqual(englishCell.children[0], englishInput);
+  englishInput.value += 'z';
   englishInput.onblur();
-  assert.deepEqual(JSON.parse(JSON.stringify(english.messages.at(-1))), { type: 'edit', row: 0, column: 0, value: 'x', sheetIndex: 0 });
+  assert.deepEqual(JSON.parse(JSON.stringify(english.messages.at(-1))), { type: 'edit', row: 0, column: 0, value: 'xyz', sheetIndex: 0 });
 
   const korean = runGridWebview(renderHtml());
   korean.respondToRange();
   const koreanCell = korean.document.querySelector('[data-row="0"][data-column="0"]');
-  koreanCell.onkeydown({ key: 'Process', isComposing: true, ctrlKey: false, metaKey: false, altKey: false });
+  koreanCell.onkeydown({ target: koreanCell, key: 'Process', isComposing: true, ctrlKey: false, metaKey: false, altKey: false });
   const koreanInput = koreanCell.children[0];
   assert.equal(koreanInput.tagName, 'INPUT');
   assert.equal(koreanInput.value, '');
   assert.equal(korean.document.activeElement, koreanInput);
+  koreanCell.onkeydown({ target: koreanInput, key: 'Process', isComposing: true, ctrlKey: false, metaKey: false, altKey: false });
+  assert.strictEqual(koreanCell.children[0], koreanInput);
   koreanInput.value = '월간매출';
   koreanInput.onblur();
   assert.deepEqual(JSON.parse(JSON.stringify(korean.messages.at(-1))), { type: 'edit', row: 0, column: 0, value: '월간매출', sheetIndex: 0 });
@@ -877,33 +867,25 @@ test('Webview 행·열 삽입·삭제 버튼이 선택한 위치의 구조 변�
   }
 });
 
-test('Webview 열 머리글 정렬·선택 열 필터 UI와 필터 행 주소를 유지한다', () => {
-  const { document, elements, messages, dispatch } = runGridWebview(renderHtml());
+test('Webview는 열 머리글 정렬과 정렬 해제를 제공하고 필터 UI를 표시하지 않는다', () => {
+  const { document, elements, messages, dispatch, respondToRange } = runGridWebview(renderHtml());
+  assert.equal(elements.has('filter'), false);
+  assert.equal(elements.has('applyFilter'), false);
+  assert.doesNotMatch(renderHtml(), /id="filter"|type:'filter'/);
   const header = elements.get('canvas').children.find(child => child.classList.contains('colhead'));
   header.onclick();
-  assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), { type: 'sort', column: 0, mode: 'replace', direction: 'asc', hasHeader: true, sheetIndex: 0 });
+  assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), { type: 'sort', column: 0, mode: 'replace', direction: 'asc', sheetIndex: 0 });
   header.onclick({ shiftKey: true });
   assert.equal(messages.at(-1).mode, 'add');
   assert.equal(messages.at(-1).direction, 'asc');
   header.onclick({ ctrlKey: true });
   assert.equal(messages.at(-1).mode, 'remove');
-  const selected = document.querySelector('[data-row="0"][data-column="1"]');
-  selected.onclick();
-  elements.get('filter').value = '12';
-  elements.get('applyFilter').onclick();
-  assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), { type: 'filter', column: 1, query: '12', hasHeader: true, sheetIndex: 0 });
-  elements.get('clearView').onclick();
-  assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), { type: 'clear-view', hasHeader: true, sheetIndex: 0 });
-
-  dispatch({ type: 'model', kind: 'csv', readOnly: false, rowCount: 3, columnCount: 2, rowMap: [0, 2], filterRules: [{ column: 0, query: 'pear' }, { column: 1, query: '12' }], hasHeader: true, sheetIndex: 0, dirty: false });
-  assert.equal(elements.get('filter').value, '12');
-  const request = messages.filter(message => message.type === 'range').at(-1);
-  dispatch({ type: 'range', requestId: request.requestId, rowStart: request.rowStart, rowIndexes: [0, 2], columnStart: request.columnStart, rowCount: 2, columnCount: 2, sheetIndex: 0, rows: [[{ value: 'header' }, { value: 'value' }], [{ value: 'target' }, { value: '12' }]] });
-  const filteredHeader = elements.get('canvas').children.find(child => child.classList.contains('colhead') && child.textContent.startsWith('A'));
-  assert.equal(filteredHeader.classList.contains('filtered'), true);
-  document.querySelector('[data-row="1"][data-column="0"]').onclick();
-  assert.equal(elements.get('address').textContent, 'A3');
-  assert.equal(elements.get('filter').value, 'pear');
+  elements.get('clearSort').onclick();
+  assert.deepEqual(JSON.parse(JSON.stringify(messages.at(-1))), { type: 'clear-sort', sheetIndex: 0 });
+  dispatch({ type: 'model', kind: 'csv', readOnly: false, rowCount: 3, columnCount: 2, rowMap: null, sortKeys: [], sheetIndex: 0, dirty: false });
+  respondToRange();
+  const clearedHeader = elements.get('canvas').children.find(child => child.classList.contains('colhead'));
+  assert.equal(clearedHeader.textContent, 'A');
 });
 
 test('열 경계 드래그와 키보드 조절이 가상 그리드의 셀 위치를 함께 갱신한다', () => {

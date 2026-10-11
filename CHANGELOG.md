@@ -1,5 +1,19 @@
 # Changelog / 변경 기록
 
+## 1.0.3
+
+### English
+
+- Removed the unreliable filter controls and header-row toggle. Sorting keeps the first row as the header; choosing another header row is not supported yet.
+- Preserved workbook cell colors and text contrast while selecting cells.
+- Disabled **Clear sort** when no sort is active.
+
+### 한국어
+
+- 동작이 불안정했던 필터와 머리글 행 토글 제거. 정렬 시 첫 행을 머리글로 고정하며 다른 행 지정은 아직 지원하지 않음
+- 셀 선택 중에도 통합 문서의 채우기 색과 글자 대비 유지
+- 정렬 중이 아닐 때 **정렬 해제** 버튼 비활성화
+
 ## 1.0.2
 
 ### English

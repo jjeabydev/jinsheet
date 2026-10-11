@@ -1,5 +1,13 @@
-# 기여 안내
+# Contributing / 기여 안내
 
-데이터 무결성 또는 보안에 영향을 주는 변경은 먼저 재현 fixture와 회귀 검증을 추가하십시오. XLSX 쓰기 허용 범위를 넓힐 때는 새 기능 파일을 읽기 전용으로 두는 대신 기능별 이유·fixture·비수정 패키지 바이트 비교·저장 후 재파싱 검증을 포함해야 합니다.
+### English
 
-변경 전에 `npm ci`, `npm test`, `npm run check`, `npm run test:host`를 실행하고 결과를 pull request에 남겨주세요. 사용자 문서나 테스트 파일에는 실사용자의 민감한 통합문서를 포함하지 마십시오.
+Before opening a pull request, run `npm ci`, `npm test`, `npm run check`, and `npm run test:host`, then include the results.
+
+For data-integrity or security changes, add a regression fixture. When expanding XLSX write support, verify unsupported content stays unchanged and saved files reopen correctly. Do not add real user documents, credentials, or other sensitive data to the repository.
+
+### 한국어
+
+Pull request를 열기 전에 `npm ci`, `npm test`, `npm run check`, `npm run test:host`를 실행하고 결과를 남겨주세요.
+
+데이터 무결성이나 보안에 영향을 주는 변경에는 회귀 fixture를 추가하세요. XLSX 저장 지원을 넓힐 때는 미지원 콘텐츠가 그대로 보존되고 저장한 파일을 다시 열 수 있는지 확인하세요. 실제 사용자 문서, 인증 정보 등 민감한 데이터는 저장소에 넣지 마세요.

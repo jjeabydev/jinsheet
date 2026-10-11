@@ -1,3 +1,9 @@
-# 보안 취약점 보고
+# Security / 보안 취약점 보고
 
-파일 파서의 임의 코드 실행, 외부 파일 접근, 압축 폭탄·XML 공격, 데이터 손실을 유발하는 취약점을 공개 이슈에 재현 가능한 민감 파일과 함께 올리지 마십시오. 저장소 소유자에게 비공개 보안 보고로 먼저 전달하십시오. 보고에는 JinSheet 버전, VS Code 버전, 운영체제, 가능한 최소 재현 fixture와 예상·실제 결과를 포함하되 비밀 정보는 제거하십시오.
+### English
+
+Please report security vulnerabilities privately to the repository maintainer instead of opening a public issue. Do not share sensitive documents or credentials. Include JinSheet and VS Code versions, your operating system, and a minimal reproduction with sensitive data removed.
+
+### 한국어
+
+보안 취약점은 공개 이슈 대신 저장소 관리자에게 비공개로 알려주세요. 민감한 문서나 인증 정보는 공유하지 마세요. JinSheet·VS Code 버전, 운영체제, 민감한 정보를 제거한 최소 재현 방법을 함께 보내주세요.

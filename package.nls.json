@@ -1,4 +1,4 @@
 {
   "displayName": "JinSheet — Excel, CSV & Office Viewer",
-  "description": "A local CSV/TSV/XLSX editor with rendered, read-only previews for Word, PowerPoint, and PDF."
+  "description": "Edit CSV, TSV, and supported Excel workbooks in VS Code. Preview PDF, Word, and PowerPoint locally."
 }

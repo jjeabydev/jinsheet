@@ -1,4 +1,4 @@
 {
   "displayName": "JinSheet — Excel, CSV 및 Office 뷰어",
-  "description": "로컬 CSV·TSV·XLSX 편집기와 Word·PowerPoint·PDF 문서 렌더링 미리보기"
+  "description": "VS Code에서 CSV·TSV와 지원되는 Excel 통합 문서를 편집하고 PDF·Word·PowerPoint를 로컬에서 미리 보세요."
 }

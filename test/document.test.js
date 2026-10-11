@@ -724,6 +724,30 @@ test('그리드 스크롤에서도 열 머리글·행 번호·모서리 머리�
   assert.equal(corner.style.transform, 'translate(432px,260px)');
 });
 
+test('셀 직접 입력은 영문 키와 한글 IME 입력을 편집기에 전달하고 셀 값으로 저장한다', () => {
+  const english = runGridWebview(renderHtml());
+  english.respondToRange();
+  const englishCell = english.document.querySelector('[data-row="0"][data-column="0"]');
+  englishCell.onkeydown({ key: 'x', ctrlKey: false, metaKey: false, altKey: false, preventDefault() {}, stopPropagation() {} });
+  const englishInput = englishCell.children[0];
+  assert.equal(englishInput.value, 'x');
+  assert.equal(englishInput.className, 'cell-editor');
+  englishInput.onblur();
+  assert.deepEqual(JSON.parse(JSON.stringify(english.messages.at(-1))), { type: 'edit', row: 0, column: 0, value: 'x', sheetIndex: 0 });
+
+  const korean = runGridWebview(renderHtml());
+  korean.respondToRange();
+  const koreanCell = korean.document.querySelector('[data-row="0"][data-column="0"]');
+  koreanCell.onkeydown({ key: 'Process', isComposing: true, ctrlKey: false, metaKey: false, altKey: false });
+  const koreanInput = koreanCell.children[0];
+  assert.equal(koreanInput.tagName, 'INPUT');
+  assert.equal(koreanInput.value, '');
+  assert.equal(korean.document.activeElement, koreanInput);
+  koreanInput.value = '월간매출';
+  koreanInput.onblur();
+  assert.deepEqual(JSON.parse(JSON.stringify(korean.messages.at(-1))), { type: 'edit', row: 0, column: 0, value: '월간매출', sheetIndex: 0 });
+});
+
 test('Webview 드래그 범위 선택·복사와 수식 입력줄 Enter가 편집 메시지를 보낸다', () => {
   const { document, documentListeners, elements, messages, windowListeners, respondToRange } = runGridWebview(renderHtml());
   let first = document.querySelector('[data-row="0"][data-column="0"]');

@@ -4,6 +4,8 @@
 
 JinSheet lets you edit spreadsheets and preview Office and PDF files in VS Code. Files stay on your computer.
 
+![JinSheet spreadsheet editor displaying an inventory workbook in VS Code.](media/jinsheet-spreadsheet.png)
+
 ## Features
 
 - Edit CSV, TSV, and supported XLSX workbooks. Sort rows, find cell contents, and paste cell ranges.

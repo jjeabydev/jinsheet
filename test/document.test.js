@@ -634,6 +634,7 @@ test('Webview HTML의 스크립트 문법을 검사하고 원격 출처를 허�
   assert.match(html, /type:'sort'/);
   assert.doesNotMatch(html, /type:'filter'/);
   assert.doesNotMatch(html, /id="headerRow"|header-row/);
+  assert.match(html, /hint.id='sortHint';hint.textContent=t\('sort-hint'\)/);
   assert.match(html, /\.cell\.in-range\{box-shadow:inset 0 0 0 9999px rgba\(0,100,220,\.14\)\}/);
   assert.match(html, /if\(style\.fill\)cell\.style\.backgroundColor=style\.fill/);
   assert.match(html, /getElementById\('clearSort'\)\.disabled=\!\(model\.sortKeys\|\|\[\]\)\.length/);

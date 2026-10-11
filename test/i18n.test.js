@@ -12,6 +12,8 @@ test("Korean VS Code uses Korean UI; other display languages use English", () =>
   assert.equal(message("insert-row", "ko"), "+ 행");
   assert.equal(message("clear-sort", "en"), "Clear sort");
   assert.equal(message("clear-sort", "ko"), "정렬 해제");
+  assert.match(message("sort-hint", "en"), /click a column letter.*Row 1 stays fixed/i);
+  assert.match(message("sort-hint", "ko"), /첫 행은 머리글로 고정되어 정렬되지 않습니다/);
   assert.equal(message("auto-fit-column", "en"), "Auto-fit column");
   assert.equal(message("auto-fit-column", "ko"), "열 너비 자동 맞춤");
 });

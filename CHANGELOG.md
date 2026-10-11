@@ -1,5 +1,15 @@
 # Changelog / 변경 기록
 
+## 1.0.4
+
+### English
+
+- Added a screenshot of JinSheet running in VS Code and on-screen sorting instructions.
+
+### 한국어
+
+- VS Code에서 실행 중인 JinSheet 스크린샷과 화면 내 정렬 안내 추가
+
 ## 1.0.3
 
 ### English

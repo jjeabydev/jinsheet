@@ -6,9 +6,6 @@ const messages = {
     'insert-row-title': 'Insert above selected row', 'delete-row-title': 'Delete selected row',
     'insert-column-title': 'Insert left of selected column', 'delete-column-title': 'Delete selected column',
     'cell-value': 'Cell value or formula', 'search-sheet': 'Find in sheet', 'find-hint': 'Find… (Ctrl/Cmd+F)',
-    'clear-sort': 'Clear sort',
-    'sort-hint': 'Click a column letter to sort; click again to reverse. Row 1 stays fixed as the header.',
-    'sort-title': 'Click a column heading to sort · Shift-click to add a sort key · Ctrl/Cmd-click to remove', 'view-row-limit': 'Sorting is limited to sheets with at most 100,000 used rows.',
     'spreadsheet': 'Spreadsheet', 'document-preview': 'Document preview', 'modified': 'Modified', 'resize-column': 'Resize column ',
     'edit-shortcut': 'Edit cell: F2 · Clear selected cell: Delete/Backspace',
     'selection-count': 'Count', 'selection-numbers': 'Numbers', 'selection-sum': 'Sum', 'selection-average': 'Average',
@@ -49,9 +46,6 @@ const messages = {
     'insert-row-title': '선택한 행 위에 삽입', 'delete-row-title': '선택한 행 삭제',
     'insert-column-title': '선택한 열 왼쪽에 삽입', 'delete-column-title': '선택한 열 삭제',
     'cell-value': '셀 값 또는 수식', 'search-sheet': '시트에서 찾기', 'find-hint': '찾기… (Ctrl/Cmd+F)',
-    'clear-sort': '정렬 해제',
-    'sort-hint': '열 머리글을 클릭해 정렬하고, 다시 클릭하면 역순입니다. 첫 행은 머리글로 고정되어 정렬되지 않습니다.',
-    'sort-title': '열 머리글 클릭: 정렬 · Shift+클릭: 보조 정렬 추가 · Ctrl/Cmd+클릭: 정렬에서 제외', 'view-row-limit': '정렬은 사용 행 100,000개 이하인 시트에서만 지원합니다.',
     'spreadsheet': '스프레드시트', 'document-preview': '문서 미리보기', 'modified': '수정됨', 'resize-column': '열 너비 조정: ',
     'edit-shortcut': '셀 편집: F2 · 선택 셀 비우기: Delete/Backspace',
     'selection-count': '개수', 'selection-numbers': '숫자', 'selection-sum': '합계', 'selection-average': '평균',
@@ -91,7 +85,6 @@ function translateDiagnostic(value, language) {
   if (languageOf(language) === 'ko' || !/[가-힣]/.test(text)) return text;
   const exact = new Map([
     ['수식이 포함되어 있어 저장할 수 없습니다. 수식과 캐시값은 보기 전용입니다.', 'readonly-formula'],
-    ['정렬은 사용 행 100,000개 이하에서만 지원합니다.', 'view-row-limit'],
     ['매크로 통합문서는 JinSheet에서 수정할 수 없습니다.', 'readonly-macro'],
     ['원격·가상 파일 시스템에서는 안전한 저장을 보장할 수 없어 읽기 전용으로 엽니다.', 'readonly-remote'],
     ['Office 문서는 JinSheet 내부 렌더러로 표시하며 읽기 전용입니다.', 'readonly-office'],

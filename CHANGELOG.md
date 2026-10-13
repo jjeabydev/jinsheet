@@ -1,5 +1,17 @@
 # Changelog / 변경 기록
 
+## 1.0.5 (2026-10-14)
+
+### English
+
+- Removed column sorting to prevent rows from appearing out of order.
+- Tab and Shift+Tab now commit cell edits and move to the next or previous cell.
+
+### 한국어
+
+- 행 데이터가 뒤섞여 보이는 문제를 막기 위해 열 정렬 기능 제거
+- 셀 편집 중 Tab과 Shift+Tab으로 값을 저장하고 다음·이전 셀로 이동
+
 ## 1.0.4
 
 ### English

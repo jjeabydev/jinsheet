@@ -1,5 +1,19 @@
 # Changelog / 변경 기록
 
+## 1.0.8 (2026-10-14)
+
+### English
+
+- Shift+Tab now moves to the previous cell without extending the selection.
+- Added a clear-search button beside Find, with Escape as a keyboard shortcut; search results clear immediately and focus returns to the search field.
+- Separated and labeled the cell value and search controls for easier identification.
+
+### 한국어
+
+- Shift+Tab은 선택 범위를 늘리지 않고 이전 셀만 선택
+- 찾기 옆에 지우기 버튼을 추가하고 Escape도 지원하며, 검색어·결과를 즉시 지우고 입력창에 포커스 유지
+- 셀 값 입력과 검색 컨트롤을 분리하고 각 영역에 이름 표시
+
 ## 1.0.7 (2026-10-14)
 
 ### English

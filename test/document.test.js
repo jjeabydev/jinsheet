@@ -490,8 +490,12 @@ test('Webview uses English by default and Korean for a Korean VS Code locale', (
 });
 
 test('검색은 버튼이나 Enter로 실행하고 셀 서식은 유지한 채 검색 결과를 표시한다', () => {
+  const html = renderHtml();
+  assert.ok(html.indexOf('id="search"') < html.indexOf('id="findButton"'), 'Find button should be placed to the right of the search input');
+  assert.match(html, /<label for="formula">Value<\/label>/);
+  assert.match(html, /<label for="search">Search<\/label>/);
   const style = { fill: '#f4cccc', color: '#123456', bold: true };
-  const { document, elements, messages, windowListeners } = runGridWebview(renderHtml(), { style });
+  const { document, elements, messages, windowListeners } = runGridWebview(html, { style });
   const input = elements.get('search'), onInput = input.listeners.get('input');
   input.value = '배';
   onInput();
@@ -519,8 +523,22 @@ test('검색은 버튼이나 Enter로 실행하고 셀 서식은 유지한 채 �
   assert.equal(messages.some(message => message.type === 'edit'), false, 'typing the next character must not edit the selected match');
   input.value = 'b';
   onInput();
+  assert.equal(elements.get('clearSearch').hidden, false, 'Clear should appear when the search field has a query');
   elements.get('findButton').listeners.get('click')();
   assert.equal(messages.filter(message => message.type === 'search').at(-1).query, 'b', 'Find button should run the current query');
+  const latestRequest = messages.filter(message => message.type === 'search').at(-1);
+  windowListeners.get('message')({ data: { type: 'search', requestId: latestRequest.requestId, query: 'b', total: 1, matches: [{ row: 0, column: 1 }] } });
+  elements.get('clearSearch').listeners.get('click')();
+  assert.equal(input.value, '');
+  assert.equal(elements.get('clearSearch').hidden, true);
+  assert.equal(elements.get('searchCount').textContent, '');
+  assert.equal(document.activeElement, input);
+  assert.equal(document.querySelector('[data-row="0"][data-column="1"]').classList.contains('search-match'), false);
+  input.value = 'b';
+  onInput();
+  input.listeners.get('keydown')({ key: 'Escape', preventDefault() {} });
+  assert.equal(input.value, '');
+  assert.equal(document.activeElement, input);
 });
 
 test('XLSX freeze pane metadata reaches the editor model, sparse ranges and saved package', () => {
@@ -781,6 +799,18 @@ test('현재 viewport 안의 키보드 이동은 범위 요청을 반복하지 �
   assert.equal(elements.get('address').textContent, 'B2');
   assert.equal(document.activeElement, cell);
   assert.equal(messages.filter(message => message.type === 'range').length, initialRangeRequests);
+});
+
+test('Shift+Tab은 범위를 확장하지 않고 이전 셀만 선택한다', () => {
+  const { document, documentListeners, elements } = runGridWebview(renderHtml());
+  let cell = document.querySelector('[data-row="0"][data-column="1"]');
+  cell.onclick();
+  documentListeners.get('keydown')({ target: cell, key: 'Tab', shiftKey: true, preventDefault() {} });
+  cell = document.querySelector('[data-row="0"][data-column="0"]');
+  assert.equal(elements.get('address').textContent, 'A1');
+  assert.equal(document.activeElement, cell);
+  assert.equal(cell.classList.contains('in-range'), true);
+  assert.equal(document.querySelector('[data-row="0"][data-column="1"]').classList.contains('in-range'), false);
 });
 
 test('화살표 이동은 셀을 화면 안에 유지하고 불필요하게 행 맨 위로 점프하지 않는다', () => {

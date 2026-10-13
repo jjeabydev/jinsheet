@@ -16,7 +16,7 @@ JinSheet lets you edit CSV, TSV, and supported Excel workbooks, and preview Offi
 
 ## Cell editing and search
 
-Enter a search term and press **Find** or **Enter** to search the current sheet. Matching cells are marked with an outline that preserves their fill and text formatting. Press **Enter** again to move to the next match. Typing alone does not run a search.
+Enter a search term and press **Find** or **Enter** to search the current sheet. Matching cells are marked with an outline that preserves their fill and text formatting. Press **Enter** again to move to the next match. Use **Clear** or **Escape** to remove the query and result marks. Typing alone does not run a search.
 
 While editing a cell, **Tab** saves the value and moves to the next cell, and **Shift+Tab** saves it and moves to the previous cell. **Enter** saves and moves down; **Escape** cancels the edit. Sorting is not currently supported.
 
@@ -40,7 +40,7 @@ JinSheet는 VS Code에서 CSV·TSV와 지원되는 Excel 통합 문서를 편집
 - PDF 페이지, Word 문서, PowerPoint 슬라이드 미리보기
 - 페이지·슬라이드 확대/축소와 뷰어 너비·높이에 맞춤
 
-검색어를 입력하고 **찾기** 버튼이나 **Enter**를 눌러 현재 시트에서 찾습니다. 일치하는 셀은 채우기 색과 글꼴을 바꾸지 않고 테두리로 표시합니다. **Enter**를 다시 누르면 다음 결과로 이동합니다. 입력만으로는 검색하지 않습니다.
+검색어를 입력하고 입력창 오른쪽의 **찾기** 버튼이나 **Enter**를 눌러 현재 시트에서 찾습니다. 일치하는 셀은 채우기 색과 글꼴을 바꾸지 않고 테두리로 표시합니다. **Enter**를 다시 누르면 다음 결과로 이동합니다. **지우기** 버튼이나 **Escape**로 검색어와 결과 표시를 지울 수 있습니다. 입력만으로는 검색하지 않습니다.
 
 셀 편집 중 **Tab**을 누르면 값을 저장하고 다음 셀로, **Shift+Tab**을 누르면 이전 셀로 이동합니다. **Enter**는 저장 후 아래 셀로 이동하고 **Escape**는 편집을 취소합니다. 셀을 드래그해 범위를 선택할 때 그리드 가장자리를 지나면 화면이 해당 방향으로 스크롤됩니다. 정렬은 현재 지원하지 않습니다.
 

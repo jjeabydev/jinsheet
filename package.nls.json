@@ -1,4 +1,4 @@
 {
   "displayName": "JinSheet — Excel, CSV & Office Viewer",
-  "description": "Edit CSV, TSV, and supported Excel workbooks in VS Code. Search cells, paste ranges, and navigate edits with Tab and Enter. Preview Office and PDF files locally."
+  "description": "Edit CSV, TSV, and supported Excel workbooks in VS Code. Search cells on demand, navigate with arrow keys, and select ranges by dragging. Preview Office and PDF files locally."
 }

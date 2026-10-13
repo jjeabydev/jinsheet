@@ -62,6 +62,7 @@ class FakeElement {
   addEventListener(name, callback) { this.listeners.set(name, callback); }
   closest(selector) { let current = this; while (current) { if (selector === '#grid' && current.id === 'grid') return current; current = current.parentElement; } return null; }
   focus() { if (activeDocument) activeDocument.activeElement = this; }
+  getBoundingClientRect() { const { left = 0, top = 0, width = this.clientWidth || 0, height = this.clientHeight || 0 } = this.rect || {}; return { left, top, width, height, right: left + width, bottom: top + height }; }
   select() {}
   setSelectionRange() {}
 }
@@ -85,11 +86,11 @@ function runGridWebview(html, { rowCount = 2, columnCount = 2, style = null, kin
   activeDocument = document;
   document.activeElement = document.body;
   const grid = get('grid'), canvas = get('canvas');
-  grid.clientHeight = 300; grid.clientWidth = 500; grid.scrollTop = 0; grid.scrollLeft = 0; canvas.parentElement = grid;
+  grid.clientHeight = 300; grid.clientWidth = 500; grid.scrollTop = 0; grid.scrollLeft = 0; grid.scrollHeight = 30 + rowCount * 26; grid.scrollWidth = 52 + columnCount * 144; grid.rect = { left: 0, top: 0, width: 500, height: 300 }; canvas.parentElement = grid;
   const vscode = { postMessage: message => messages.push(message) };
   const window = { addEventListener: (name, callback) => windowListeners.set(name, callback) };
   const script = [...html.matchAll(/<script nonce="[^"]+">([\s\S]*?)<\/script>/g)].at(-1)[1];
-  new vm.Script(script).runInNewContext({ acquireVsCodeApi: () => vscode, document, window, setTimeout, clearTimeout });
+  new vm.Script(script).runInNewContext({ acquireVsCodeApi: () => vscode, document, window, setTimeout, clearTimeout, setInterval, clearInterval });
   const dispatch = data => windowListeners.get('message')({ data });
   const respondToRange = () => {
     const request = messages.filter(message => message.type === 'range').at(-1);
@@ -488,13 +489,38 @@ test('Webview uses English by default and Korean for a Korean VS Code locale', (
   assert.equal(viewModel(unsupported, 0, 'ko').reason, formulaReason);
 });
 
-test('Webview search input sends only the latest query after a short pause', async () => {
-  const { elements, messages } = runGridWebview(renderHtml());
+test('검색은 버튼이나 Enter로 실행하고 셀 서식은 유지한 채 검색 결과를 표시한다', () => {
+  const style = { fill: '#f4cccc', color: '#123456', bold: true };
+  const { document, elements, messages, windowListeners } = runGridWebview(renderHtml(), { style });
   const input = elements.get('search'), onInput = input.listeners.get('input');
-  onInput({ target: { value: 'alpha' } });
-  onInput({ target: { value: 'alpha beta' } });
-  await new Promise(resolve => setTimeout(resolve, 140));
-  assert.deepEqual(messages.filter(message => message.type === 'search').map(message => message.query), ['alpha beta']);
+  input.value = '배';
+  onInput();
+  input.value = '배추';
+  onInput();
+  assert.equal(messages.some(message => message.type === 'search'), false, 'typing alone must not move selection or start a search');
+  input.focus();
+  input.listeners.get('keydown')({ key: 'Enter', preventDefault() {} });
+  const request = messages.find(message => message.type === 'search');
+  assert.equal(request.query, '배추');
+  windowListeners.get('message')({ data: { type: 'search', requestId: request.requestId, query: request.query, total: 2, matches: [{ row: 1, column: 1 }, { row: 0, column: 1 }] } });
+  const first = document.querySelector('[data-row="1"][data-column="1"]');
+  assert.equal(document.activeElement, input, 'search results must not transfer keyboard input to a cell');
+  assert.equal(first.classList.contains('search-match'), true);
+  assert.equal(first.classList.contains('search-current'), true);
+  assert.equal(first.style.backgroundColor, '#f4cccc');
+  assert.equal(first.style.color, '#123456');
+  assert.equal(first.style.fontWeight, '700');
+  input.listeners.get('keydown')({ key: 'Enter', preventDefault() {} });
+  assert.equal(document.activeElement, input);
+  assert.equal(document.querySelector('[data-row="0"][data-column="1"]').classList.contains('search-current'), true);
+  assert.equal(first.classList.contains('search-current'), false);
+  input.value += 'x';
+  onInput();
+  assert.equal(messages.some(message => message.type === 'edit'), false, 'typing the next character must not edit the selected match');
+  input.value = 'b';
+  onInput();
+  elements.get('findButton').listeners.get('click')();
+  assert.equal(messages.filter(message => message.type === 'search').at(-1).query, 'b', 'Find button should run the current query');
 });
 
 test('XLSX freeze pane metadata reaches the editor model, sparse ranges and saved package', () => {
@@ -666,7 +692,7 @@ test('Webview 드래그 범위 선택·복사와 수식 입력줄 Enter가 편�
   const { document, documentListeners, elements, messages, windowListeners, respondToRange } = runGridWebview(renderHtml());
   let first = document.querySelector('[data-row="0"][data-column="0"]');
   let last = document.querySelector('[data-row="1"][data-column="1"]');
-  first.onmousedown({ shiftKey: false });
+  first.onmousedown({ shiftKey: false, clientX: 80, clientY: 60, preventDefault() {} });
   last.onmouseenter();
   documentListeners.get('mouseup')();
   last.onclick();
@@ -757,7 +783,7 @@ test('현재 viewport 안의 키보드 이동은 범위 요청을 반복하지 �
   assert.equal(messages.filter(message => message.type === 'range').length, initialRangeRequests);
 });
 
-test('viewport를 넘는 키보드 이동도 새 범위를 그린 뒤 선택 셀 포커스를 복구한다', () => {
+test('화살표 이동은 셀을 화면 안에 유지하고 불필요하게 행 맨 위로 점프하지 않는다', () => {
   const { document, documentListeners, elements, messages, respondToRange } = runGridWebview(renderHtml(), { rowCount: 100 });
   let cell = document.querySelector('[data-row="0"][data-column="0"]');
   cell.onclick();
@@ -772,7 +798,19 @@ test('viewport를 넘는 키보드 이동도 새 범위를 그린 뒤 선택 셀
     assert.equal(document.activeElement, cell);
   }
   assert.equal(elements.get('address').textContent, 'A15');
-  assert.equal(messages.filter(message => message.type === 'range').length, initialRangeRequests + 1);
+  assert.equal(elements.get('grid').scrollTop, 120);
+  assert.equal(messages.filter(message => message.type === 'range').length, initialRangeRequests, 'already-rendered rows should not force another range request');
+});
+
+test('셀 드래그가 그리드 가장자리를 넘으면 스크롤과 선택 범위가 함께 확장된다', () => {
+  const { document, documentListeners, elements } = runGridWebview(renderHtml(), { rowCount: 80, columnCount: 12 });
+  const first = document.querySelector('[data-row="0"][data-column="0"]');
+  first.onmousedown({ shiftKey: false, clientX: 80, clientY: 60, preventDefault() {} });
+  documentListeners.get('mousemove')({ clientX: 510, clientY: 310 });
+  assert.ok(elements.get('grid').scrollTop > 0);
+  assert.ok(elements.get('grid').scrollLeft > 0);
+  assert.notEqual(elements.get('address').textContent, 'A1');
+  documentListeners.get('mouseup')();
 });
 
 test('Webview 행·열 삽입·삭제 버튼이 선택한 위치의 구조 변경을 요청한다', () => {

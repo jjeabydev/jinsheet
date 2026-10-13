@@ -1,5 +1,17 @@
 # Changelog / 변경 기록
 
+## 1.0.7 (2026-10-14)
+
+### English
+
+- Search runs only when Find or Enter is pressed, marks results without changing cell formatting, and advances through matches with Enter.
+- Arrow-key navigation keeps the selected cell visible without unnecessary jumps; dragging past the grid edge scrolls and extends the selection.
+
+### 한국어
+
+- 찾기 버튼이나 Enter를 눌렀을 때만 검색하고, 셀 서식을 유지한 채 결과를 표시하며 Enter로 다음 결과로 이동
+- 방향키 이동 시 불필요한 화면 점프를 막고, 그리드 바깥으로 드래그하면 화면 이동과 선택 범위 확장
+
 ## 1.0.6 (2026-10-14)
 
 ### English

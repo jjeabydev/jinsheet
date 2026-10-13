@@ -1,5 +1,17 @@
 # Changelog / 변경 기록
 
+## 1.0.6 (2026-10-14)
+
+### English
+
+- Updated the Marketplace and README descriptions to match current editing and preview features.
+- Replaced the outdated screenshot that showed the removed sorting control.
+
+### 한국어
+
+- 현재 셀 편집·미리보기 기능에 맞게 마켓플레이스와 README 설명 갱신
+- 제거된 정렬 버튼이 보이던 이전 스크린샷을 최신 화면으로 교체
+
 ## 1.0.5 (2026-10-14)
 
 ### English

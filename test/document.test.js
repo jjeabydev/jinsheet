@@ -706,6 +706,23 @@ test('셀 직접 입력에서 연속 키와 한글 IME 이벤트가 같은 편�
   assert.deepEqual(JSON.parse(JSON.stringify(korean.messages.at(-1))), { type: 'edit', row: 0, column: 0, value: '월간매출', sheetIndex: 0 });
 });
 
+test('더블클릭 셀 편집 입력란은 마우스 드래그 기본 텍스트 선택을 유지한다', () => {
+  const { document, documentListeners } = runGridWebview(renderHtml());
+  const cell = document.querySelector('[data-row="0"][data-column="0"]');
+  cell.onclick();
+  cell.ondblclick();
+  const input = cell.children[0];
+  assert.equal(input.className, 'cell-editor');
+
+  let prevented = false;
+  cell.onmousedown({ target: input, clientX: 10, clientY: 10, preventDefault() { prevented = true; } });
+  documentListeners.get('mousemove')({ clientX: 60, clientY: 10 });
+  cell.onclick({ target: input });
+
+  assert.equal(prevented, false, 'text selection mousedown must not be cancelled');
+  assert.equal(document.activeElement, input, 'clicking selected input text must not move focus back to the grid');
+});
+
 test('Webview 드래그 범위 선택·복사와 수식 입력줄 Enter가 편집 메시지를 보낸다', () => {
   const { document, documentListeners, elements, messages, windowListeners, respondToRange } = runGridWebview(renderHtml());
   let first = document.querySelector('[data-row="0"][data-column="0"]');

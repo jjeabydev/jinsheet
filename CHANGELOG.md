@@ -1,5 +1,15 @@
 # Changelog / 변경 기록
 
+## 1.0.9 (2026-10-14)
+
+### English
+
+- Fixed mouse dragging in a cell editor so text can be selected without starting a grid selection or moving focus away from the input.
+
+### 한국어
+
+- 셀 편집 입력란에서 마우스로 텍스트를 드래그해 선택할 수 있도록 수정하고, 그리드 범위 선택과 포커스 이동이 끼어들지 않게 개선
+
 ## 1.0.8 (2026-10-14)
 
 ### English

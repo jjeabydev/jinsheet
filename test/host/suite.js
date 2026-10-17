@@ -3970,7 +3970,12 @@ suite('JinSheet Extension Host', () => {
     const file = path.join(directory, 'webview-ui.csv');
     await fs.writeFile(file, 'name,value\nalpha,1\n', 'utf8');
     let devtools;
+    const originalClipboardRead = JinSheetProvider.prototype.readClipboardText;
+    const originalClipboardWrite = JinSheetProvider.prototype.writeClipboardText;
+    let testClipboard = '';
     try {
+      JinSheetProvider.prototype.readClipboardText = function(reader) { return originalClipboardRead.call(this, reader || (async () => testClipboard)); };
+      JinSheetProvider.prototype.writeClipboardText = function(text) { return originalClipboardWrite.call(this, text, async value => { testClipboard = value; }); };
       await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
       await new Promise(resolve => setTimeout(resolve, 400));
       devtools = await waitForSpreadsheetWebview();
@@ -4018,9 +4023,7 @@ suite('JinSheet Extension Host', () => {
       await dispatchMouse({ type: 'mouseReleased', ...sourcePoint, button: 'left', buttons: 0, clickCount: 1 });
       await devtools.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'c', code: 'KeyC', windowsVirtualKeyCode: 67, modifiers: 2 });
       await devtools.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'c', code: 'KeyC', windowsVirtualKeyCode: 67, modifiers: 2 });
-      const clipboardDeadline = Date.now() + 3000;
-      while (Date.now() < clipboardDeadline && await vscode.env.clipboard.readText() !== 'name') await new Promise(resolve => setTimeout(resolve, 50));
-      assert.equal(await vscode.env.clipboard.readText(), 'name', 'Ctrl+C writes the selected cell to the VS Code system clipboard');
+      assert.equal(testClipboard, 'name', 'Ctrl+C writes the selected cell to the clipboard');
 
       const targetPoint = await evaluate(`(() => { const r = document.querySelector('#cell-1-1').getBoundingClientRect(); return {x:r.left + r.width / 2, y:r.top + r.height / 2}; })()`);
       await dispatchMouse({ type: 'mousePressed', ...targetPoint, button: 'left', buttons: 1, clickCount: 1 });
@@ -4047,7 +4050,7 @@ suite('JinSheet Extension Host', () => {
       const externalTarget = await evaluate(`(() => { const r = document.querySelector('#cell-1-0').getBoundingClientRect(); return {x:r.left + r.width / 2, y:r.top + r.height / 2}; })()`);
       await dispatchMouse({ type: 'mousePressed', ...externalTarget, button: 'left', buttons: 1, clickCount: 1 });
       await dispatchMouse({ type: 'mouseReleased', ...externalTarget, button: 'left', buttons: 0, clickCount: 1 });
-      await vscode.env.clipboard.writeText('external');
+      testClipboard = 'external';
       await devtools.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'v', code: 'KeyV', windowsVirtualKeyCode: 86, modifiers: 2 });
       await devtools.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'v', code: 'KeyV', windowsVirtualKeyCode: 86, modifiers: 2 });
       await waitFor('document.querySelector("#cell-1-0")?.textContent === "external"', 'Ctrl+V pastes text from an external clipboard source');
@@ -4109,6 +4112,8 @@ suite('JinSheet Extension Host', () => {
       await waitFor(`document.querySelector('#address').value !== '${dragUp.address}'`, 'upward auto-scroll updates the active selection');
       await dispatchMouse({ type: 'mouseReleased', x: dragUp.x, y: dragUp.edgeY, button: 'left', buttons: 0, clickCount: 1 });
     } finally {
+      JinSheetProvider.prototype.readClipboardText = originalClipboardRead;
+      JinSheetProvider.prototype.writeClipboardText = originalClipboardWrite;
       devtools?.close();
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
       await fs.rm(directory, { recursive: true, force: true });

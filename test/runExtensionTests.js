@@ -20,18 +20,20 @@ async function main() {
         path.join(directory, 'resources', 'app', 'out', 'nls.messages.json'),
         path.join(directory, 'resources', 'app', 'out', 'vs', 'nls.messages.json'),
         path.join(directory, 'Contents', 'Resources', 'app', 'out', 'nls.messages.json'),
-        path.join(directory, 'Contents', 'Resources', 'app', 'out', 'vs', 'nls.messages.json'),
-        path.join(directory, 'resources', 'app', 'out', 'vs', 'nls.messages.json')
+        path.join(directory, 'Contents', 'Resources', 'app', 'out', 'vs', 'nls.messages.json')
       );
-      if (process.platform === 'win32') {
-        resourceCandidates.push(
-          path.join(directory, 'resources', 'app', 'out', 'vs', 'nls.messages.json'),
-          path.join(directory, 'resources', 'app', 'out', 'nls.messages.json')
-        );
-      }
       const parent = path.dirname(directory);
       if (parent === directory) break;
       directory = parent;
+    }
+    if (process.platform === 'win32') {
+      const root = path.dirname(path.dirname(vscodeExecutablePath));
+      let versions;
+      try { versions = fs.readdirSync(root, { withFileTypes: true }); } catch { versions = []; }
+      for (const entry of versions) if (entry.isDirectory()) {
+        const app = path.join(root, entry.name, 'resources', 'app', 'out');
+        resourceCandidates.push(path.join(app, 'nls.messages.json'), path.join(app, 'vs', 'nls.messages.json'));
+      }
     }
     const defaultMessagesFile = resourceCandidates.find(candidate => fs.existsSync(candidate));
     if (!defaultMessagesFile) throw new Error('Could not locate the VS Code default NLS messages for the requested host locale.');
@@ -57,7 +59,7 @@ async function main() {
       osLocale: Intl.DateTimeFormat().resolvedOptions().locale || 'en',
       resolvedLanguage: 'ko',
       defaultMessagesFile,
-      languagePack: { messagesFile: path.join(languagePackDirectory, translationsConfigFile) }
+      languagePack: { translationsConfigFile: path.join(languagePackDirectory, translationsConfigFile) }
     };
     process.env.VSCODE_NLS_CONFIG = JSON.stringify(nlsConfig);
     process.env.VSCODE_PORTABLE = userDataDir;

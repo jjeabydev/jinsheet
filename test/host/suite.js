@@ -257,6 +257,9 @@ suite('JinSheet Extension Host', () => {
       assert.deepEqual(opened, ['https://example.test/source']);
       await evaluate('document.querySelector("#cell-0-1").dispatchEvent(new MouseEvent("click",{bubbles:true,ctrlKey:true}))');
       await wait('document.querySelector("#address")?.value==="A2"');
+      devtools.close();
+      devtools = await waitForSpreadsheetWebview(15000, 'Unsafe');
+      await wait('Boolean(document.querySelector("#cell-0-2"))');
       await evaluate('document.querySelector("#cell-0-2").dispatchEvent(new MouseEvent("click",{bubbles:true,ctrlKey:true}))');
       await wait('/hyperlink|하이퍼링크/i.test(document.querySelector("#notice")?.textContent||"")');
       assert.deepEqual(opened, ['https://example.test/source'], 'unsafe schemes are rejected before calling VS Code');

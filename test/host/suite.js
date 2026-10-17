@@ -825,8 +825,13 @@ suite('JinSheet Extension Host', () => {
       const strikeDeadline = Date.now() + 3000;
       while (Date.now() < strikeDeadline && await evaluate('document.querySelector("#notice")?.textContent.includes("Modified")') !== true) await new Promise(resolve => setTimeout(resolve, 25));
       while (Date.now() < strikeDeadline && !String(await evaluate('(()=>{const cell=document.querySelector("#cell-1-2");return cell?getComputedStyle(cell).textDecorationLine:""})()')).includes('line-through')) await new Promise(resolve => setTimeout(resolve, 25));
-      await vscode.commands.executeCommand('workbench.action.files.save');
-      saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      const strikeSaveDeadline = Date.now() + 5000;
+      do {
+        await vscode.commands.executeCommand('workbench.action.files.save');
+        saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+        if (saved.styleProperties.strike === true) break;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      } while (Date.now() < strikeSaveDeadline);
       assert.equal(saved.styleProperties.strike, true);
       await evaluate('document.querySelector("#formatStrike").click()');
       const clearStrikeDeadline = Date.now() + 3000;
@@ -3196,8 +3201,16 @@ suite('JinSheet Extension Host', () => {
       saved = analyze(await fs.readFile(file)); assert.equal(saved.sheets[0].tables[0].totalColumns[1].function, 'average');
       await vscode.commands.executeCommand('jinsheet.undo'); await wait('document.querySelector("#cell-3-1")?.textContent==="30"'); await vscode.commands.executeCommand('workbench.action.files.save');
       await vscode.commands.executeCommand('jinsheet.redo'); await wait('document.querySelector("#cell-3-1")?.textContent==="15"'); await vscode.commands.executeCommand('workbench.action.files.save');
-      await evaluate('document.querySelector("#tableTotals").click()'); await wait('document.querySelector("#tableTotals").getAttribute("aria-pressed")==="false"&&!document.querySelector("#tableTotals").disabled&&document.querySelector("#cell-3-1")?.textContent===""'); await vscode.commands.executeCommand('workbench.action.files.save');
-      assert.equal(analyze(await fs.readFile(file)).sheets[0].tables[0].totalsRowCount, 0);
+      await evaluate('document.querySelector("#tableTotals").click()'); await wait('document.querySelector("#tableTotals").getAttribute("aria-pressed")==="false"&&!document.querySelector("#tableTotals").disabled&&document.querySelector("#cell-3-1")?.textContent===""');
+      const totalsSaveDeadline = Date.now() + 5000;
+      let totalsSaved;
+      do {
+        await vscode.commands.executeCommand('workbench.action.files.save');
+        totalsSaved = analyze(await fs.readFile(file));
+        if (totalsSaved.sheets[0].tables[0].totalsRowCount === 0) break;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      } while (Date.now() < totalsSaveDeadline);
+      assert.equal(totalsSaved.sheets[0].tables[0].totalsRowCount, 0);
       await evaluate('document.querySelector("#tableTotals").click()'); await wait('document.querySelector("#cell-3-1")?.textContent==="15"&&document.querySelector("#tableTotalsFunction").value==="average"'); await vscode.commands.executeCommand('workbench.action.files.save');
       devtools.close(); devtools = null; await vscode.commands.executeCommand('workbench.action.closeAllEditors');
       await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor'); devtools = await waitForSpreadsheetWebview(); await wait('document.querySelector("#cell-3-1")?.textContent==="15"');

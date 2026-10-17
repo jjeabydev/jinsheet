@@ -1,5 +1,8 @@
 # Changelog / 변경 기록
 
+## 1.1.1 / 2026-10-18
+- Align `SUMIF` and `AVERAGEIF` sum ranges from their top-left cell when the sum range is a different size from the criteria range, including bounded and full-row/column references.
+
 ## 1.1.0 / 2026-10-18
 - Edit each icon in an XLSX custom icon-set mapping using supported standard icons; preserve thresholds and display settings, and support save, undo, and redo.
 - Display and filter native XLSX custom icon mappings that reference supported standard icon sets; preserve mappings on cell edits and allow mapping, threshold, visibility, and order edits.

@@ -1,5 +1,12 @@
 # Changelog / 변경 기록
 
+## Unreleased
+
+## 1.2.0 / 2026-10-18
+- Open and edit LibreOffice-resaved workbooks that use standard on/off boolean spellings, omit the optional table-parts count, and emit neutral conditional-format defaults; preserve table, validation, conditional-format, merge, formula, chart, and frozen-pane features through save and reopen.
+- Navigate to multi-digit row ranges and sort explicitly selected CSV ranges up to the 20,000-cell edit limit; rebuild CSV state once per bulk edit so sorting and other range changes do not repeatedly reconstruct the full sheet.
+- Apply large XLSX cell edits by assembling sorted XML patches in one pass, keeping full 100,000-cell sorts practical to save and undo.
+
 ## 1.1.1 / 2026-10-18
 - Align `SUMIF` and `AVERAGEIF` sum ranges from their top-left cell when the sum range is a different size from the criteria range, including bounded and full-row/column references.
 

@@ -199,6 +199,54 @@ suite('JinSheet Extension Host', () => {
     }
   });
 
+  test('Chromium edits and reopens a LibreOffice workbook with mixed table features', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-libreoffice-mixed-host-'));
+    const file = path.join(directory, 'mixed-features.xlsx');
+    await fs.copyFile(path.join(__dirname, '..', 'fixtures', 'LibreOffice-Mixed-Features-Roundtrip.xlsx'), file);
+    let devtools;
+    try {
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      const evaluate = async expression => {
+        const response = await devtools.send('Runtime.evaluate', { expression, contextId: devtools.contextId, returnByValue: true, awaitPromise: true });
+        if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+        return response.result?.value;
+      };
+      const waitFor = async (expression, message) => {
+        const deadline = Date.now() + 8000;
+        while (Date.now() < deadline && !await evaluate(expression)) await new Promise(resolve => setTimeout(resolve, 25));
+        if (!await evaluate(expression)) assert.fail(message + ': ' + JSON.stringify(await evaluate('({cell:document.querySelector("#cell-1-2")?.textContent,rendered:[...document.querySelectorAll(".cell")].slice(0,12).map(cell=>[cell.id,cell.textContent]),notice:document.querySelector("#notice")?.textContent,readOnly:document.querySelector("#grid")?.getAttribute("aria-readonly")})')));
+      };
+      await waitFor('document.querySelector("#cell-1-2")?.textContent === "1500"', 'LibreOffice table data renders in the editable grid');
+      const point = await evaluate('(()=>{const r=document.querySelector("#cell-1-2").getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()');
+      await devtools.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x + devtools.frameOffset.x, y: point.y + devtools.frameOffset.y, button: 'left', buttons: 1, clickCount: 1 });
+      await devtools.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x + devtools.frameOffset.x, y: point.y + devtools.frameOffset.y, button: 'left', buttons: 0, clickCount: 1 });
+      await evaluate(`(()=>{const input=document.querySelector('#formula');input.value='1600';input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))})()`);
+      await waitFor('document.querySelector("#cell-1-2")?.textContent === "1600"', 'the table cell edit is applied');
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      let saved = analyze(await fs.readFile(file));
+      assert.equal(saved.sheets[0].cells.get('C2').value, '1600');
+      assert.equal(saved.sheets[0].tables[0].name, 'Inventory');
+      assert.equal(saved.sheets[0].dataValidations.length, 1);
+      assert.equal(saved.sheets[0].conditionalFormats.length, 1);
+      assert.equal(saved.sheets[0].charts.length, 1);
+
+      await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools.close();
+      devtools = await waitForSpreadsheetWebview();
+      await waitFor('document.querySelector("#cell-1-2")?.textContent === "1600"', 'the saved LibreOffice workbook reopens with the edited value');
+      saved = analyze(await fs.readFile(file));
+      assert.equal(saved.writable, true, saved.readOnlyReason);
+      assert.equal(saved.sheets[0].charts.length, 1);
+      assert.deepEqual(saved.sheets[0].freezePane, { rows: 1, columns: 1 });
+    } finally {
+      devtools?.close();
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test('activate command and open CSV in the registered Custom Editor', async () => {
     const extension = vscode.extensions.getExtension('jjeabydev.jinsheet');
     assert.ok(extension, 'JinSheet extension is registered');
@@ -3859,6 +3907,59 @@ suite('JinSheet Extension Host', () => {
     }
   });
 
+  test('Chromium Webview sorts and saves a manually selected 20,000-cell CSV range', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-large-sort-host-'));
+    const file = path.join(directory, 'large-sort.csv');
+    const rowCount = 2000, columnCount = 10;
+    const original = Array.from({ length: rowCount }, (_, row) => Array.from({ length: columnCount }, (_, column) => column === 0 ? String(rowCount - row) : `row-${row}-column-${column}`).join(',')).join('\n') + '\n';
+    await fs.writeFile(file, original, 'utf8');
+    let devtools;
+    try {
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      const evaluate = async expression => {
+        const response = await devtools.send('Runtime.evaluate', { expression, contextId: devtools.contextId, returnByValue: true, awaitPromise: true });
+        if (response.exceptionDetails) throw new Error(response.result?.exceptionDetails?.exception?.description || response.exceptionDetails.text);
+        return response.result?.value;
+      };
+      const waitFor = async (expression, message) => {
+        const deadline = Date.now() + 10000;
+        while (Date.now() < deadline && !await evaluate(expression)) await new Promise(resolve => setTimeout(resolve, 40));
+        const result = await evaluate(expression);
+        if (!result) assert.fail(message + ': ' + JSON.stringify(await evaluate('({notice:document.querySelector("#notice")?.textContent,panelHidden:document.querySelector("#sortPanel")?.hidden,selectionCount:document.querySelectorAll(".cell.in-range").length,address:document.querySelector("#address")?.value,addressInvalid:document.querySelector("#address")?.getAttribute("aria-invalid"),goToStatus:document.querySelector("#goToStatus")?.textContent,first:document.querySelector("#cell-0-0")?.textContent})')));
+      };
+      await waitFor('Boolean(document.querySelector("#cell-1-0"))', 'the CSV grid is ready');
+      await evaluate(`(() => {const input=document.getElementById('address');input.focus();input.value='A1:J2000';return true})()`);
+      await devtools.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+      await devtools.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+      await waitFor('document.querySelector("#address")?.value === "A1" && document.querySelectorAll(".cell.in-range").length > 1', 'the name box selects the full 20,000-cell range');
+      await evaluate('document.getElementById("customSort").click()');
+      await waitFor('document.getElementById("sortPanel")?.hidden === false && document.querySelectorAll("#sortLevels .sort-level").length === 1', 'the custom sort dialog opens for the selected range');
+      await evaluate(`(() => {
+        const level=document.querySelector('#sortLevels .sort-level');
+        level.querySelectorAll('select')[0].value='0';
+        level.querySelectorAll('select')[1].value='ascending';
+        document.getElementById('sortDialogHasHeader').checked=false;
+        document.getElementById('sortDialogExpandSelection').checked=false;
+        document.getElementById('sortApply').click();
+        return true;
+      })()`);
+      await waitFor('document.querySelector("#cell-0-0")?.textContent === "1"', 'the selected 20,000-cell range is sorted in the Webview');
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      const sorted = (await fs.readFile(file, 'utf8')).split('\n');
+      assert.equal(sorted[0], ['1', ...Array.from({ length: columnCount - 1 }, (_, column) => `row-${rowCount - 1}-column-${column + 1}`)].join(','), 'the first sorted record keeps all adjacent values together');
+      assert.equal(sorted[rowCount - 1], [String(rowCount), ...Array.from({ length: columnCount - 1 }, (_, column) => `row-0-column-${column + 1}`)].join(','), 'the last sorted record is persisted');
+      await vscode.commands.executeCommand('jinsheet.undo');
+      await waitFor('document.querySelector("#cell-0-0")?.textContent === "2000"', 'one undo restores the original first record');
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      assert.equal(await fs.readFile(file, 'utf8'), original, 'undo restores the complete original CSV');
+    } finally {
+      devtools?.close();
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test('Chromium Webview replaces one matching cell and the current sheet with undo and redo', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-replace-ui-'));
     const file = path.join(directory, 'replace.csv'), original = 'name,note\nalpha alpha,alphabet\nAlpha,plain\n';
@@ -4000,6 +4101,81 @@ suite('JinSheet Extension Host', () => {
       assert.equal(savedText.endsWith('edited-value'), true, 'the edited last cell reaches the CSV file');
       assert.equal(savedText.includes('needle-token'), false, 'the original last-cell value is replaced');
       console.log('[JinSheet CSV 100k]', JSON.stringify({ sourceBytes, rows: 10000, columns: 10, cells: 100000, openedMs: Math.round(openedMs), searchMs: Math.round(searchMs), editToRenderMs: Math.round(editToRenderMs), saveToDiskMs: Math.round(saveToDiskMs), extensionHostHeapMiB: Number((memoryAfterOpen.heapUsed / 1048576).toFixed(1)), extensionHostExternalMiB: Number((memoryAfterOpen.external / 1048576).toFixed(1)), extensionHostArrayBuffersMiB: Number((memoryAfterOpen.arrayBuffers / 1048576).toFixed(1)), extensionHostRssMiB: Number((memoryAfterOpen.rss / 1048576).toFixed(1)), chromiumRendererJsHeapMiB: rendererJsHeapBytes === null ? null : Number((rendererJsHeapBytes / 1048576).toFixed(1)) }));
+    } finally {
+      devtools?.close();
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('Chromium Webview sorts, saves and undoes a 100,000-cell XLSX range', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-large-xlsx-sort-host-'));
+    const file = path.join(directory, 'large-sort.xlsx');
+    const rowCount = 20000, columnCount = 5;
+    const base = analyze(await fs.readFile(path.join(__dirname, '..', 'fixtures', 'JinSheet-Styled-Sample.xlsx')));
+    const workbookFiles = { ...base.files };
+    const columnName = column => String.fromCharCode(64 + column);
+    const rows = [];
+    for (let row = 1; row <= rowCount; row++) {
+      const cells = [`<c r="A${row}"><v>${rowCount - row + 1}</v></c>`];
+      for (let column = 2; column <= columnCount; column++) {
+        cells.push(`<c r="${columnName(column)}${row}" t="inlineStr"><is><t>row-${row}-column-${column}</t></is></c>`);
+      }
+      rows.push(`<row r="${row}">${cells.join('')}</row>`);
+    }
+    workbookFiles[base.sheets[0].path] = new TextEncoder().encode(`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:E${rowCount}"/><sheetData>${rows.join('')}</sheetData></worksheet>`);
+    await fs.writeFile(file, zipSync(workbookFiles, { level: 0 }));
+    let devtools;
+    try {
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview(30000, '20000');
+      const evaluate = async expression => {
+        const response = await devtools.send('Runtime.evaluate', { expression, contextId: devtools.contextId, returnByValue: true, awaitPromise: true });
+        if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+        return response.result?.value;
+      };
+      const waitFor = async (expression, message, timeoutMs = 30000) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          if (await evaluate(expression)) return;
+          await new Promise(resolve => setTimeout(resolve, 40));
+        }
+        assert.fail(message + ': ' + JSON.stringify(await evaluate('({notice:document.querySelector("#notice")?.textContent,address:document.querySelector("#address")?.value,goToStatus:document.querySelector("#goToStatus")?.textContent,sortPanelHidden:document.querySelector("#sortPanel")?.hidden,firstCell:document.querySelector("#cell-0-0")?.textContent})')));
+      };
+      await waitFor('document.querySelector("#cell-0-0")?.textContent === "20000"', 'the 100,000-cell XLSX grid renders its original first value');
+      await evaluate(`(()=>{const input=document.querySelector('#address');input.focus();input.value='A1:E20000'})()`);
+      await devtools.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+      await devtools.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+      await waitFor('document.querySelector("#address")?.value === "A1" && document.querySelectorAll(".cell.in-range").length > 1', 'the name box selects all 100,000 cells');
+      await evaluate('document.querySelector("#customSort").click()');
+      await waitFor('document.querySelector("#sortPanel")?.hidden === false && document.querySelectorAll("#sortLevels .sort-level").length === 1', 'the custom sort dialog opens for the full XLSX range');
+      await evaluate(`(()=>{const level=document.querySelector('#sortLevels .sort-level');level.querySelectorAll('select')[0].value='0';level.querySelectorAll('select')[1].value='ascending';document.querySelector('#sortDialogHasHeader').checked=false;document.querySelector('#sortDialogExpandSelection').checked=false;document.querySelector('#sortApply').click()})()`);
+      const sortStarted = performance.now();
+      await waitFor('document.querySelector("#cell-0-0")?.textContent === "1"', 'the complete XLSX range sorts in the Webview');
+      const sortToRenderMs = performance.now() - sortStarted;
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      let saved = analyze(await fs.readFile(file));
+      assert.equal(saved.writable, true, saved.readOnlyReason);
+      assert.equal(saved.sheets[0].cells.size, 100000);
+      assert.equal(saved.sheets[0].cells.get('A1').value, '1');
+      assert.equal(saved.sheets[0].cells.get('B1').value, 'row-20000-column-2');
+      assert.equal(saved.sheets[0].cells.get('E1').value, 'row-20000-column-5');
+      assert.equal(saved.sheets[0].cells.get('A20000').value, '20000');
+
+      await vscode.commands.executeCommand('jinsheet.undo');
+      await waitFor('document.querySelector("#cell-0-0")?.textContent === "20000"', 'one undo restores the original first row');
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      saved = analyze(await fs.readFile(file));
+      assert.equal(saved.sheets[0].cells.size, 100000);
+      assert.equal(saved.sheets[0].cells.get('A1').value, '20000');
+      assert.equal(saved.sheets[0].cells.get('B1').value, 'row-1-column-2');
+      assert.equal(saved.sheets[0].cells.get('A20000').value, '1');
+      await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+      devtools.close(); devtools = null;
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview(30000, '20000');
+      await waitFor('document.querySelector("#cell-0-0")?.textContent === "20000" && document.querySelector("#cell-0-1")?.textContent === "row-1-column-2"', 'the saved 100,000-cell workbook reopens in its original row order');
+      console.log('[JinSheet XLSX sort 100k]', JSON.stringify({ cells: 100000, sortToRenderMs: Math.round(sortToRenderMs) }));
     } finally {
       devtools?.close();
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');

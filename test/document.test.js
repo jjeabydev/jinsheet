@@ -2090,6 +2090,29 @@ test('정렬 선택 영역 확장이 10,000셀 제한을 넘으면 거부해 부
   assert.throws(() => buildSortEdits(document, { startRow: 0, endRow: 5000, startColumn: 0, endColumn: 0 }, 0, 'ascending', false, true), /10,000개/);
 });
 
+test('CSV 명시 정렬은 10,000셀을 넘는 범위를 20,000셀까지 처리한다', () => {
+  const rowCount = 2000, columnCount = 10;
+  const values = Array.from({ length: rowCount }, (_, row) => Array.from({ length: columnCount }, (_, column) => String(column === 0 ? rowCount - row : `row-${row}-column-${column}`)));
+  const document = { kind: 'csv', getCell: (row, column) => ({ value: values[row][column], kind: column === 0 ? 'number' : 'text' }) };
+  const edits = buildSortEdits(document, { startRow: 0, endRow: rowCount - 1, startColumn: 0, endColumn: columnCount - 1 }, 0, 'ascending', false, false);
+  assert.equal(edits.length, rowCount * columnCount);
+  assert.equal(edits[0].value, '1');
+  assert.throws(() => buildSortEdits(document, { startRow: 0, endRow: rowCount, startColumn: 0, endColumn: columnCount - 1 }, 0, 'ascending', false, false), /정렬할 수 있는 셀은 20,000개/);
+});
+
+test('XLSX 명시 정렬은 통합 문서 100,000셀 한도까지 처리한다', () => {
+  const rowCount = 20000, columnCount = 5;
+  const document = {
+    kind: 'xlsx',
+    state: { sheets: [{ cells: new Map() }] },
+    getCell(row, column) { return { value: String(column === 0 ? rowCount - row : `row-${row}-column-${column}`), kind: column === 0 ? 'number' : 'text' }; }
+  };
+  const edits = buildSortEdits(document, { startRow: 0, endRow: rowCount - 1, startColumn: 0, endColumn: columnCount - 1 }, 0, 'ascending', false, false);
+  assert.equal(edits.length, rowCount * columnCount);
+  assert.equal(edits[0].value, '1');
+  assert.throws(() => buildSortEdits(document, { startRow: 0, endRow: rowCount, startColumn: 0, endColumn: columnCount - 1 }, 0, 'ascending', false, false), /정렬할 수 있는 셀은 100,000개/);
+});
+
 test('XLSX 행 정렬은 각 셀의 서식 인덱스를 행 데이터와 함께 이동한다', async () => {
   const bytes = await fs.readFile(path.join(__dirname, 'fixtures', 'JinSheet-Styled-Sample.xlsx'));
   const state = analyze(bytes);

@@ -70,6 +70,8 @@ test("common read-only and parser diagnostics are localized without leaking Kore
   assert.equal(translateDiagnostic("선택 범위 값 지우기", "en"), "Clear selected cells");
   assert.equal(translateDiagnostic("선택 범위 값 지우기", "ko"), "선택 범위 값 지우기");
   assert.equal(translateDiagnostic("선택 범위 정렬", "en"), "Sort selected range");
+  assert.equal(translateDiagnostic("한 번에 정렬할 수 있는 셀은 20,000개까지입니다.", "en"), "Sort up to 20,000 cells in one operation.");
+  assert.equal(translateDiagnostic("한 번에 정렬할 수 있는 셀은 20,000개까지입니다.", "ko"), "한 번에 정렬할 수 있는 셀은 20,000개까지입니다.");
   assert.equal(translateDiagnostic("열 너비 변경", "en"), "Resize column");
   assert.match(translateDiagnostic("클립보드 범위와 선택 영역의 크기가 맞지 않습니다.", "en"), /copied block does not fit/);
   assert.match(translateDiagnostic("백만 행 전체 열 복사는 같은 XLSX 통합문서 안에서만 붙여넣을 수 있습니다.", "en"), /same XLSX workbook/);

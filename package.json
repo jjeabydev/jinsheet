@@ -2,7 +2,7 @@
   "name": "jinsheet",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "publisher": "jjeabydev",
   "engines": {
     "vscode": "^1.90.0"

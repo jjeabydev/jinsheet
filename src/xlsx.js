@@ -720,8 +720,9 @@ function readDataValidations(node, definedNames = [], sheetIndex = 0, date1904 =
   return entries.map(entry => {
     const allowed = ['type', 'errorStyle', 'imeMode', 'operator', 'allowBlank', 'showDropDown', 'showInputMessage', 'showErrorMessage', 'errorTitle', 'error', 'promptTitle', 'prompt', 'sqref'];
     const type = entry.attributes.type, list = type === 'list';
-    if (Object.keys(entry.attributes).some(name => !allowed.includes(name)) || !['list', 'whole', 'decimal', 'date', 'time', 'textLength'].includes(type) || !entry.attributes.sqref || !['0', '1', undefined].includes(entry.attributes.allowBlank) || !['0', '1', undefined].includes(entry.attributes.showDropDown) || list && (entry.attributes.operator || entry.attributes.imeMode) || !list && (entry.attributes.showDropDown !== undefined || entry.attributes.imeMode)) throw new Error('지원하지 않는 데이터 유효성 종류 또는 속성입니다.');
-    if (entry.attributes.errorStyle && !['stop', 'warning', 'information'].includes(entry.attributes.errorStyle) || ['showInputMessage', 'showErrorMessage'].some(name => entry.attributes[name] !== undefined && !['0', '1'].includes(entry.attributes[name])) || ['errorTitle', 'promptTitle'].some(name => (entry.attributes[name] || '').length > 32) || ['error', 'prompt'].some(name => (entry.attributes[name] || '').length > 255)) throw new Error('데이터 유효성 메시지 또는 알림 규칙 속성이 유효하지 않습니다.');
+    const onOff = value => value === undefined ? undefined : ['1', 'true', 'on'].includes(value) ? true : ['0', 'false', 'off'].includes(value) ? false : null;
+    if (Object.keys(entry.attributes).some(name => !allowed.includes(name)) || !['list', 'whole', 'decimal', 'date', 'time', 'textLength'].includes(type) || !entry.attributes.sqref || ['allowBlank', 'showDropDown', 'showInputMessage', 'showErrorMessage'].some(name => onOff(entry.attributes[name]) === null) || list && (entry.attributes.operator || entry.attributes.imeMode) || !list && entry.attributes.imeMode) throw new Error('지원하지 않는 데이터 유효성 종류 또는 속성입니다.');
+    if (entry.attributes.errorStyle && !['stop', 'warning', 'information'].includes(entry.attributes.errorStyle) || ['errorTitle', 'promptTitle'].some(name => (entry.attributes[name] || '').length > 32) || ['error', 'prompt'].some(name => (entry.attributes[name] || '').length > 255)) throw new Error('데이터 유효성 메시지 또는 알림 규칙 속성이 유효하지 않습니다.');
     const operator = list ? null : entry.attributes.operator || 'between';
     const operators = ['between', 'notBetween', 'equal', 'notEqual', 'greaterThan', 'lessThan', 'greaterThanOrEqual', 'lessThanOrEqual'];
     if (!list && !operators.includes(operator)) throw new Error('지원하지 않는 데이터 유효성 비교 연산자입니다.');
@@ -789,7 +790,7 @@ function readDataValidations(node, definedNames = [], sheetIndex = 0, date1904 =
       return { top, bottom, left, right };
     });
     if (!ranges.length || ranges.length > 64) throw new Error('데이터 유효성 적용 범위 개수가 제한을 벗어났습니다.');
-    return { type, operator, ranges, values, formulas: formulaLimits || null, source, sourceFormula, errorStyle: entry.attributes.errorStyle || 'stop', allowBlank: entry.attributes.allowBlank === '1', showDropDown: entry.attributes.showDropDown === '1', showInputMessage: entry.attributes.showInputMessage !== '0', showErrorMessage: entry.attributes.showErrorMessage !== '0', errorTitle: entry.attributes.errorTitle || '', error: entry.attributes.error || '', promptTitle: entry.attributes.promptTitle || '', prompt: entry.attributes.prompt || '' };
+    return { type, operator, ranges, values, formulas: formulaLimits || null, source, sourceFormula, errorStyle: entry.attributes.errorStyle || 'stop', allowBlank: onOff(entry.attributes.allowBlank) === true, showDropDown: onOff(entry.attributes.showDropDown) === true, showInputMessage: onOff(entry.attributes.showInputMessage) !== false, showErrorMessage: onOff(entry.attributes.showErrorMessage) !== false, errorTitle: entry.attributes.errorTitle || '', error: entry.attributes.error || '', promptTitle: entry.attributes.promptTitle || '', prompt: entry.attributes.prompt || '' };
   });
 }
 function isoDateSerial(raw, date1904) {
@@ -892,9 +893,9 @@ function readDifferentialStyle(dxf, colorContext) {
     if (color) properties.color = color;
   }
   const fill = child(dxf, 'fill'), pattern = fill && child(fill, 'patternFill');
-  if (fill && (!pattern || pattern.attributes.patternType !== 'solid' || pattern.children.some(item => item.name !== 'fgColor'))) throw new Error('조건부 채우기 서식은 단색 전경색만 지원합니다.');
+  if (fill && (!pattern || !['solid', undefined].includes(pattern.attributes.patternType) || Object.keys(pattern.attributes).some(attribute => attribute !== 'patternType') || pattern.children.some(item => !['fgColor', 'bgColor'].includes(item.name)) || children(pattern, 'fgColor').length > 1 || children(pattern, 'bgColor').length > 1 || !child(pattern, 'fgColor') && !(pattern.attributes.patternType === undefined && child(pattern, 'bgColor')))) throw new Error('조건부 채우기 서식은 단색 채우기만 지원합니다.');
   if (pattern) {
-    const colorNode = child(pattern, 'fgColor');
+    const colorNode = child(pattern, 'fgColor') || child(pattern, 'bgColor');
     if (!colorNode || !styleColor(colorNode, colorContext)) throw new Error('조건부 채우기 색상 정의를 해석할 수 없습니다.');
     const color = styleColor(colorNode, colorContext);
     if (color) properties.fill = color;
@@ -938,7 +939,8 @@ function readConditionalFormats(node, differentialStyles, colorContext) {
   if (!rules.length || rules.length > 128) throw new Error('조건부 서식 규칙 개수 제한을 벗어났습니다.');
   return rules.map(rule => {
     const { type, operator, priority, dxfId, stopIfTrue } = rule.attributes;
-    if (Object.keys(rule.attributes).some(attribute => !['type', 'operator', 'priority', 'dxfId', 'stopIfTrue', 'rank', 'percent', 'bottom'].includes(attribute)) || type !== 'top10' && ['rank', 'percent', 'bottom'].some(attribute => Object.hasOwn(rule.attributes, attribute)) || !['cellIs', 'expression', 'dataBar', 'colorScale', 'iconSet', 'top10'].includes(type) || type === 'cellIs' && !['equal', 'notEqual', 'greaterThan', 'lessThan', 'greaterThanOrEqual', 'lessThanOrEqual', 'between', 'notBetween'].includes(operator) || type !== 'cellIs' && operator !== undefined) throw new Error('지원하지 않는 조건부 서식 규칙 종류 또는 연산자입니다.');
+    const neutralExtras = { aboveAverage: '0', equalAverage: '0', text: '' };
+    if (Object.keys(rule.attributes).some(attribute => !['type', 'operator', 'priority', 'dxfId', 'stopIfTrue', 'rank', 'percent', 'bottom', ...Object.keys(neutralExtras)].includes(attribute)) || Object.entries(neutralExtras).some(([attribute, neutral]) => Object.hasOwn(rule.attributes, attribute) && rule.attributes[attribute] !== neutral) || type !== 'top10' && ['rank', 'percent', 'bottom'].some(attribute => Object.hasOwn(rule.attributes, attribute) && rule.attributes[attribute] !== '0') || !['cellIs', 'expression', 'dataBar', 'colorScale', 'iconSet', 'top10'].includes(type) || type === 'cellIs' && !['equal', 'notEqual', 'greaterThan', 'lessThan', 'greaterThanOrEqual', 'lessThanOrEqual', 'between', 'notBetween'].includes(operator) || type !== 'cellIs' && operator !== undefined) throw new Error('지원하지 않는 조건부 서식 규칙 종류 또는 연산자입니다.');
     const rank = Number(priority), styleIndex = Number(dxfId);
     const visualRule = type === 'dataBar' || type === 'colorScale' || type === 'iconSet';
     if (!/^[1-9]\d*$/.test(priority || '') || !Number.isSafeInteger(rank) || rank > 100000 || (visualRule ? dxfId !== undefined : !/^(?:0|[1-9]\d*)$/.test(dxfId || '') || !Number.isInteger(styleIndex) || !differentialStyles[styleIndex])) throw new Error('조건부 서식 우선 순위 또는 차등 서식 참조가 유효하지 않습니다.');
@@ -1347,7 +1349,8 @@ function analyze(input, extension = '.xlsx') {
     let tables = [];
     if (tablePartsNode) {
       const sheetRelsPath = path.join(path.dirname(rel.path), '_rels', path.basename(rel.path) + '.rels');
-      if (!files[sheetRelsPath] || tablePartsNode.children.some(node => node.name !== 'tablePart') || !/^(?:0|[1-9]\d*)$/.test(tablePartsNode.attributes.count || '') || Number(tablePartsNode.attributes.count) !== tableParts.length || !tableParts.length) markUnsupported('워크시트 표 관계 목록 구성이 유효하지 않습니다.');
+      const tablePartCount = tablePartsNode.attributes.count;
+      if (!files[sheetRelsPath] || tablePartsNode.children.some(node => node.name !== 'tablePart' || Object.keys(node.attributes).some(attribute => attribute !== 'r:id')) || Object.keys(tablePartsNode.attributes).some(attribute => attribute !== 'count') || tablePartCount !== undefined && (!/^(?:0|[1-9]\d*)$/.test(tablePartCount) || Number(tablePartCount) !== tableParts.length) || !tableParts.length) markUnsupported('워크시트 표 관계 목록 구성이 유효하지 않습니다.');
       else {
         known.add(sheetRelsPath);
         const sheetRelationships = parseRelationships(parseXml(files[sheetRelsPath], sheetRelsPath).root, path.dirname(rel.path), ['table', 'hyperlink', 'drawing']);
@@ -2559,15 +2562,18 @@ function patchCells(model, edits) {
   if (borderStyles?.xml || alignmentStyles?.xml || fillStyles?.xml || fontStyles?.xml || numberStyles?.xml) { outputFiles[model.stylesPath] = new TextEncoder().encode(borderStyles?.xml || alignmentStyles?.xml || fillStyles?.xml || fontStyles?.xml || numberStyles.xml); modifiedPaths.add(model.stylesPath); }
   for (const [sheetIndex, patches] of bySheet) {
     const sheet = model.sheets[sheetIndex];
-    patches.sort(function (a, b) { return b.start - a.start || (b.column || 0) - (a.column || 0); });
-    let xml = sheet.xml, previousStart = xml.length + 1;
+    patches.sort(function (a, b) { return a.start - b.start || (a.column || 0) - (b.column || 0); });
+    const xml = sheet.xml, parts = [];
+    let previousEnd = 0;
     for (const patch of patches) {
-      if (patch.end > previousStart) fail('셀 수정 범위가 겹칩니다.');
-      xml = xml.slice(0, patch.start) + patch.replacement + xml.slice(patch.end);
-      previousStart = patch.start;
+      if (!Number.isInteger(patch.start) || !Number.isInteger(patch.end) || patch.start < previousEnd || patch.end < patch.start || patch.end > xml.length) fail('셀 수정 범위가 겹칩니다.');
+      parts.push(xml.slice(previousEnd, patch.start), patch.replacement);
+      previousEnd = patch.end;
     }
-    for (const cell of additions.get(sheetIndex) || []) xml = expandWorksheetDimension(xml, cell.address);
-    outputFiles[sheet.path] = new TextEncoder().encode(xml);
+    parts.push(xml.slice(previousEnd));
+    let patchedXml = parts.join('');
+    for (const cell of additions.get(sheetIndex) || []) patchedXml = expandWorksheetDimension(patchedXml, cell.address);
+    outputFiles[sheet.path] = new TextEncoder().encode(patchedXml);
     modifiedPaths.add(sheet.path);
   }
   if ((model.formulas || writesFormula) && bySheet.size) {

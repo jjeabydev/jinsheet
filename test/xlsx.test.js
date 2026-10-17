@@ -3757,6 +3757,75 @@ test('LibreOffice가 재저장한 기본 차트 XLSX는 편집·차트 캐시 �
   for (const chart of reopened.sheets[0].charts) assert.deepEqual(chart.series[0].values, [13, 7]);
 });
 
+test('LibreOffice Calc가 다시 저장한 서식 XLSX는 편집 후에도 서식과 패키지 구성요소를 보존한다', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const source = analyze(fs.readFileSync(path.join(__dirname, 'fixtures', 'LibreOffice-Styled-Roundtrip.xlsx')));
+  assert.equal(source.writable, true, source.readOnlyReason);
+  assert.equal(source.sheets[0].cells.get('A1').styleProperties.fill, '#1F4E78');
+  assert.equal(source.sheets[0].cells.get('B2').formatCode, '#,##0');
+
+  const reopened = analyze(patchCell(source, 0, 'B2', '13').bytes);
+  assert.equal(reopened.writable, true, reopened.readOnlyReason);
+  assert.equal(reopened.sheets[0].cells.get('B2').value, '13');
+  assert.equal(reopened.sheets[0].cells.get('B2').formatCode, '#,##0');
+  assert.deepEqual(reopened.sheets[0].cells.get('A1').styleProperties, source.sheets[0].cells.get('A1').styleProperties);
+  assert.deepEqual(reopened.sheets[0].rowHeights, source.sheets[0].rowHeights);
+  for (const [name, bytes] of Object.entries(source.files)) {
+    if (name === source.sheets[0].path || name === 'xl/workbook.xml') continue;
+    assert.deepEqual(Buffer.from(reopened.files[name]), Buffer.from(bytes), `untouched LibreOffice package entry changed: ${name}`);
+  }
+});
+
+test('LibreOffice Calc가 저장한 복합 XLSX의 표·유효성·조건부 서식·차트를 편집 후에도 유지한다', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const source = analyze(fs.readFileSync(path.join(__dirname, 'fixtures', 'LibreOffice-Mixed-Features-Roundtrip.xlsx')));
+  assert.equal(source.writable, true, source.readOnlyReason);
+  assert.equal(source.sheets[0].tables[0].name, 'Inventory');
+  assert.equal(source.sheets[0].tables[0].totalsRowCount, 1);
+  assert.equal(source.sheets[0].tables[0].autoFilter.columns[0].values[0], '12');
+  assert.equal(source.sheets[0].dataValidations.length, 1);
+  assert.deepEqual(source.sheets[0].dataValidations[0].values, [1, 100]);
+  assert.equal(source.sheets[0].conditionalFormats.length, 1);
+  assert.deepEqual(source.sheets[0].conditionalFormats[0].style, { fill: '#F4CCCC' });
+  assert.deepEqual(source.sheets[0].mergedCells.map(({ top, bottom, left, right }) => ({ top, bottom, left, right })), [{ top: 0, bottom: 0, left: 4, right: 5 }]);
+  assert.equal(source.sheets[0].cells.get('D1').formula, 'SUM(B2:B3)');
+  assert.equal(source.sheets[0].charts.length, 1);
+  assert.deepEqual(source.sheets[0].freezePane, { rows: 1, columns: 1 });
+
+  const reopened = analyze(patchCell(source, 0, 'B2', '13').bytes);
+  assert.equal(reopened.writable, true, reopened.readOnlyReason);
+  assert.equal(reopened.sheets[0].cells.get('B2').value, '13');
+  assert.equal(reopened.sheets[0].tables[0].name, 'Inventory');
+  assert.deepEqual(reopened.sheets[0].tables[0].autoFilter.columns[0].values, ['12']);
+  assert.equal(reopened.sheets[0].dataValidations.length, 1);
+  assert.equal(reopened.sheets[0].conditionalFormats.length, 1);
+  assert.equal(reopened.sheets[0].cells.get('B4').formula, 'SUBTOTAL(109,[[#data],[수량]])');
+  assert.deepEqual(reopened.sheets[0].charts[0].series[0].values, [13, 7]);
+  assert.deepEqual(reopened.sheets[0].mergedCells.map(({ top, bottom, left, right }) => ({ top, bottom, left, right })), [{ top: 0, bottom: 0, left: 4, right: 5 }]);
+  assert.equal(reopened.sheets[0].charts.length, 1);
+  assert.deepEqual(reopened.sheets[0].freezePane, { rows: 1, columns: 1 });
+});
+
+test('LibreOffice 호환 boolean 처리 뒤에도 활성 미지원 규칙과 잘못된 boolean은 편집을 차단한다', () => {
+  const conditionalFiles = unzipSync(fixture({ formatted: true }));
+  const worksheet = new TextDecoder().decode(conditionalFiles['xl/worksheets/sheet1.xml']);
+  const styles = new TextDecoder().decode(conditionalFiles['xl/styles.xml']);
+  conditionalFiles['xl/worksheets/sheet1.xml'] = new TextEncoder().encode(worksheet.replace('</worksheet>', '<conditionalFormatting sqref="A1"><cfRule type="cellIs" dxfId="0" priority="1" aboveAverage="1" operator="greaterThan"><formula>10</formula></cfRule></conditionalFormatting></worksheet>'));
+  conditionalFiles['xl/styles.xml'] = new TextEncoder().encode(styles.replace('</styleSheet>', '<dxfs count="1"><dxf><fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill></dxf></dxfs></styleSheet>'));
+  const activeRule = analyze(zipSync(conditionalFiles));
+  assert.equal(activeRule.writable, false);
+  assert.match(activeRule.readOnlyReason, /조건부 서식/);
+
+  const validationFiles = unzipSync(fixture());
+  const validationSheet = new TextDecoder().decode(validationFiles['xl/worksheets/sheet1.xml']);
+  validationFiles['xl/worksheets/sheet1.xml'] = new TextEncoder().encode(validationSheet.replace('</worksheet>', '<dataValidations count="1"><dataValidation type="whole" operator="between" allowBlank="yes" sqref="A1"><formula1>0</formula1><formula2>10</formula2></dataValidation></dataValidations></worksheet>'));
+  const invalidBoolean = analyze(zipSync(validationFiles));
+  assert.equal(invalidBoolean.writable, false);
+  assert.match(invalidBoolean.readOnlyReason, /데이터 유효성/);
+});
+
 test('XLSX 표·유효성·병합·수식·조건부 서식·차트가 함께 있을 때 편집 후 전부 보존된다', () => {
   const fs = require('node:fs');
   const path = require('node:path');

@@ -289,8 +289,8 @@ suite('JinSheet Extension Host', () => {
       await sendMouse({ type: 'mouseReleased', ...point, button: 'left', buttons: 0, clickCount: 2 });
       const deadline = Date.now() + 3000;
       while (Date.now() < deadline && !await evaluate('Boolean(document.querySelector("#cell-1-0 textarea.cell-editor"))')) await new Promise(resolve => setTimeout(resolve, 25));
-      await devtools.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 });
-      await devtools.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 });
+      const editorState = await evaluate('(()=>{const input=document.querySelector("#cell-1-0 textarea.cell-editor");return{value:input?.value,selectionStart:input?.selectionStart,selectionEnd:input?.selectionEnd,active:document.activeElement===input}})()');
+      assert.deepEqual([editorState.value,editorState.selectionStart,editorState.selectionEnd,editorState.active], ['Alpha',0,5,true]);
       await devtools.send('Input.insertText', { text: value });
       await devtools.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
       await devtools.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
@@ -2380,7 +2380,7 @@ suite('JinSheet Extension Host', () => {
       await evaluate('document.querySelector("#printSelection").click()');
       const deadline = Date.now() + 5000;
       while (Date.now() < deadline && !opened.length) await new Promise(resolve => setTimeout(resolve, 25));
-      assert.deepEqual(opened, [output]);
+      assert.deepEqual(opened.map(normalizePath), [normalizePath(output)]);
       const html = await fs.readFile(output, 'utf8');
       assert.match(html, />Product</); assert.doesNotMatch(html, />Pen</); assert.match(html, /size:11in 8\.5in/); assert.match(html, /transform:scale\(0\.75\)/); assert.match(html, /window\.print\(\)/);
       const printRows = Array.from({ length: 80 }, (_, index) => index), printColumns = Array.from({ length: 6 }, (_, index) => index);
@@ -2430,7 +2430,7 @@ suite('JinSheet Extension Host', () => {
       await evaluate('document.querySelector("#printSheet").click()');
       const deadline = Date.now() + 5000;
       while (Date.now() < deadline && !opened.length) await new Promise(resolve => setTimeout(resolve, 25));
-      assert.deepEqual(opened, [output]); const html = await fs.readFile(output, 'utf8');
+      assert.deepEqual(opened.map(normalizePath), [normalizePath(output)]); const html = await fs.readFile(output, 'utf8');
       assert.match(html, />Product</); assert.doesNotMatch(html, />Pen</); assert.equal((html.match(/<section class="page"/g) || []).length, 1);
       await evaluate('document.querySelector("#clearPrintArea").click()');
       await wait('document.querySelector("#clearPrintArea").disabled');
@@ -2482,7 +2482,7 @@ suite('JinSheet Extension Host', () => {
       await evaluate('document.querySelector("#printSheet").click()');
       const deadline = Date.now() + 7000;
       while (Date.now() < deadline && !opened.length) await new Promise(resolve => setTimeout(resolve, 25));
-      assert.deepEqual(opened, [output]);
+      assert.deepEqual(opened.map(normalizePath), [normalizePath(output)]);
       const html = await fs.readFile(output, 'utf8'), pages = html.match(/<section class="page"[\s\S]*?<\/section>/g);
       assert.ok(pages.length > 1);
       for (const page of pages) { assert.equal(page.split('>Corner title<').length - 1, 1); assert.match(page, /data-repeat-row="true"/); assert.match(page, /data-repeat-column="true"/); }
@@ -2534,7 +2534,7 @@ suite('JinSheet Extension Host', () => {
       const saved = analyze(await fs.readFile(file)).sheets[0]; assert.equal(saved.headerFooter.first.header.center, 'First'); assert.equal(saved.headerFooter.even.header.center, 'Even'); assert.equal(saved.headerFooter.odd.footer.center, 'Page &P / &N');
       await evaluate('document.querySelector("#printSheet").click()');
       const deadline = Date.now() + 7000; while (Date.now() < deadline && !opened.length) await new Promise(resolve => setTimeout(resolve, 25));
-      assert.deepEqual(opened, [output]); const html = await fs.readFile(output, 'utf8'), layout = await measurePrintPages(evaluate, html, true);
+      assert.deepEqual(opened.map(normalizePath), [normalizePath(output)]); const html = await fs.readFile(output, 'utf8'), layout = await measurePrintPages(evaluate, html, true);
       assert.ok(layout.length >= 3);
       for (const [index, page] of layout.entries()) {
         assert.match(page.headerText, /Report headers.xlsx/); assert.match(page.headerText, /Inventory/);
@@ -3183,8 +3183,8 @@ suite('JinSheet Extension Host', () => {
       };
       const wait = async expression => { const deadline = Date.now() + 5000; while (Date.now() < deadline) { if (await evaluate(expression)) return; await new Promise(resolve => setTimeout(resolve, 25)); } assert.fail('Native dimension condition failed: ' + expression); };
       await wait('Boolean(document.querySelector("#cell-0-2"))');
-      const sizes = await evaluate('(()=>{const cells=[0,1,2].map(column=>document.querySelector("#cell-0-"+column).getBoundingClientRect());return{widths:cells.map(box=>box.width),height:cells[0].height,positions:cells.map(box=>[box.left,box.right]),adjacent:Math.abs(cells[1].left-cells[0].right)<.1&&Math.abs(cells[2].left-cells[1].right)<.1,hidden:!document.querySelector("#cell-0-3")||document.querySelector("#cell-0-3").getBoundingClientRect().width===0}})()');
-      assert.deepEqual(sizes.widths, [64, 1, 1785]); assert.equal(sizes.height, 20); assert.equal(sizes.adjacent, true, JSON.stringify(sizes)); assert.equal(sizes.hidden, true);
+      const sizes = await evaluate('(()=>{const cells=[0,1,2].map(column=>document.querySelector("#cell-0-"+column).getBoundingClientRect());return{widths:cells.map(box=>box.width),height:cells[0].height,positions:cells.map(box=>[box.left,box.right]),adjacent:Math.abs(cells[1].left-cells[0].right)<.1&&Math.abs(cells[2].left-cells[1].right)<.1,hidden:!document.querySelector("#cell-0-3")||document.querySelector("#cell-0-3").getBoundingClientRect().width===0,dpr:devicePixelRatio,maximumDigitWidth:window.__jinsheetModel?.maximumDigitWidth}})()');
+      assert.deepEqual(sizes.widths, [64, 1, 1785], JSON.stringify(sizes)); assert.equal(sizes.height, 20); assert.equal(sizes.adjacent, true, JSON.stringify(sizes)); assert.equal(sizes.hidden, true);
       assert.equal(await evaluate('(()=>{const cell=document.querySelector("#cell-0-0");return cell.scrollHeight<=cell.clientHeight+1})()'), true);
       await evaluate('document.querySelector("#cell-0-1").click();document.querySelector("#cell-0-1").dispatchEvent(new KeyboardEvent("keydown",{key:"F2",bubbles:true}))');
       await wait('Boolean(document.querySelector(".cell-editor"))');

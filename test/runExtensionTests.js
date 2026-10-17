@@ -27,11 +27,11 @@ async function main() {
       directory = parent;
     }
     if (process.platform === 'win32') {
-      const root = path.dirname(path.dirname(vscodeExecutablePath));
+      const installRoot = path.dirname(vscodeExecutablePath);
       let versions;
-      try { versions = fs.readdirSync(root, { withFileTypes: true }); } catch { versions = []; }
+      try { versions = fs.readdirSync(installRoot, { withFileTypes: true }); } catch { versions = []; }
       for (const entry of versions) if (entry.isDirectory()) {
-        const app = path.join(root, entry.name, 'resources', 'app', 'out');
+        const app = path.join(installRoot, entry.name, 'resources', 'app', 'out');
         resourceCandidates.push(path.join(app, 'nls.messages.json'), path.join(app, 'vs', 'nls.messages.json'));
       }
     }
@@ -73,6 +73,7 @@ async function main() {
     vscodeExecutablePath,
     extensionDevelopmentPath: path.resolve(__dirname, '..'),
     extensionTestsPath: path.resolve(__dirname, 'host'),
+    extensionTestsEnv: locale ? { VSCODE_NLS_CONFIG: process.env.VSCODE_NLS_CONFIG, VSCODE_PORTABLE: process.env.VSCODE_PORTABLE } : undefined,
     launchArgs
   });
   if (code !== 0) process.exitCode = code || 1;

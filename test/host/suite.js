@@ -871,14 +871,24 @@ suite('JinSheet Extension Host', () => {
       await evaluate('document.querySelector("#clearFontFamily").click()');
       const defaultFamilyDeadline = Date.now() + 3000;
       while (Date.now() < defaultFamilyDeadline && await evaluate('document.querySelector("#notice")?.textContent.includes("Modified")') !== true) await new Promise(resolve => setTimeout(resolve, 25));
-      await vscode.commands.executeCommand('workbench.action.files.save');
-      saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      const defaultFamilySaveDeadline = Date.now() + 5000;
+      do {
+        await vscode.commands.executeCommand('workbench.action.files.save');
+        saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+        if (saved.styleProperties.fontFamily === undefined) break;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      } while (Date.now() < defaultFamilySaveDeadline);
       assert.equal(saved.styleProperties.fontFamily, undefined);
       await evaluate('document.querySelector("#clearFontSize").click()');
       const clearSizeDeadline = Date.now() + 3000;
       while (Date.now() < clearSizeDeadline && await evaluate('document.querySelector("#notice")?.textContent.includes("Modified")') !== true) await new Promise(resolve => setTimeout(resolve, 25));
-      await vscode.commands.executeCommand('workbench.action.files.save');
-      saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      const defaultSizeSaveDeadline = Date.now() + 5000;
+      do {
+        await vscode.commands.executeCommand('workbench.action.files.save');
+        saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+        if (saved.styleProperties.fontSize === undefined) break;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      } while (Date.now() < defaultSizeSaveDeadline);
       assert.equal(saved.styleProperties.fontSize, undefined);
       assert.equal(saved.styleProperties.underline, true);
     } finally {

@@ -1286,7 +1286,7 @@ suite('JinSheet Extension Host', () => {
       assert.equal(await evaluate('Boolean(document.querySelector("#duplicateValues"))'), true, 'duplicate-value control is rendered');
       await evaluate('(()=>{const input=document.querySelector("#address");input.value="A1:A3";input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}));document.querySelector("#duplicateValues").click()})()');
       const highlightDeadline = Date.now() + 5000;
-      while (Date.now() < highlightDeadline && await evaluate('getComputedStyle(document.querySelector("#cell-0-0")).backgroundColor') !== 'rgb(244, 204, 204)') await new Promise(resolve => setTimeout(resolve, 25));
+      while (Date.now() < highlightDeadline && await evaluate('(()=>{const cell=document.querySelector("#cell-0-0");return cell&&getComputedStyle(cell).backgroundColor==="rgb(244, 204, 204)"})()') !== true) await new Promise(resolve => setTimeout(resolve, 25));
       assert.equal(await evaluate('getComputedStyle(document.querySelector("#cell-0-0")).backgroundColor'), 'rgb(244, 204, 204)');
       assert.equal(await evaluate('getComputedStyle(document.querySelector("#cell-1-0")).backgroundColor'), 'rgb(244, 204, 204)');
       assert.notEqual(await evaluate('getComputedStyle(document.querySelector("#cell-2-0")).backgroundColor'), 'rgb(244, 204, 204)', 'blank cells are not highlighted');

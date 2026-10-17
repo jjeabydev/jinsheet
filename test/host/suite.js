@@ -3277,7 +3277,10 @@ suite('JinSheet Extension Host', () => {
         await new Promise(resolve => setTimeout(resolve, 25));
       } while (Date.now() < totalsSaveDeadline);
       assert.equal(totalsSaved.sheets[0].tables[0].totalsRowCount, 0);
-      await evaluate('document.querySelector("#tableTotals").click()'); await wait('document.querySelector("#cell-3-1")?.textContent==="15"&&document.querySelector("#tableTotalsFunction").value==="average"'); await vscode.commands.executeCommand('workbench.action.files.save');
+      await evaluate('document.querySelector("#tableTotals").click()'); await wait('document.querySelector("#cell-3-1")?.textContent==="15"&&document.querySelector("#tableTotalsFunction").value==="average"');
+      const averageSaveDeadline = Date.now() + 8000; let averageSaved;
+      do { await vscode.commands.executeCommand('workbench.action.files.save'); averageSaved = analyze(await fs.readFile(file)); if (averageSaved.sheets[0].tables[0].totalColumns[1].function === 'average') break; await new Promise(resolve => setTimeout(resolve, 25)); } while (Date.now() < averageSaveDeadline);
+      assert.equal(averageSaved.sheets[0].tables[0].totalColumns[1].function, 'average');
       devtools.close(); devtools = null; await vscode.commands.executeCommand('workbench.action.closeAllEditors');
       await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor'); devtools = await waitForSpreadsheetWebview(); await wait('document.querySelector("#cell-3-1")?.textContent==="15"');
       await actOnCell(3,1,"document.querySelector(\"#tableTotalsFunction\").value=\"count\";document.querySelector(\"#tableTotalsFunction\").dispatchEvent(new Event(\"change\"));document.querySelector(\"#applyTableTotalFunction\").click()");
@@ -3577,6 +3580,17 @@ suite('JinSheet Extension Host', () => {
         return response.result?.value;
       };
       const original = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      const saveUntil = async predicate => {
+        const deadline = Date.now() + 8000;
+        let cell;
+        do {
+          await vscode.commands.executeCommand('workbench.action.files.save');
+          cell = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+          if (predicate(cell)) return cell;
+          await new Promise(resolve => setTimeout(resolve, 25));
+        } while (Date.now() < deadline);
+        assert.fail('Fill save did not reach the expected state');
+      };
       const cellPoint = await evaluate(`(() => {const r=document.querySelector('#cell-1-2').getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);
       await devtools.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: cellPoint.x + devtools.frameOffset.x, y: cellPoint.y + devtools.frameOffset.y, button: 'left', buttons: 1, clickCount: 1 });
       await devtools.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: cellPoint.x + devtools.frameOffset.x, y: cellPoint.y + devtools.frameOffset.y, button: 'left', buttons: 0, clickCount: 1 });
@@ -3585,8 +3599,7 @@ suite('JinSheet Extension Host', () => {
       const modifiedDeadline = Date.now() + 3000;
       while (Date.now() < modifiedDeadline && await evaluate('document.querySelector("#notice")?.textContent.includes("Modified")') !== true) await new Promise(resolve => setTimeout(resolve, 25));
       assert.equal(await evaluate('document.querySelector("#notice")?.textContent.includes("Modified")'), true);
-      await vscode.commands.executeCommand('workbench.action.files.save');
-      let saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      let saved = await saveUntil(cell => cell.styleProperties.fill === '#FFCC00');
       assert.equal(saved.styleProperties.fill, '#FFCC00');
       assert.equal(saved.formatCode, original.formatCode);
       assert.equal(saved.styleProperties.bold, original.styleProperties.bold);
@@ -3595,8 +3608,7 @@ suite('JinSheet Extension Host', () => {
       const clearDeadline = Date.now() + 3000;
       while (Date.now() < clearDeadline && await evaluate('document.querySelector("#notice")?.textContent.includes("Modified")') !== true) await new Promise(resolve => setTimeout(resolve, 25));
       assert.equal(await evaluate('document.querySelector("#notice")?.textContent.includes("Modified")'), true, 'clearing fill marks the workbook modified');
-      await vscode.commands.executeCommand('workbench.action.files.save');
-      saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      saved = await saveUntil(cell => !cell.styleProperties.fill);
       assert.equal(saved.styleProperties.fill, undefined);
       assert.equal(saved.formatCode, original.formatCode);
       assert.deepEqual(saved.styleProperties.borders, original.styleProperties.borders);

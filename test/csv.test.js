@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { applyEdits, decode, detectDelimiter, encode, load, parse, transformStructure } = require('../src/csv');
+const { applyEdits, decode, detectDelimiter, encode, extendCells, load, parse, transformStructure } = require('../src/csv');
 
 test('인용 필드 안의 줄바꿈과 escape quote를 파싱한다', () => {
   const text = 'a,b\r\n"line 1\nline 2","say ""hi"""\r\n';
@@ -59,4 +59,12 @@ test('빈 TSV에서 첫 행 또는 열을 삽입하면 빈 셀 하나가 생성�
     assert.equal(inserted.text, '""');
     assert.deepEqual(inserted.rows.map(row => row.map(cell => cell.value)), [['']]);
   }
+});
+
+test('CSV 빈 영역의 멀리 떨어진 셀을 한 번에 확장하고 기존 개행 형식을 보존한다', () => {
+  const state = load(Buffer.from('name,value\r\nalpha,1\r\n'), '.csv');
+  const expanded = extendCells(state, '.csv', [{ row: 1, column: 4 }, { row: 3, column: 2 }]);
+  assert.deepEqual(expanded.rows[1].map(cell => cell.value), ['alpha', '1', '', '', '']);
+  assert.deepEqual(expanded.rows[3].map(cell => cell.value), ['', '', '']);
+  assert.equal(expanded.text, 'name,value\r\nalpha,1,,,\r\n,\r\n,,');
 });

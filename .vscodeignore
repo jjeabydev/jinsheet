@@ -1,5 +1,6 @@
 .git/**
 .github/**
+docs/work/**
 .vscode-test/**
 .test-user-data/**
 test/**

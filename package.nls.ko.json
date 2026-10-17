@@ -1,4 +1,1 @@
-{
-  "displayName": "JinSheet — Excel, CSV 및 Office 뷰어",
-  "description": "VS Code에서 CSV·TSV와 지원되는 Excel을 편집하세요. 셀을 검색하고 결과를 지우며, 방향키 이동과 드래그 범위 선택을 지원합니다. Office·PDF 파일도 로컬에서 미리 봅니다."
-}
+{"displayName":"JinSheet — Excel, CSV 및 Office 뷰어","description":"VS Code에서 CSV·TSV와 지원되는 Excel을 편집하세요. 셀에서 찾기와 바꾸기를 지원하며, 방향키 이동과 드래그 범위 선택도 가능합니다. Office·PDF 파일은 로컬에서 미리 봅니다.","command.open":"JinSheet: 파일 열기","command.editAsText":"JinSheet: 텍스트로 열기","command.undo":"JinSheet: 실행 취소","command.redo":"JinSheet: 다시 실행"}

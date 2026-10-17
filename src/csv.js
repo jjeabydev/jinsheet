@@ -172,4 +172,39 @@ function transformStructure(state, extension, operation) {
   return load(encode(text, state.encoding, state.bom), extension, state.delimiter);
 }
 
-module.exports = { applyEdits, transformStructure, decode, detectDelimiter, encode, load, parse, quote };
+function extendCells(state, extension, coordinates) {
+  if (!Array.isArray(coordinates) || coordinates.some(item => !Number.isInteger(item?.row) || item.row < 0 || !Number.isInteger(item?.column) || item.column < 0)) throw new RangeError('CSV 셀 확장 좌표가 유효하지 않습니다.');
+  if (!coordinates.length) return state;
+  const lastRow = Math.max(...coordinates.map(item => item.row));
+  let expanded = state;
+  if (lastRow >= 10000) throw new RangeError('CSV 행 제한을 벗어난 셀입니다.');
+  if (expanded.rows.length <= lastRow) {
+    const missingRows = lastRow + 1 - expanded.rows.length;
+    const width = Math.max(1, expanded.rows.reduce((count, row) => Math.max(count, row.length), 0));
+    const record = Array(width).fill('').join(expanded.delimiter);
+    const ending = recordEnding(expanded, expanded.rows.length);
+    let suffix;
+    if (!expanded.rows.length) {
+      // Preserve the established representation for the first empty CSV row.
+      suffix = quote('', expanded.delimiter, true) + (missingRows > 1 ? ending + Array(missingRows - 1).fill(record).join(ending) : '');
+    } else {
+      const last = expanded.rows[expanded.rows.length - 1];
+      suffix = (last.terminator ? '' : ending) + Array(missingRows).fill(record).join(ending);
+    }
+    const text = expanded.text + suffix;
+    expanded = load(encode(text, expanded.encoding, expanded.bom), extension, expanded.delimiter);
+  }
+  const columnsByRow = new Map();
+  for (const { row, column } of coordinates) columnsByRow.set(row, Math.max(columnsByRow.get(row) ?? -1, column));
+  const patches = [];
+  for (const [rowIndex, lastColumn] of columnsByRow) {
+    const row = expanded.rows[rowIndex];
+    const missingFields = lastColumn + 1 - row.length;
+    if (missingFields > 0) patches.push({ start: row.contentEnd, end: row.contentEnd, replacement: expanded.delimiter.repeat(missingFields) });
+  }
+  if (!patches.length) return expanded;
+  const text = applyStructure(expanded.text, patches);
+  return load(encode(text, expanded.encoding, expanded.bom), extension, expanded.delimiter);
+}
+
+module.exports = { applyEdits, transformStructure, extendCells, decode, detectDelimiter, encode, load, parse, quote };

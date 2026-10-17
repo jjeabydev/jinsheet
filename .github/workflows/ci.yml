@@ -38,6 +38,18 @@ jobs:
       - name: VS Code Extension Host tests (macOS and Windows)
         if: runner.os != 'Linux'
         run: npm run test:host
+      - name: Korean Webview locale test (Linux)
+        if: runner.os == 'Linux'
+        env:
+          JINSHEET_HOST_LOCALE: ko-KR
+          JINSHEET_HOST_GREP: previews duplicate rows
+        run: xvfb-run -a npm run test:host
+      - name: Korean Webview locale test (macOS and Windows)
+        if: runner.os != 'Linux'
+        env:
+          JINSHEET_HOST_LOCALE: ko-KR
+          JINSHEET_HOST_GREP: previews duplicate rows
+        run: npm run test:host
       - name: Build VSIX
         run: npm run package
       - name: Retain platform package

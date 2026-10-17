@@ -3,7 +3,6 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { pathToFileURL } = require('node:url');
 const { MAX_PDF_BYTES, MAX_PDF_CANVAS_PIXELS, MAX_PDF_CANVAS_DIMENSION, pdfCanvasOutputScale, validatePdfInput } = require('../src/pdf');
 
 
@@ -15,7 +14,7 @@ test('PDF magic header and size limits are validated', () => {
 });
 
 test('bundled PDF.js parses and extracts text from a local fixture without Office software', async () => {
-  const standardFontDataUrl = pathToFileURL(path.resolve(__dirname, '../media/pdf-standard-fonts') + path.sep).href;
+  const standardFontDataUrl = path.resolve(__dirname, '../media/pdf-standard-fonts') + path.sep;
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
   const sample = fs.readFileSync(path.join(__dirname, 'fixtures/JinSheet-Sample.pdf'));
   assert.deepEqual(validatePdfInput(sample), { format: 'pdf', title: 'PDF 문서' });

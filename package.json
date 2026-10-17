@@ -2,7 +2,7 @@
   "name": "jinsheet",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "1.0.9",
+  "version": "1.1.0",
   "publisher": "jjeabydev",
   "engines": {
     "vscode": "^1.90.0"
@@ -75,17 +75,45 @@
     "commands": [
       {
         "command": "jinsheet.open",
-        "title": "JinSheet: Open File"
+        "title": "%command.open%"
       },
       {
         "command": "jinsheet.editAsText",
-        "title": "JinSheet: Open as Text"
+        "title": "%command.editAsText%"
+      },
+      {
+        "command": "jinsheet.undo",
+        "title": "%command.undo%"
+      },
+      {
+        "command": "jinsheet.redo",
+        "title": "%command.redo%"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "jinsheet.undo",
+        "key": "ctrl+z",
+        "mac": "cmd+z",
+        "when": "activeCustomEditorId == jinsheet.editor"
+      },
+      {
+        "command": "jinsheet.redo",
+        "key": "ctrl+y",
+        "mac": "cmd+shift+z",
+        "when": "activeCustomEditorId == jinsheet.editor"
+      },
+      {
+        "command": "jinsheet.redo",
+        "key": "ctrl+shift+z",
+        "mac": "cmd+y",
+        "when": "activeCustomEditorId == jinsheet.editor"
       }
     ]
   },
   "scripts": {
-    "test": "node --test test/csv.test.js test/document.test.js test/grid.test.js test/i18n.test.js test/manifest.test.js test/office.test.js test/pdf.test.js test/xlsx.test.js",
-    "check": "node --check src/i18n.js && node --check src/extension.js && node --check src/csv.js && node --check src/xlsx.js && node --check src/office.js && node --check src/pdf.js && node --check src/grid.js && node --check test/runExtensionTests.js && node --check test/host/suite.js && node --check test/manifest.test.js && node --check scripts/build-renderers.js && node --check test/helpers/pdf-fixture.js",
+    "test": "node --test test/auto-filter.test.js test/csv.test.js test/document.test.js test/grid.test.js test/header-footer.test.js test/i18n.test.js test/manifest.test.js test/office.test.js test/pdf.test.js test/printing.test.js test/style-colors.test.js test/text-to-columns.test.js test/xlsx.test.js",
+    "check": "node --check src/i18n.js && node --check src/extension.js && node --check src/csv.js && node --check src/xlsx.js && node --check src/formula.js && node --check src/office.js && node --check src/pdf.js && node --check src/printing.js && node --check src/chart-print.js && node --check src/header-footer.js && node --check src/grid.js && node --check src/auto-filter.js && node --check src/conditional-style.js && node --check src/formula-references.js && node --check src/style-colors.js && node --check src/text-to-columns.js && node --check test/runExtensionTests.js && node --check test/host/suite.js && node --check test/manifest.test.js && node --check test/text-to-columns.test.js && node --check scripts/build-renderers.js && node --check test/helpers/pdf-fixture.js",
     "test:host": "npm run build:renderers && node test/runExtensionTests.js",
     "package": "npm run build:renderers && vsce package --no-dependencies",
     "build:renderers": "node scripts/build-renderers.js"
@@ -101,6 +129,7 @@
     "docx-preview": "^0.4.1",
     "esbuild": "^0.28.2",
     "mocha": "^12.0.3",
+    "parse5": "^8.0.1",
     "pdfjs-dist": "^4.10.38"
   },
   "author": {

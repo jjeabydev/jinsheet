@@ -84,20 +84,27 @@ function quote(value, delimiter, forceQuote) {
     ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
+function applyTextPatches(text, patches, errorMessage, validPatch) {
+  const ordered = patches.map((patch, index) => ({ ...patch, index }))
+    .sort((left, right) => left.start - right.start || right.index - left.index);
+  const chunks = [];
+  let offset = 0;
+  for (const patch of ordered) {
+    if (!validPatch(patch) || patch.start < offset) throw new Error(errorMessage);
+    chunks.push(text.slice(offset, patch.start), patch.replacement);
+    offset = patch.end;
+  }
+  chunks.push(text.slice(offset));
+  return chunks.join('');
+}
+
 function applyEdits(text, rows, edits, delimiter) {
   const patches = edits.map(({ row, column, value }) => {
     const field = rows[row]?.[column];
     if (!field) throw new RangeError('수정할 셀 범위를 벗어났습니다.');
     return { start: field.start, end: field.end, replacement: quote(value, delimiter, field.quoted) };
-  }).sort((a, b) => b.start - a.start);
-  let result = text;
-  let previousStart = text.length + 1;
-  for (const patch of patches) {
-    if (patch.end > previousStart) throw new Error('겹치는 셀 수정 요청을 거부했습니다.');
-    result = result.slice(0, patch.start) + patch.replacement + result.slice(patch.end);
-    previousStart = patch.start;
-  }
-  return result;
+  });
+  return applyTextPatches(text, patches, '겹치는 셀 수정 요청을 거부했습니다.', patch => patch.start >= 0 && patch.end >= patch.start && patch.end <= text.length);
 }
 
 function load(bytes, extension, preferredDelimiter) {
@@ -108,15 +115,7 @@ function load(bytes, extension, preferredDelimiter) {
 }
 
 function applyStructure(text, patches) {
-  let result = text;
-  const ordered = [...patches].sort((a, b) => b.start - a.start);
-  let previousStart = text.length + 1;
-  for (const patch of ordered) {
-    if (patch.start < 0 || patch.end < patch.start || patch.end > previousStart) throw new Error('CSV 구조 변경 범위가 겹치거나 유효하지 않습니다.');
-    result = result.slice(0, patch.start) + patch.replacement + result.slice(patch.end);
-    previousStart = patch.start;
-  }
-  return result;
+  return applyTextPatches(text, patches, 'CSV 구조 변경 범위가 겹치거나 유효하지 않습니다.', patch => patch.start >= 0 && patch.end >= patch.start && patch.end <= text.length);
 }
 
 function recordEnding(state, index) {

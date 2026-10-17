@@ -36,6 +36,24 @@ test('필드 source offset으로 수정 영역만 교체한다', () => {
   const text = 'left," keep ",right\n';
   const rows = parse(text, ',');
   assert.equal(applyEdits(text, rows, [{ row: 0, column: 1, value: 'new' }], ','), 'left,"new",right\n');
+  assert.throws(() => applyEdits(text, rows, [{ row: 0, column: 1, value: 'first' }, { row: 0, column: 1, value: 'second' }], ','), /겹치는 셀 수정 요청/);
+});
+
+test('CSV 대량 셀 수정과 열 구조 편집은 모든 패치를 보존한다', () => {
+  const rowCount = 4000;
+  const text = Array.from({ length: rowCount }, (_, row) => `row${row},value${row},extra${row}`).join('\n');
+  const rows = parse(text, ',');
+  const edits = rows.map((_, row) => ({ row, column: 1, value: `updated${row}` }));
+  const changed = parse(applyEdits(text, rows, edits, ','), ',');
+  assert.equal(changed.length, rowCount);
+  assert.deepEqual(changed[0].map(cell => cell.value), ['row0', 'updated0', 'extra0']);
+  assert.deepEqual(changed.at(-1).map(cell => cell.value), [`row${rowCount - 1}`, `updated${rowCount - 1}`, `extra${rowCount - 1}`]);
+
+  const state = load(Buffer.from(text), '.csv');
+  const columnDeleted = transformStructure(state, '.csv', { axis: 'column', action: 'delete', index: 1 });
+  assert.equal(columnDeleted.rows.length, rowCount);
+  assert.deepEqual(columnDeleted.rows[0].map(cell => cell.value), ['row0', 'extra0']);
+  assert.deepEqual(columnDeleted.rows.at(-1).map(cell => cell.value), [`row${rowCount - 1}`, `extra${rowCount - 1}`]);
 });
 
 test('CSV/TSV 행·열 구조 변경은 원래 필드와 혼합 개행을 보존한다', () => {

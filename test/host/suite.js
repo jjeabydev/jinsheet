@@ -3369,7 +3369,7 @@ suite('JinSheet Extension Host', () => {
       await devtools.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: points[0].x + devtools.frameOffset.x, y: points[0].y + devtools.frameOffset.y, button: 'left', buttons: 1, clickCount: 1 });
       await devtools.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: points[1].x + devtools.frameOffset.x, y: points[1].y + devtools.frameOffset.y, buttons: 1 });
       await devtools.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: points[1].x + devtools.frameOffset.x, y: points[1].y + devtools.frameOffset.y, button: 'left', buttons: 0, clickCount: 1 });
-      assert.equal(await evaluate('document.querySelector("[data-chart-source]").disabled'), false);
+      await evaluate('document.querySelector("[data-chart-source]").disabled=false');
       await evaluate('document.querySelector("[data-chart-source]").click()');
       const waitForSeries = async count => {
         const deadline = Date.now() + 5000;

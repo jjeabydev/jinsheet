@@ -15,7 +15,8 @@ async function main() {
     fs.mkdirSync(userDataDir, { recursive: true });
     const resourceCandidates = [
       path.join(path.dirname(vscodeExecutablePath), 'resources', 'app', 'out', 'nls.messages.json'),
-      path.resolve(vscodeExecutablePath, '..', '..', 'Resources', 'app', 'out', 'nls.messages.json')
+      path.resolve(vscodeExecutablePath, '..', '..', 'Resources', 'app', 'out', 'nls.messages.json'),
+      path.resolve(vscodeExecutablePath, '..', '..', '..', 'resources', 'app', 'out', 'nls.messages.json')
     ];
     const defaultMessagesFile = resourceCandidates.find(candidate => fs.existsSync(candidate));
     if (!defaultMessagesFile) throw new Error('Could not locate the VS Code default NLS messages for the requested host locale.');

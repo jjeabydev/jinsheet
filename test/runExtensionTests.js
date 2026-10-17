@@ -19,8 +19,16 @@ async function main() {
       resourceCandidates.push(
         path.join(directory, 'resources', 'app', 'out', 'nls.messages.json'),
         path.join(directory, 'resources', 'app', 'out', 'vs', 'nls.messages.json'),
-        path.join(directory, 'Contents', 'Resources', 'app', 'out', 'nls.messages.json')
+        path.join(directory, 'Contents', 'Resources', 'app', 'out', 'nls.messages.json'),
+        path.join(directory, 'Contents', 'Resources', 'app', 'out', 'vs', 'nls.messages.json'),
+        path.join(directory, 'resources', 'app', 'out', 'vs', 'nls.messages.json')
       );
+      if (process.platform === 'win32') {
+        resourceCandidates.push(
+          path.join(directory, 'resources', 'app', 'out', 'vs', 'nls.messages.json'),
+          path.join(directory, 'resources', 'app', 'out', 'nls.messages.json')
+        );
+      }
       const parent = path.dirname(directory);
       if (parent === directory) break;
       directory = parent;
@@ -58,6 +66,7 @@ async function main() {
   const launchArgs = [...(locale ? [] : ['--disable-extensions']), '--disable-gpu', '--remote-debugging-port=9333', '--remote-allow-origins=*', `--user-data-dir=${userDataDir}`];
   if (locale) launchArgs.push(`--locale=${locale.split('-')[0]}`, `--extensions-dir=${extensionsDir}`);
   if (process.platform === 'linux') launchArgs.push('--no-sandbox');
+  if (locale) Object.assign(process.env, { LANG: 'ko_KR.UTF-8', LANGUAGE: 'ko_KR:ko', LC_ALL: 'ko_KR.UTF-8' });
   const code = await runTests({
     vscodeExecutablePath,
     extensionDevelopmentPath: path.resolve(__dirname, '..'),

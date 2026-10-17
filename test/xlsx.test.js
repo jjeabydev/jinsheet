@@ -3831,6 +3831,27 @@ test('LibreOffice 복합 XLSX의 사용자 지정 문서 속성과 행·열 그�
   assert.throws(() => analyze(zipSync(missingProperties)), /사용자 지정 문서 속성 관계 대상을 찾을 수 없습니다/);
 });
 
+test('XLSX 미리보기 썸네일은 편집 가능 상태와 저장 후 패키지 보존을 유지한다', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const files = { ...analyze(fixture()).files };
+  const rootRels = new TextDecoder().decode(files['_rels/.rels']).replace('</Relationships>', '<Relationship Id="rThumb" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail" Target="docProps/thumbnail.png"/></Relationships>');
+  const contentTypes = new TextDecoder().decode(files['[Content_Types].xml']).replace('</Types>', '<Default Extension="png" ContentType="image/png"/></Types>');
+  files['_rels/.rels'] = new TextEncoder().encode(rootRels);
+  files['[Content_Types].xml'] = new TextEncoder().encode(contentTypes);
+  files['docProps/thumbnail.png'] = fs.readFileSync(path.join(__dirname, '..', 'media', 'icon.png'));
+  const source = analyze(zipSync(files));
+  assert.equal(source.writable, true, source.readOnlyReason);
+
+  const edited = analyze(patchCell(source, 0, 'A1', 'Edited').bytes);
+  assert.equal(edited.writable, true, edited.readOnlyReason);
+  assert.equal(edited.sheets[0].cells.get('A1').value, 'Edited');
+  assert.equal(Buffer.compare(Buffer.from(edited.files['docProps/thumbnail.png']), Buffer.from(files['docProps/thumbnail.png'])), 0);
+  const missingThumbnail = { ...files };
+  delete missingThumbnail['docProps/thumbnail.png'];
+  assert.throws(() => analyze(zipSync(missingThumbnail)), /문서 미리보기 썸네일 관계 대상을 찾을 수 없습니다/);
+});
+
 test('LibreOffice 호환 boolean 처리 뒤에도 활성 미지원 규칙과 잘못된 boolean은 편집을 차단한다', () => {
   const conditionalFiles = unzipSync(fixture({ formatted: true }));
   const worksheet = new TextDecoder().decode(conditionalFiles['xl/worksheets/sheet1.xml']);

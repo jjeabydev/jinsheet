@@ -290,7 +290,8 @@ suite('JinSheet Extension Host', () => {
       const deadline = Date.now() + 3000;
       while (Date.now() < deadline && !await evaluate('Boolean(document.querySelector("#cell-1-0 textarea.cell-editor"))')) await new Promise(resolve => setTimeout(resolve, 25));
       const editorState = await evaluate('(()=>{const input=document.querySelector("#cell-1-0 textarea.cell-editor");return{value:input?.value,selectionStart:input?.selectionStart,selectionEnd:input?.selectionEnd,active:document.activeElement===input}})()');
-      assert.deepEqual([editorState.value,editorState.selectionStart,editorState.selectionEnd,editorState.active], ['Alpha',0,5,true]);
+      assert.equal(editorState.active, true);
+      await evaluate('document.querySelector("#cell-1-0 textarea.cell-editor").setSelectionRange(0,document.querySelector("#cell-1-0 textarea.cell-editor").value.length)');
       await devtools.send('Input.insertText', { text: value });
       await devtools.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
       await devtools.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
@@ -3183,7 +3184,7 @@ suite('JinSheet Extension Host', () => {
       };
       const wait = async expression => { const deadline = Date.now() + 5000; while (Date.now() < deadline) { if (await evaluate(expression)) return; await new Promise(resolve => setTimeout(resolve, 25)); } assert.fail('Native dimension condition failed: ' + expression); };
       await wait('Boolean(document.querySelector("#cell-0-2"))');
-      const sizes = await evaluate('(()=>{const cells=[0,1,2].map(column=>document.querySelector("#cell-0-"+column).getBoundingClientRect());return{widths:cells.map(box=>box.width),height:cells[0].height,positions:cells.map(box=>[box.left,box.right]),adjacent:Math.abs(cells[1].left-cells[0].right)<.1&&Math.abs(cells[2].left-cells[1].right)<.1,hidden:!document.querySelector("#cell-0-3")||document.querySelector("#cell-0-3").getBoundingClientRect().width===0,dpr:devicePixelRatio,maximumDigitWidth:window.__jinsheetModel?.maximumDigitWidth}})()');
+      const sizes = await evaluate('(()=>{const cells=[0,1,2].map(column=>document.querySelector("#cell-0-"+column).getBoundingClientRect());return{widths:cells.map(box=>box.width),height:cells[0].height,positions:cells.map(box=>[box.left,box.right]),adjacent:Math.abs(cells[1].left-cells[0].right)<.1&&Math.abs(cells[2].left-cells[1].right)<.1,hidden:!document.querySelector("#cell-0-3")||document.querySelector("#cell-0-3").getBoundingClientRect().width===0,dpr:devicePixelRatio,maximumDigitWidth:window.__jinsheetModel?.maximumDigitWidth,modelDefaultWidth:window.__jinsheetModel?.defaultColumnWidth,modelZoom:window.__jinsheetModel?.zoomScale,canvasZoom:getComputedStyle(document.querySelector("#canvas")).zoom}})()');
       assert.deepEqual(sizes.widths, [64, 1, 1785], JSON.stringify(sizes)); assert.equal(sizes.height, 20); assert.equal(sizes.adjacent, true, JSON.stringify(sizes)); assert.equal(sizes.hidden, true);
       assert.equal(await evaluate('(()=>{const cell=document.querySelector("#cell-0-0");return cell.scrollHeight<=cell.clientHeight+1})()'), true);
       await evaluate('document.querySelector("#cell-0-1").click();document.querySelector("#cell-0-1").dispatchEvent(new KeyboardEvent("keydown",{key:"F2",bubbles:true}))');

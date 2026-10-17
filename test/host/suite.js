@@ -774,6 +774,9 @@ suite('JinSheet Extension Host', () => {
         if (response.exceptionDetails) throw new Error(response.exceptionDetails.text);
         return response.result?.value;
       };
+      const cellDeadline = Date.now() + 5000;
+      while (Date.now() < cellDeadline && !await evaluate('Boolean(document.querySelector("#cell-1-2"))')) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(await evaluate('Boolean(document.querySelector("#cell-1-2"))'), true);
       const original = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
       const cellPoint = await evaluate(`(() => {const r=document.querySelector('#cell-1-2').getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);
       await devtools.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: cellPoint.x + devtools.frameOffset.x, y: cellPoint.y + devtools.frameOffset.y, button: 'left', buttons: 1, clickCount: 1 });

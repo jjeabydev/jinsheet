@@ -57,7 +57,7 @@ async function main() {
       osLocale: Intl.DateTimeFormat().resolvedOptions().locale || 'en',
       resolvedLanguage: 'ko',
       defaultMessagesFile,
-      languagePack: { translationsConfigFile: path.join(languagePackDirectory, translationsConfigFile) }
+      languagePack: { messagesFile: path.join(languagePackDirectory, translationsConfigFile) }
     };
     process.env.VSCODE_NLS_CONFIG = JSON.stringify(nlsConfig);
     process.env.VSCODE_PORTABLE = userDataDir;

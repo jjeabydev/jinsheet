@@ -59,8 +59,18 @@ async function main() {
       osLocale: Intl.DateTimeFormat().resolvedOptions().locale || 'en',
       resolvedLanguage: 'ko',
       defaultMessagesFile,
-      languagePack: { translationsConfigFile: path.join(languagePackDirectory, translationsConfigFile) }
+      languagePack: { messagesFile: path.join(userDataDir, 'korean-nls.messages.json'), translationsConfigFile: path.join(languagePackDirectory, translationsConfigFile) }
     };
+    const keysPath = path.join(path.dirname(defaultMessagesFile), 'nls.keys.json');
+    const messagesPath = defaultMessagesFile;
+    const languagePackMessages = JSON.parse(fs.readFileSync(path.join(languagePackDirectory, translationsConfigFile), 'utf8'));
+    const defaultMessages = JSON.parse(fs.readFileSync(messagesPath, 'utf8'));
+    const keys = JSON.parse(fs.readFileSync(keysPath, 'utf8'));
+    if (!languagePackMessages.contents || typeof languagePackMessages.contents !== 'object' || !Array.isArray(keys)) throw new Error('VS Code Korean translation metadata has an unsupported format.');
+    const localizedMessages = [];
+    let messageIndex = 0;
+    for (const [moduleId, messageKeys] of keys) for (const key of messageKeys) localizedMessages.push(languagePackMessages.contents[moduleId]?.[key] || defaultMessages[messageIndex++]);
+    fs.writeFileSync(nlsConfig.languagePack.messagesFile, JSON.stringify(localizedMessages));
     process.env.VSCODE_NLS_CONFIG = JSON.stringify(nlsConfig);
     process.env.VSCODE_PORTABLE = userDataDir;
     fs.writeFileSync(path.join(userDataDir, 'argv.json'), JSON.stringify({ locale: 'ko' }));

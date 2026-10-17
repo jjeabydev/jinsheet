@@ -1585,8 +1585,15 @@ suite('JinSheet Extension Host', () => {
       const fillDisplayDeadline = Date.now() + 5000;
       while (Date.now() < fillDisplayDeadline && pickCount < 26) await new Promise(resolve => setTimeout(resolve, 25));
       assert.equal(pickCount, 26);
-      await vscode.commands.executeCommand('workbench.action.files.save');
-      const displaySaved = analyze(await fs.readFile(file));
+      const displaySaveDeadline = Date.now() + 5000;
+      let displaySaved;
+      do {
+        await vscode.commands.executeCommand('workbench.action.files.save');
+        displaySaved = analyze(await fs.readFile(file));
+        const dataBar = displaySaved.sheets[0].conditionalFormats.find(rule => rule.type === 'dataBar')?.dataBar;
+        if (dataBar?.minLength === 75 && dataBar.maxLength === 95 && dataBar.showValue === false && dataBar.gradient === false) break;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      } while (Date.now() < displaySaveDeadline);
       assert.deepEqual(displaySaved.sheets[0].conditionalFormats.find(rule => rule.type === 'dataBar').dataBar, { color: '#4472C4', minLength: 75, maxLength: 95, showValue: false, gradient: false });
     } finally {
       vscode.window.showQuickPick = originalQuickPick; vscode.window.showInputBox = originalInputBox;

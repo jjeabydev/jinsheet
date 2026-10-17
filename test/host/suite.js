@@ -3374,7 +3374,8 @@ suite('JinSheet Extension Host', () => {
       await devtools.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: points[1].x + devtools.frameOffset.x, y: points[1].y + devtools.frameOffset.y, buttons: 1 });
       await devtools.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: points[1].x + devtools.frameOffset.x, y: points[1].y + devtools.frameOffset.y, button: 'left', buttons: 0, clickCount: 1 });
       await evaluate('const address=document.querySelector("#address");address.value="A1:C3";address.dispatchEvent(new Event("input",{bubbles:true}));address.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}))');
-      const sourceEnableDeadline=Date.now()+5000;while(Date.now()<sourceEnableDeadline&&await evaluate('document.querySelector("[data-chart-source]").disabled'))await new Promise(resolve=>setTimeout(resolve,25));
+      const sourceEnableDeadline=Date.now()+5000;while(Date.now()<sourceEnableDeadline&&await evaluate('document.querySelectorAll(".cell.in-range").length<9'))await new Promise(resolve=>setTimeout(resolve,25));
+      assert.equal(await evaluate('document.querySelectorAll(".cell.in-range").length>=9'),true);
       assert.equal(await evaluate('document.querySelector("[data-chart-source]").disabled'),false);
       await evaluate('document.querySelector("[data-chart-source]").click()');
       const waitForSeries = async count => {

@@ -2124,7 +2124,7 @@ suite('JinSheet Extension Host', () => {
       await wait('Boolean(document.querySelector(".rowhead[data-row=\\"1\\"] .outline-row-bracket.outline-bracket-start"))');
       await wait('Boolean(document.querySelector(".rowhead[data-row=\\"2\\"] .outline-row-bracket.outline-bracket-end"))');
       await wait('document.querySelector(".rowhead[data-row=\\"3\\"] .outline-toggle")?.textContent==="−"');
-      await evaluate('document.querySelector(".rowhead[data-row=\\"3\\"] .outline-toggle").click()');
+      await wait('(()=>{const toggle=document.querySelector(".rowhead[data-row=\\"3\\"] .outline-toggle");if(!toggle)return false;toggle.click();return true})()');
       await wait('document.querySelector("#expandRows").disabled===false');
       await vscode.commands.executeCommand('workbench.action.files.save');
       let saved = analyze(await fs.readFile(file));
@@ -2137,7 +2137,7 @@ suite('JinSheet Extension Host', () => {
       await vscode.commands.executeCommand('jinsheet.redo');
       await wait('document.querySelector("#expandRows").disabled===false');
       await wait('document.querySelector(".rowhead[data-row=\\"3\\"] .outline-toggle")?.textContent==="+"');
-      await evaluate('document.querySelector(".rowhead[data-row=\\"3\\"] .outline-toggle").click()');
+      await wait('(()=>{const toggle=document.querySelector(".rowhead[data-row=\\"3\\"] .outline-toggle");if(!toggle)return false;toggle.click();return true})()');
       await wait('document.querySelector("#expandRows").disabled===true');
       await evaluate('document.querySelector("#ungroupRows").click()');
       await vscode.commands.executeCommand('workbench.action.files.save');
@@ -2209,7 +2209,7 @@ suite('JinSheet Extension Host', () => {
       await wait('Boolean(document.querySelector("#cell-2-0"))');
       await wait('Boolean(document.querySelector(".rowhead[data-row=\\"3\\"] .outline-toggle"))');
       assert.equal(await evaluate('document.querySelectorAll(".rowhead[data-row=\\"3\\"] .outline-toggle").length'), 1);
-      await evaluate('document.querySelector(".rowhead[data-row=\\"3\\"] .outline-toggle").click()');
+      await wait('(()=>{const toggle=document.querySelector(".rowhead[data-row=\\"3\\"] .outline-toggle");if(!toggle)return false;toggle.click();return true})()');
       await wait('document.querySelector(".rowhead[data-row=\\"3\\"] .outline-toggle")?.textContent==="+"');
       await wait('!document.querySelector("#cell-1-0")&&!document.querySelector("#cell-2-0")');
       await vscode.commands.executeCommand('workbench.action.files.save');
@@ -2218,7 +2218,7 @@ suite('JinSheet Extension Host', () => {
       assert.deepEqual(saved.sheets[0].outlineHiddenRows, [1, 2]);
 
       await wait('Boolean(document.querySelector(".rowhead[data-row=\\"3\\"] .outline-toggle"))');
-      await evaluate('document.querySelector(".rowhead[data-row=\\"3\\"] .outline-toggle").click()');
+      await wait('(()=>{const toggle=document.querySelector(".rowhead[data-row=\\"3\\"] .outline-toggle");if(!toggle)return false;toggle.click();return true})()');
       await wait('document.querySelector(".rowhead[data-row=\\"3\\"] .outline-toggle")?.textContent==="−"');
       await wait('Boolean(document.querySelector("#cell-1-0"))&&Boolean(document.querySelector("#cell-2-0"))');
       await vscode.commands.executeCommand('workbench.action.files.save');

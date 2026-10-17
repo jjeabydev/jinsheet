@@ -18,6 +18,7 @@ async function main() {
     for (let depth = 0; depth < 6; depth++) {
       resourceCandidates.push(
         path.join(directory, 'resources', 'app', 'out', 'nls.messages.json'),
+        path.join(directory, 'resources', 'app', 'out', 'vs', 'nls.messages.json'),
         path.join(directory, 'Contents', 'Resources', 'app', 'out', 'nls.messages.json')
       );
       const parent = path.dirname(directory);
@@ -28,8 +29,6 @@ async function main() {
     if (!defaultMessagesFile) throw new Error('Could not locate the VS Code default NLS messages for the requested host locale.');
     const cliPath = path.join(path.dirname(defaultMessagesFile), 'cli.js');
     if (!fs.existsSync(cliPath)) throw new Error('Could not locate the VS Code CLI for installing the requested language pack.');
-    fs.mkdirSync(path.join(userDataDir, 'User'), { recursive: true });
-    fs.writeFileSync(path.join(userDataDir, 'User', 'locale.json'), JSON.stringify({ locale: locale.split('-')[0] }));
     const install = spawnSync(vscodeExecutablePath, [cliPath, `--user-data-dir=${userDataDir}`, `--extensions-dir=${extensionsDir}`, '--install-extension=MS-CEINTL.vscode-language-pack-ko', '--force'], {
       encoding: 'utf8',
       timeout: 180000,
@@ -50,11 +49,11 @@ async function main() {
       osLocale: Intl.DateTimeFormat().resolvedOptions().locale || 'en',
       resolvedLanguage: 'ko',
       defaultMessagesFile,
-      languagePack: {
-        translationsConfigFile: path.join(languagePackDirectory, translationsConfigFile)
-      }
+      languagePack: { translationsConfigFile: path.join(languagePackDirectory, translationsConfigFile) }
     };
     process.env.VSCODE_NLS_CONFIG = JSON.stringify(nlsConfig);
+    process.env.VSCODE_PORTABLE = userDataDir;
+    fs.writeFileSync(path.join(userDataDir, 'argv.json'), JSON.stringify({ locale: 'ko' }));
   }
   const launchArgs = [...(locale ? [] : ['--disable-extensions']), '--disable-gpu', '--remote-debugging-port=9333', '--remote-allow-origins=*', `--user-data-dir=${userDataDir}`];
   if (locale) launchArgs.push(`--locale=${locale.split('-')[0]}`, `--extensions-dir=${extensionsDir}`);

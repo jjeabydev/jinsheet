@@ -2680,6 +2680,7 @@ suite('JinSheet Extension Host', () => {
       await evaluate('document.querySelector("#printFit").checked=false;document.querySelector("#printScale").value="100";document.querySelector("#applyPageSettings").click()');
       const rowCellDeadline=Date.now()+10000;while(Date.now()<rowCellDeadline&&!await evaluate('Boolean(document.querySelector("#cell-4-4"))'))await new Promise(resolve=>setTimeout(resolve,25));
       assert.equal(await evaluate('Boolean(document.querySelector("#cell-4-4"))'),true,'worksheet cells are rendered after applying page settings');
+      await evaluate('document.querySelector("#printPanel").open=true');
       await evaluate('document.querySelector("#cell-4-4").click()');
       const rowSelectionDeadline=Date.now()+5000;while(Date.now()<rowSelectionDeadline&&await evaluate('document.querySelector("#address").value!=="E5"'))await new Promise(resolve=>setTimeout(resolve,25));
       assert.equal(await evaluate('document.querySelector("#address").value'), 'E5', 'the target row is selected before adding a page break');
@@ -4032,6 +4033,8 @@ suite('JinSheet Extension Host', () => {
       await vscode.commands.executeCommand('jinsheet.redo');
       await waitFor('document.querySelector("#cell-1-1")?.textContent === "name"', 'redo restores the clipboard paste');
       await vscode.commands.executeCommand('workbench.action.files.save');
+      const redoSaveDeadline = Date.now() + 5000;
+      while (Date.now() < redoSaveDeadline && await fs.readFile(file, 'utf8') !== 'name,value\nalpha,name\n') await new Promise(resolve => setTimeout(resolve, 50));
       assert.equal(await fs.readFile(file, 'utf8'), 'name,value\nalpha,name\n', 'redo of a clipboard paste is saved to the CSV');
 
       await waitFor('Boolean(document.querySelector("#cell-1-0"))', 'source row is rendered again after saving');

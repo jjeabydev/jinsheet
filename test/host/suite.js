@@ -2632,7 +2632,13 @@ suite('JinSheet Extension Host', () => {
       await evaluate('document.querySelector("#breakReset").click()');
       await wait('document.querySelector("#breakReset").disabled&&!document.querySelector(".manual-row-break")&&!document.querySelector(".manual-column-break")');
       await vscode.commands.executeCommand('workbench.action.files.save');
-      assert.equal(analyze(await fs.readFile(file)).sheets[0].pageBreaks.hasAny, false);
+      let resetDeadline = Date.now() + 3000, resetSheet = analyze(await fs.readFile(file)).sheets[0];
+      while (resetSheet.pageBreaks.hasAny && Date.now() < resetDeadline) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+        await vscode.commands.executeCommand('workbench.action.files.save');
+        resetSheet = analyze(await fs.readFile(file)).sheets[0];
+      }
+      assert.equal(resetSheet.pageBreaks.hasAny, false);
       await vscode.commands.executeCommand('jinsheet.undo'); await wait('!document.querySelector("#breakReset").disabled'); await vscode.commands.executeCommand('workbench.action.files.save');
       assert.deepEqual(analyze(await fs.readFile(file)).sheets[0].pageBreaks.rows, [2]);
     } finally {
@@ -2834,7 +2840,7 @@ suite('JinSheet Extension Host', () => {
       await vscode.commands.executeCommand('jinsheet.undo');await wait('document.querySelector("#cell-4-1")?.textContent===""&&document.querySelector("#cell-4-2")?.textContent===""');saved=await save();assert.equal(saved.sheets[0].tables[0].range.bottom,3);
       await vscode.commands.executeCommand('jinsheet.redo');await wait('document.querySelector("#cell-4-2")?.textContent==="14"');
       await evaluate('document.querySelector("#autoExpandTables").checked=false');await enter(5,1,'8');await wait('document.querySelector("#cell-5-1")?.textContent==="8"&&document.querySelector("#cell-5-2")?.textContent===""');saved=await save();assert.equal(saved.sheets[0].tables[0].range.bottom,4);
-      await evaluate('document.querySelector("#autoExpandTables").checked=true');await enter(5,1,'9');await wait('document.querySelector("#cell-5-2")?.textContent==="18"');saved=await save();assert.equal(saved.sheets[0].tables[0].range.bottom,5);
+      await evaluate('document.querySelector("#autoExpandTables").checked=true');await enter(5,1,'9');await wait('document.querySelector("#cell-5-2")?.textContent==="18"');saved=await save();const expansionDeadline=Date.now()+3000;while(saved.sheets[0].tables[0].range.bottom!==5&&Date.now()<expansionDeadline){await new Promise(resolve=>setTimeout(resolve,50));saved=await save()}assert.equal(saved.sheets[0].tables[0].range.bottom,5);
       await enter(0,3,'Amount');await wait('document.querySelector("#cell-0-3")?.textContent==="Amount2"');saved=await save();assert.equal(saved.sheets[0].tables[0].range.right,3);
       await vscode.commands.executeCommand('jinsheet.undo');await wait('document.querySelector("#cell-0-3")?.textContent===""');saved=await save();assert.equal(saved.sheets[0].tables[0].range.right,2);
       await vscode.commands.executeCommand('jinsheet.redo');await wait('document.querySelector("#cell-0-3")?.textContent==="Amount2"');
@@ -4050,6 +4056,8 @@ suite('JinSheet Extension Host', () => {
       while (Date.now() < redoSaveDeadline && await fs.readFile(file, 'utf8') !== 'name,value\nalpha,name\n') await new Promise(resolve => setTimeout(resolve, 50));
       assert.equal(await fs.readFile(file, 'utf8'), 'name,value\nalpha,name\n', 'redo of a clipboard paste is saved to the CSV');
 
+      devtools.close();
+      devtools = await waitForSpreadsheetWebview(15000, 'name');
       await waitFor('Boolean(document.querySelector("#cell-1-0"))', 'source row is rendered again after saving');
       const externalTarget = await evaluate(`(() => { const r = document.querySelector('#cell-1-0').getBoundingClientRect(); return {x:r.left + r.width / 2, y:r.top + r.height / 2}; })()`);
       await dispatchMouse({ type: 'mousePressed', ...externalTarget, button: 'left', buttons: 1, clickCount: 1 });

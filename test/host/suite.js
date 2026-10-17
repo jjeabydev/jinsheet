@@ -403,6 +403,9 @@ suite('JinSheet Extension Host', () => {
         await devtools.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode, modifiers });
         await devtools.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode, modifiers });
       };
+      const renderDeadline = Date.now() + 5000;
+      while (Date.now() < renderDeadline && !await evaluate('Boolean(document.querySelector("#cell-0-0"))')) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.ok(await evaluate('Boolean(document.querySelector("#cell-0-0"))'), 'initial grid cells render before measuring the selected cell');
       const origin = await evaluate(`(() => {const r=document.querySelector('#cell-0-0').getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);
       await devtools.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: origin.x + devtools.frameOffset.x, y: origin.y + devtools.frameOffset.y, button: 'left', buttons: 1, clickCount: 1 });
       await devtools.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: origin.x + devtools.frameOffset.x, y: origin.y + devtools.frameOffset.y, button: 'left', buttons: 0, clickCount: 1 });

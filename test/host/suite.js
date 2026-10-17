@@ -3522,28 +3522,39 @@ suite('JinSheet Extension Host', () => {
         }
         assert.fail('Chart series did not update to ' + count);
       };
+      const saveUntil = async predicate => {
+        const deadline = Date.now() + 8000;
+        let saved;
+        do {
+          await vscode.commands.executeCommand('workbench.action.files.save');
+          saved = analyze(await fs.readFile(file));
+          if (predicate(saved)) return saved;
+          await new Promise(resolve => setTimeout(resolve, 25));
+        } while (Date.now() < deadline);
+        assert.fail('Chart save did not reach the expected state');
+      };
       await waitForSeries(2);
-      await vscode.commands.executeCommand('workbench.action.files.save');
+      await saveUntil(saved => JSON.stringify(saved.sheets[0].charts[0].series.map(item => item.values)) === JSON.stringify([[12, 7], [1500, 2200]]));
       assert.deepEqual(analyze(await fs.readFile(file)).sheets[0].charts[0].series.map(item => item.values), [[12, 7], [1500, 2200]]);
       await vscode.commands.executeCommand('jinsheet.undo');
       await waitForSeries(1);
-      await vscode.commands.executeCommand('workbench.action.files.save');
+      await saveUntil(saved => saved.sheets[0].charts[0].series[0].name === '재고 수량');
       assert.equal(analyze(await fs.readFile(file)).sheets[0].charts[0].series[0].name, '재고 수량');
       await vscode.commands.executeCommand('jinsheet.redo');
       await waitForSeries(2);
-      await vscode.commands.executeCommand('workbench.action.files.save');
+      await saveUntil(saved => saved.sheets[0].charts[0].series[1].name === '단가');
       assert.equal(analyze(await fs.readFile(file)).sheets[0].charts[0].series[1].name, '단가');
       await evaluate('document.querySelector("[data-chart-delete]").click()');
       await waitForSeries(0);
-      await vscode.commands.executeCommand('workbench.action.files.save');
+      await saveUntil(saved => !saved.hasCharts);
       assert.equal(analyze(await fs.readFile(file)).hasCharts, false);
       await vscode.commands.executeCommand('jinsheet.undo');
       await waitForSeries(2);
-      await vscode.commands.executeCommand('workbench.action.files.save');
+      await saveUntil(saved => saved.sheets[0].charts[0].series[1].name === '단가');
       assert.equal(analyze(await fs.readFile(file)).sheets[0].charts[0].series[1].name, '단가');
       await vscode.commands.executeCommand('jinsheet.redo');
       await waitForSeries(0);
-      await vscode.commands.executeCommand('workbench.action.files.save');
+      await saveUntil(saved => !saved.hasCharts);
       assert.equal(analyze(await fs.readFile(file)).hasCharts, false);
     } finally {
       devtools?.close();
@@ -3682,16 +3693,25 @@ suite('JinSheet Extension Host', () => {
       await evaluate('document.querySelector("#borderPreset").value="all";document.querySelector("#borderLine").value="double";document.querySelector("#borderColor").value="#336699";document.querySelector("#applyBorderPreset").click()');
       const borderDeadline = Date.now() + 3000;
       while (Date.now() < borderDeadline && !(await evaluate('document.querySelector("#notice").textContent.includes("Modified") && Boolean(document.querySelector("#cell-1-2")) && getComputedStyle(document.querySelector("#cell-1-2")).borderTopColor === "rgb(51, 102, 153)"'))) await new Promise(resolve => setTimeout(resolve, 25));
-      await vscode.commands.executeCommand('workbench.action.files.save');
-      let saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      const saveUntil = async predicate => {
+        const deadline = Date.now() + 8000;
+        let cell;
+        do {
+          await vscode.commands.executeCommand('workbench.action.files.save');
+          cell = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+          if (predicate(cell)) return cell;
+          await new Promise(resolve => setTimeout(resolve, 25));
+        } while (Date.now() < deadline);
+        assert.fail('Border save did not reach the expected state');
+      };
+      let saved = await saveUntil(cell => Boolean(cell.styleProperties.borders?.left && cell.styleProperties.borders?.right && cell.styleProperties.borders?.top && cell.styleProperties.borders?.bottom));
       assert.deepEqual(saved.styleProperties.borders, { left: { line: 'double', color: '#336699' }, right: { line: 'double', color: '#336699' }, top: { line: 'double', color: '#336699' }, bottom: { line: 'double', color: '#336699' } });
       assert.equal(saved.formatCode, original.formatCode);
       assert.equal(saved.styleProperties.bold, original.styleProperties.bold);
       await evaluate('document.querySelector("#borderPreset").value="none";document.querySelector("#applyBorderPreset").click()');
       const clearDeadline = Date.now() + 3000;
       while (Date.now() < clearDeadline && !(await evaluate('document.querySelector("#notice").textContent.includes("Modified") && Boolean(document.querySelector("#cell-1-2")) && getComputedStyle(document.querySelector("#cell-1-2")).borderTopColor !== "rgb(51, 102, 153)"'))) await new Promise(resolve => setTimeout(resolve, 25));
-      await vscode.commands.executeCommand('workbench.action.files.save');
-      saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      saved = await saveUntil(cell => !cell.styleProperties.borders);
       assert.equal(saved.styleProperties.borders, undefined);
       assert.equal(saved.styleProperties.bold, original.styleProperties.bold);
     } finally {

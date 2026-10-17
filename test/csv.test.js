@@ -56,6 +56,17 @@ test('CSV 대량 셀 수정과 열 구조 편집은 모든 패치를 보존한�
   assert.deepEqual(columnDeleted.rows.at(-1).map(cell => cell.value), [`row${rowCount - 1}`, `extra${rowCount - 1}`]);
 });
 
+test('CSV는 100,000셀 한도에서 마지막 셀과 필드 오프셋을 보존한다', () => {
+  const rowCount = 10000, columnCount = 10;
+  const text = Array.from({ length: rowCount }, (_, row) => Array.from({ length: columnCount }, (_, column) => `${row}:${column}`).join(',')).join('\n');
+  const rows = parse(text, ',');
+  assert.equal(rows.length, rowCount);
+  assert.equal(rows.reduce((count, row) => count + row.length, 0), rowCount * columnCount);
+  assert.equal(rows[0][0].value, '0:0');
+  assert.equal(rows.at(-1).at(-1).value, '9999:9');
+  assert.equal(text.slice(rows.at(-1).at(-1).start, rows.at(-1).at(-1).end), '9999:9');
+});
+
 test('CSV/TSV 행·열 구조 변경은 원래 필드와 혼합 개행을 보존한다', () => {
   const original = Buffer.from([0xef, 0xbb, 0xbf, ...Buffer.from('name,value\r\n"keep,as is",1\nbeta,2')]);
   const state = load(original, '.csv');

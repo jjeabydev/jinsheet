@@ -34,8 +34,12 @@ function detectDelimiter(text, preferred) {
 
 function parse(text, delimiter, maxCells = 100000) {
   const rows = [];
-  let row = [], value = '', start = 0, rowStart = 0, i = 0, quoted = false, fieldQuoted = false, justClosed = false, cellCount = 0;
-  const pushField = (end) => { if (++cellCount > maxCells) throw new Error(`초기 버전은 ${maxCells.toLocaleString()}셀을 넘는 CSV/TSV 파일을 열지 않습니다.`); row.push({ value, start, end, quoted: fieldQuoted }); value = ''; fieldQuoted = false; justClosed = false; start = end + 1; };
+  let row = [], value = '', start = 0, rowStart = 0, i = 0, quoted = false, fieldQuoted = false, justClosed = false, quotedValueStart = 0, quotedParts = null, cellCount = 0;
+  const pushField = (end) => {
+    if (++cellCount > maxCells) throw new Error(`초기 버전은 ${maxCells.toLocaleString()}셀을 넘는 CSV/TSV 파일을 열지 않습니다.`);
+    row.push({ value: fieldQuoted ? value : text.slice(start, end), start, end, quoted: fieldQuoted });
+    value = ''; fieldQuoted = false; justClosed = false; quotedParts = null; start = end + 1;
+  };
   const pushRow = (end, recordEnd = end) => {
     pushField(end);
     Object.defineProperties(row, {
@@ -49,19 +53,26 @@ function parse(text, delimiter, maxCells = 100000) {
   while (i < text.length) {
     const ch = text[i];
     if (quoted) {
-      if (ch === '"' && text[i + 1] === '"') { value += '"'; i += 2; continue; }
-      if (ch === '"') { quoted = false; justClosed = true; i++; continue; }
-      value += ch; i++; continue;
+      if (ch === '"' && text[i + 1] === '"') {
+        if (!quotedParts) quotedParts = [];
+        quotedParts.push(text.slice(quotedValueStart, i), '"');
+        i += 2; quotedValueStart = i; continue;
+      }
+      if (ch === '"') {
+        value = quotedParts ? quotedParts.concat(text.slice(quotedValueStart, i)).join('') : text.slice(quotedValueStart, i);
+        quoted = false; justClosed = true; i++; continue;
+      }
+      i++; continue;
     }
     if (justClosed && ch !== delimiter && ch !== '\r' && ch !== '\n') throw new Error(`인용 필드 뒤의 문자가 유효하지 않습니다 (문자 위치 ${i}).`);
-    if (ch === '"' && value.length === 0 && !fieldQuoted) { quoted = true; fieldQuoted = true; i++; continue; }
-    if (ch === delimiter) { pushField(i); i++; start = i; continue; }
+    if (ch === '"' && i === start && !fieldQuoted) { quoted = true; fieldQuoted = true; quotedValueStart = i + 1; i++; continue; }
+    if (ch === delimiter) { pushField(i); i++; continue; }
     if (ch === '\r' || ch === '\n') {
       const width = ch === '\r' && text[i + 1] === '\n' ? 2 : 1;
       pushRow(i, i + width); i += width; start = i; continue;
     }
     if (ch === '"') throw new Error(`따옴표가 잘못된 레코드입니다 (문자 위치 ${i}).`);
-    value += ch; i++;
+    i++;
   }
   if (quoted) throw new Error('닫히지 않은 인용 필드가 있어 편집을 막았습니다.');
   if (start < text.length || row.length || value.length || (text.length > 0 && !/[\r\n]$/.test(text))) pushRow(text.length);

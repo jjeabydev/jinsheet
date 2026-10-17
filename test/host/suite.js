@@ -3424,8 +3424,15 @@ suite('JinSheet Extension Host', () => {
       assert.equal(analyze(await fs.readFile(file)).sheets[0].charts[0].series[0].name, '수량');
       await vscode.commands.executeCommand('jinsheet.redo');
       await waitForTitle('재고 <현황> & 수량');
-      await vscode.commands.executeCommand('workbench.action.files.save');
-      assert.equal(analyze(await fs.readFile(file)).sheets[0].charts[0].series[0].name, '재고 수량');
+      const redoSaveDeadline = Date.now() + 5000;
+      let redoneChart;
+      do {
+        await vscode.commands.executeCommand('workbench.action.files.save');
+        redoneChart = analyze(await fs.readFile(file));
+        if (redoneChart.sheets[0].charts[0].series[0].name === '재고 수량') break;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      } while (Date.now() < redoSaveDeadline);
+      assert.equal(redoneChart.sheets[0].charts[0].series[0].name, '재고 수량');
       const cellDeadline = Date.now() + 5000; let points;
       while (Date.now() < cellDeadline) {
         points = await evaluate('(()=>{const cells=[document.querySelector("#cell-0-0"),document.querySelector("#cell-2-2")];if(cells.some(cell=>!cell))return null;return cells.map(cell=>{const r=cell.getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})})()');

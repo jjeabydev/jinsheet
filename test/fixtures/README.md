@@ -14,6 +14,8 @@ These small sample files are used to check JinSheet's editor association and pre
 
 `LibreOffice-Mixed-Features-Roundtrip.xlsx` combines a native table and filter, totals formulas, numeric validation, conditional formatting, merged cells, a formula, a chart and frozen panes. JinSheet created the supported features, then LibreOffice Calc 24.2 opened and resaved the workbook. Unit and VS Code Webview host tests edit, save and reopen it. The sample records the LibreOffice XML variants JinSheet accepts; it is not a Microsoft Excel compatibility oracle.
 
+`LibreOffice-Mixed-Outline-Roundtrip.xlsx` adds row and column outline groups to the mixed-feature workbook and was resaved by LibreOffice Calc 24.2. It also contains a standard custom document properties part. The XLSX regression edits a cell and checks that outline groups, custom properties, tables and charts remain available after reopening.
+
 ### 한국어
 
 이 작은 샘플 파일은 JinSheet 편집기 연결과 미리보기를 확인하는 데 사용합니다. XLSX 샘플은 편집과 서식 표시를, DOCX·PPTX·PDF 샘플은 읽기 전용 미리보기를 확인합니다. VS Code에서 파일을 열어 결과를 확인하세요.
@@ -27,3 +29,5 @@ These small sample files are used to check JinSheet's editor association and pre
 `LibreOffice-Styled-Roundtrip.xlsx`는 `JinSheet-Styled-Sample.xlsx`를 LibreOffice Calc 24.2에서 열고 다시 저장한 파일입니다. XLSX 검사는 숫자 셀을 수정한 뒤 다시 열 수 있는지와 기존 서식·나머지 패키지 구성요소를 보존하는지 확인합니다. Microsoft Excel 호환성 전체를 판정하는 기준은 아닙니다.
 
 `LibreOffice-Mixed-Features-Roundtrip.xlsx`는 native 표·필터, 합계 수식, 숫자 유효성, 조건부 서식, 병합 셀, 수식, 차트와 고정 창을 함께 포함합니다. JinSheet가 지원 기능을 만든 뒤 LibreOffice Calc 24.2에서 열고 다시 저장했습니다. 단위 검사와 VS Code Webview 호스트 검사는 이 파일을 편집·저장·재열기합니다. 이 표본은 JinSheet가 허용하는 LibreOffice XML 변형을 기록하며 Microsoft Excel 호환성 전체의 기준 oracle은 아닙니다.
+
+`LibreOffice-Mixed-Outline-Roundtrip.xlsx`는 복합 기능 통합 문서에 행·열 outline 그룹을 추가한 뒤 LibreOffice Calc 24.2에서 다시 저장한 파일입니다. 표준 사용자 지정 문서 속성 파트도 포함합니다. XLSX 회귀 검사는 셀 편집 후 outline 그룹, 사용자 지정 속성, 표와 차트가 다시 열 때 유지되는지 확인합니다.

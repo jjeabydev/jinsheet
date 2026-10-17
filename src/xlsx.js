@@ -1207,7 +1207,11 @@ function analyze(input, extension = '.xlsx') {
   const markUnsupported = reason => { if (!unsupported.includes(reason)) unsupported.push(reason); };
   const known = new Set(['[Content_Types].xml', '_rels/.rels', 'xl/workbook.xml', 'xl/_rels/workbook.xml.rels', 'xl/styles.xml', 'xl/sharedStrings.xml', 'xl/theme/theme1.xml', 'docProps/core.xml', 'docProps/app.xml']);
   const rootRels = parseXml(files['_rels/.rels'], '_rels/.rels').root;
-  const rootMap = parseRelationships(rootRels, '', ['officeDocument', 'core-properties', 'extended-properties']);
+  const rootMap = parseRelationships(rootRels, '', ['officeDocument', 'core-properties', 'extended-properties', 'custom-properties']);
+  for (const rel of rootMap.values()) if (rel.Type.endsWith('/custom-properties')) {
+    if (!rel.path || !files[rel.path]) fail('사용자 지정 문서 속성 관계 대상을 찾을 수 없습니다.');
+    known.add(rel.path);
+  }
   const workbookPart = [...rootMap.values()].find(rel => rel.Type.endsWith('/officeDocument') && rel.path);
   if (!workbookPart || workbookPart.path !== 'xl/workbook.xml') fail('표준 위치의 통합문서 파트를 찾을 수 없습니다.');
   const workbook = parseXml(files[workbookPart.path], workbookPart.path).root;

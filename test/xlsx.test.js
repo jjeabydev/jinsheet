@@ -3808,6 +3808,29 @@ test('LibreOffice Calc가 저장한 복합 XLSX의 표·유효성·조건부 서
   assert.deepEqual(reopened.sheets[0].freezePane, { rows: 1, columns: 1 });
 });
 
+test('LibreOffice 복합 XLSX의 사용자 지정 문서 속성과 행·열 그룹을 편집 후 보존한다', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const source = analyze(fs.readFileSync(path.join(__dirname, 'fixtures', 'LibreOffice-Mixed-Outline-Roundtrip.xlsx')));
+  assert.equal(source.writable, true, source.readOnlyReason);
+  assert.deepEqual(source.sheets[0].rowGroups, [{ start: 1, end: 2, level: 1, summary: 3, collapsed: false }]);
+  assert.deepEqual(source.sheets[0].columnGroups, [{ start: 1, end: 2, level: 1, summary: 3, collapsed: false }]);
+  assert.ok(source.files['docProps/custom.xml']);
+
+  const edited = analyze(patchCell(source, 0, 'B2', '1600').bytes);
+  assert.equal(edited.writable, true, edited.readOnlyReason);
+  assert.equal(edited.sheets[0].cells.get('B2').value, '1600');
+  assert.deepEqual(edited.files['docProps/custom.xml'], source.files['docProps/custom.xml']);
+  assert.deepEqual(edited.sheets[0].rowGroups, source.sheets[0].rowGroups);
+  assert.deepEqual(edited.sheets[0].columnGroups, source.sheets[0].columnGroups);
+  assert.equal(edited.sheets[0].tables[0].name, 'Inventory');
+  assert.equal(edited.sheets[0].charts.length, 1);
+
+  const missingProperties = { ...source.files };
+  delete missingProperties['docProps/custom.xml'];
+  assert.throws(() => analyze(zipSync(missingProperties)), /사용자 지정 문서 속성 관계 대상을 찾을 수 없습니다/);
+});
+
 test('LibreOffice 호환 boolean 처리 뒤에도 활성 미지원 규칙과 잘못된 boolean은 편집을 차단한다', () => {
   const conditionalFiles = unzipSync(fixture({ formatted: true }));
   const worksheet = new TextDecoder().decode(conditionalFiles['xl/worksheets/sheet1.xml']);

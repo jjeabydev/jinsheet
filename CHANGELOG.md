@@ -1,6 +1,7 @@
 # Changelog / 변경 기록
 
 ## Unreleased
+- Open and edit LibreOffice workbooks with standard custom document properties; preserve the custom properties part and worksheet row/column outline groups when saving.
 
 ## 1.2.0 / 2026-10-18
 - Open and edit LibreOffice-resaved workbooks that use standard on/off boolean spellings, omit the optional table-parts count, and emit neutral conditional-format defaults; preserve table, validation, conditional-format, merge, formula, chart, and frozen-pane features through save and reopen.

@@ -2678,6 +2678,9 @@ suite('JinSheet Extension Host', () => {
       while (Date.now() < settingsDeadline && !await evaluate('Boolean(document.querySelector("#applyPageSettings")&&document.querySelector("#cell-4-4"))')) await new Promise(resolve => setTimeout(resolve, 25));
       assert.equal(await evaluate('Boolean(document.querySelector("#applyPageSettings")&&document.querySelector("#cell-4-4"))'), true, 'page settings and the selected worksheet cells are rendered');
       await evaluate('document.querySelector("#printPanel").open=true');
+      const panelDeadline = Date.now() + 5000;
+      while (Date.now() < panelDeadline && !await evaluate('Boolean(document.querySelector("#applyPageSettings")&&!document.querySelector("#applyPageSettings").disabled)')) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(await evaluate('Boolean(document.querySelector("#applyPageSettings")&&!document.querySelector("#applyPageSettings").disabled)'), true, 'page settings are enabled after opening the print panel');
       await evaluate('document.querySelector("#printFit").checked=false;document.querySelector("#printScale").value="100";document.querySelector("#applyPageSettings").click()');
       const rowCellDeadline=Date.now()+10000;while(Date.now()<rowCellDeadline&&!await evaluate('Boolean(document.querySelector("#cell-4-4"))'))await new Promise(resolve=>setTimeout(resolve,25));
       assert.equal(await evaluate('Boolean(document.querySelector("#cell-4-4"))'),true,'worksheet cells are rendered after applying page settings');

@@ -4,6 +4,7 @@ const vscode = require('vscode');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
+const { performance } = require('node:perf_hooks');
 const { zipSync } = require('../../vendor/node_modules/fflate');
 const { analyze, patchColumnWidths, patchOutlineGroups, patchAddChart, patchPrintArea, patchPrintSettings, patchPrintTitles, patchHeaderFooter } = require('../../src/xlsx');
 const { onePagePdf } = require('../helpers/pdf-fixture');
@@ -3927,6 +3928,71 @@ suite('JinSheet Extension Host', () => {
       await waitFor('document.querySelector("#address")?.value === "A101" && document.querySelector(".cell.selected")?.id === "cell-100-0"', 'Enter moves past the first 100 results to row 101');
       await evaluate(`document.querySelector('#search').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))`);
       await waitFor('document.querySelector("#address")?.value === "A1" && document.querySelector(".cell.selected")?.id === "cell-0-0"', 'Enter wraps from the last result to the first');
+    } finally {
+      devtools?.close();
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('Chromium Webview opens, searches, edits and saves a 100,000-cell CSV', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-large-csv-host-'));
+    const file = path.join(directory, 'large.csv');
+    const rows = Array.from({ length: 10000 }, (_, row) => Array.from({ length: 10 }, (_, column) =>
+      row === 0 && column === 0 ? 'first-cell' : row === 9999 && column === 9 ? 'needle-token' : `r${String(row).padStart(5, '0')}-c${String(column).padStart(2, '0')}-` + 'x'.repeat(68)
+    ).join(','));
+    await fs.writeFile(file, rows.join('\r\n'), 'utf8');
+    const sourceBytes = (await fs.stat(file)).size;
+    rows.length = 0;
+    await new Promise(resolve => setImmediate(resolve));
+    let devtools;
+    try {
+      let started = performance.now();
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview(30000, 'first-cell');
+      const openedMs = performance.now() - started;
+      const memoryAfterOpen = process.memoryUsage();
+      await devtools.send('Performance.enable');
+      const rendererMetrics = await devtools.send('Performance.getMetrics');
+      const rendererJsHeapBytes = rendererMetrics.metrics?.find(metric => metric.name === 'JSHeapUsedSize')?.value ?? null;
+      const evaluate = async expression => {
+        const response = await devtools.send('Runtime.evaluate', { expression, contextId: devtools.contextId, returnByValue: true, awaitPromise: true });
+        if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+        return response.result?.value;
+      };
+      const waitFor = async (expression, message, timeoutMs = 30000) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          if (await evaluate(expression)) return;
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        assert.fail(message + ': ' + await evaluate('document.querySelector("#notice")?.textContent'));
+      };
+
+      await waitFor('Boolean(document.querySelector("#search"))&&Boolean(document.querySelector("#findButton"))', 'large CSV search controls render');
+      started = performance.now();
+      await evaluate('(()=>{const search=document.querySelector("#search");search.value="needle-token";search.dispatchEvent(new Event("input",{bubbles:true}));document.querySelector("#findButton").click()})()');
+      await waitFor('document.querySelector("#searchCount")?.textContent.includes("1")&&document.querySelector("#address")?.value==="J10000"&&document.querySelector(".cell.selected")?.id==="cell-9999-9"', 'search reaches the unique last cell');
+      const searchMs = performance.now() - started;
+
+      started = performance.now();
+      await evaluate('(()=>{const input=document.querySelector("#formula");input.value="edited-value";input.dispatchEvent(new Event("input",{bubbles:true}));input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}))})()');
+      await waitFor('document.querySelector("#cell-9999-9")?.textContent==="edited-value"', 'the last CSV cell accepts an edit');
+      const editToRenderMs = performance.now() - started;
+
+      started = performance.now();
+      const saveDeadline = Date.now() + 30000;
+      let savedText = '';
+      do {
+        await vscode.commands.executeCommand('workbench.action.files.save');
+        savedText = await fs.readFile(file, 'utf8');
+        if (savedText.endsWith('edited-value')) break;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      } while (Date.now() < saveDeadline);
+      const saveToDiskMs = performance.now() - started;
+      assert.equal(savedText.endsWith('edited-value'), true, 'the edited last cell reaches the CSV file');
+      assert.equal(savedText.includes('needle-token'), false, 'the original last-cell value is replaced');
+      console.log('[JinSheet CSV 100k]', JSON.stringify({ sourceBytes, rows: 10000, columns: 10, cells: 100000, openedMs: Math.round(openedMs), searchMs: Math.round(searchMs), editToRenderMs: Math.round(editToRenderMs), saveToDiskMs: Math.round(saveToDiskMs), extensionHostHeapMiB: Number((memoryAfterOpen.heapUsed / 1048576).toFixed(1)), extensionHostExternalMiB: Number((memoryAfterOpen.external / 1048576).toFixed(1)), extensionHostArrayBuffersMiB: Number((memoryAfterOpen.arrayBuffers / 1048576).toFixed(1)), extensionHostRssMiB: Number((memoryAfterOpen.rss / 1048576).toFixed(1)), chromiumRendererJsHeapMiB: rendererJsHeapBytes === null ? null : Number((rendererJsHeapBytes / 1048576).toFixed(1)) }));
     } finally {
       devtools?.close();
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');

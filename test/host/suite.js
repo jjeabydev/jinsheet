@@ -2655,6 +2655,9 @@ suite('JinSheet Extension Host', () => {
       projection.charts[0].html = chartPreviewHtml([expandedChart], 'en', false, true);
       const pie = await measurePrintPages(evaluate, renderPrintDocument(projection), true);
       assert.equal(pie[0].charts[0].pointCount, 80); assert.equal(pie[0].charts[0].legendCount, 12); assert.equal(pie[0].charts[0].legendFits, true);
+      const settingsDeadline = Date.now() + 5000;
+      while (Date.now() < settingsDeadline && !await evaluate('Boolean(document.querySelector("#applyPageSettings"))')) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(await evaluate('Boolean(document.querySelector("#applyPageSettings"))'), true);
       await evaluate('document.querySelector("#printFit").checked=false;document.querySelector("#printScale").value="100";document.querySelector("#applyPageSettings").click()');
       await evaluate('document.querySelector("#cell-4-4").click();document.querySelector("#breakAddRow").click()');
       const rowLimit = Date.now() + 5000;
@@ -3184,6 +3187,7 @@ suite('JinSheet Extension Host', () => {
       };
       const wait = async expression => { const deadline = Date.now() + 5000; while (Date.now() < deadline) { if (await evaluate(expression)) return; await new Promise(resolve => setTimeout(resolve, 25)); } assert.fail('Native dimension condition failed: ' + expression); };
       await wait('Boolean(document.querySelector("#cell-0-2"))');
+      await wait('document.querySelector("#cell-0-2")?.getBoundingClientRect().width===1785');
       const sizes = await evaluate('(()=>{const cells=[0,1,2].map(column=>document.querySelector("#cell-0-"+column).getBoundingClientRect());return{widths:cells.map(box=>box.width),height:cells[0].height,positions:cells.map(box=>[box.left,box.right]),adjacent:Math.abs(cells[1].left-cells[0].right)<.1&&Math.abs(cells[2].left-cells[1].right)<.1,hidden:!document.querySelector("#cell-0-3")||document.querySelector("#cell-0-3").getBoundingClientRect().width===0,dpr:devicePixelRatio,maximumDigitWidth:window.__jinsheetModel?.maximumDigitWidth,modelDefaultWidth:window.__jinsheetModel?.defaultColumnWidth,modelZoom:window.__jinsheetModel?.zoomScale,canvasZoom:getComputedStyle(document.querySelector("#canvas")).zoom}})()');
       assert.deepEqual(sizes.widths, [64, 1, 1785], JSON.stringify(sizes)); assert.equal(sizes.height, 20); assert.equal(sizes.adjacent, true, JSON.stringify(sizes)); assert.equal(sizes.hidden, true);
       assert.equal(await evaluate('(()=>{const cell=document.querySelector("#cell-0-0");return cell.scrollHeight<=cell.clientHeight+1})()'), true);
@@ -3369,7 +3373,9 @@ suite('JinSheet Extension Host', () => {
       await devtools.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: points[0].x + devtools.frameOffset.x, y: points[0].y + devtools.frameOffset.y, button: 'left', buttons: 1, clickCount: 1 });
       await devtools.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: points[1].x + devtools.frameOffset.x, y: points[1].y + devtools.frameOffset.y, buttons: 1 });
       await devtools.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: points[1].x + devtools.frameOffset.x, y: points[1].y + devtools.frameOffset.y, button: 'left', buttons: 0, clickCount: 1 });
-      await evaluate('document.querySelector("[data-chart-source]").disabled=false');
+      await evaluate('const address=document.querySelector("#address");address.value="A1:C3";address.dispatchEvent(new Event("input",{bubbles:true}));address.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}))');
+      const sourceEnableDeadline=Date.now()+5000;while(Date.now()<sourceEnableDeadline&&await evaluate('document.querySelector("[data-chart-source]").disabled'))await new Promise(resolve=>setTimeout(resolve,25));
+      assert.equal(await evaluate('document.querySelector("[data-chart-source]").disabled'),false);
       await evaluate('document.querySelector("[data-chart-source]").click()');
       const waitForSeries = async count => {
         const deadline = Date.now() + 5000;

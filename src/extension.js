@@ -236,17 +236,6 @@ function buildDataValidationRule(document, sheetIndex, input) {
   return { ...rule, operator: input.operator, values: [first.value, ...(second ? [second.value] : [])], formulas: first.formula || second?.formula ? [first.formula, ...(second ? [second.formula] : [])] : null };
 }
 
-function normalFontDigitWidth(font = {}) {
-  const canvas = globalThis.document?.createElement?.('canvas');
-  const context = canvas?.getContext?.('2d');
-  if (!context) return 7;
-  const family = typeof font.family === 'string' && font.family.trim() && font.family.length <= 100 ? font.family : 'Calibri';
-  const size = Number.isFinite(font.size) && font.size >= 1 && font.size <= 409 ? font.size : 11;
-  context.font = (font.italic ? 'italic ' : '') + (font.bold ? 'bold ' : '') + size + 'pt ' + JSON.stringify(family) + ', sans-serif';
-  const width = Math.max(...Array.from({ length: 10 }, (_, digit) => context.measureText(String(digit)).width));
-  return Number.isFinite(width) ? Math.max(1, Math.min(600, Math.round(width))) : 7;
-}
-
 function hash(bytes) { return crypto.createHash('sha256').update(bytes).digest('hex'); }
 
 class JinSheetDocument {
@@ -254,7 +243,7 @@ class JinSheetDocument {
     this.uri = uri;
     this.kind = kind;
     this.state = state;
-    this.maximumDigitWidth = kind === 'xlsx' ? normalFontDigitWidth(state.normalFont) : 7;
+    this.maximumDigitWidth = 7;
     this.originalBytes = Buffer.from(bytes);
     this.originalFingerprint = hash(bytes);
     this.savedRevision = 0;

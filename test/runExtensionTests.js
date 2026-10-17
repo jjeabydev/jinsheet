@@ -13,11 +13,17 @@ async function main() {
   const extensionsDir = path.join(require('node:os').tmpdir(), 'jinsheet-host-extensions' + localeSuffix);
   if (locale) {
     fs.mkdirSync(userDataDir, { recursive: true });
-    const resourceCandidates = [
-      path.join(path.dirname(vscodeExecutablePath), 'resources', 'app', 'out', 'nls.messages.json'),
-      path.resolve(vscodeExecutablePath, '..', '..', 'Resources', 'app', 'out', 'nls.messages.json'),
-      path.resolve(vscodeExecutablePath, '..', '..', '..', 'resources', 'app', 'out', 'nls.messages.json')
-    ];
+    const resourceCandidates = [];
+    let directory = path.dirname(vscodeExecutablePath);
+    for (let depth = 0; depth < 6; depth++) {
+      resourceCandidates.push(
+        path.join(directory, 'resources', 'app', 'out', 'nls.messages.json'),
+        path.join(directory, 'Contents', 'Resources', 'app', 'out', 'nls.messages.json')
+      );
+      const parent = path.dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
     const defaultMessagesFile = resourceCandidates.find(candidate => fs.existsSync(candidate));
     if (!defaultMessagesFile) throw new Error('Could not locate the VS Code default NLS messages for the requested host locale.');
     const cliPath = path.join(path.dirname(defaultMessagesFile), 'cli.js');

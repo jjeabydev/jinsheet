@@ -1,7 +1,12 @@
 # Changelog / 변경 기록
 
 ## Unreleased
+
+## 1.3.0 / 2026-10-18
 - Open and edit workbooks with standard custom document properties or package preview thumbnails; preserve those metadata parts and worksheet row/column outline groups when saving.
+- Distinguish numeric text and logical values typed directly into `SUM`, `AVERAGE`, and `COUNT` from text and logical values returned by cell references or ranges.
+- Return `#NUM!` when conditional sum and average functions overflow their running totals.
+- Return `#DIV/0!` for zero raised to a negative exponent through `^` or `POWER`.
 
 ## 1.2.0 / 2026-10-18
 - Open and edit LibreOffice-resaved workbooks that use standard on/off boolean spellings, omit the optional table-parts count, and emit neutral conditional-format defaults; preserve table, validation, conditional-format, merge, formula, chart, and frozen-pane features through save and reopen.

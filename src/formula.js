@@ -9,6 +9,8 @@ const MAX_CALC_STEPS = 100000;
 const MAX_DISTRIBUTION_SIZE = 100000;
 const FORMULA_RANGE = Symbol('formulaRange');
 const FORMULA_RANGE_METADATA = Symbol('formulaRangeMetadata');
+const FORMULA_TEXT_LITERAL = Symbol('formulaTextLiteral');
+const FORMULA_REFERENCE_VALUE = Symbol('formulaReferenceValue');
 const ERROR_TYPE_CODES = new Map([['#NULL!', 1], ['#DIV/0!', 2], ['#VALUE!', 3], ['#REF!', 4], ['#NAME?', 5], ['#NUM!', 6], ['#N/A', 7], ['#N/A!', 7], ['#GETTING_DATA', 8], ['#SPILL!', 9], ['#CALC!', 14]]);
 
 function columnNumber(letters) {
@@ -78,9 +80,10 @@ function tokenize(source) {
   return tokens;
 }
 
-function isError(value) { return typeof value === 'string' && /^#(?:REF!|DIV\/0!|VALUE!|NAME\?|NUM!|N\/A|NULL!|CALC!|CIRC!|SPILL!|GETTING_DATA)/.test(value); }
+function isError(value) { if (value?.[FORMULA_TEXT_LITERAL] || value?.[FORMULA_REFERENCE_VALUE]) value = value.value; return typeof value === 'string' && /^#(?:REF!|DIV\/0!|VALUE!|NAME\?|NUM!|N\/A|NULL!|CALC!|CIRC!|SPILL!|GETTING_DATA)/.test(value); }
 function failValue() { return '#VALUE!'; }
 function numeric(value) {
+  if (value?.[FORMULA_TEXT_LITERAL] || value?.[FORMULA_REFERENCE_VALUE]) value = value.value;
   if (isError(value)) return value;
   if (value === null || value === undefined || value === '') return 0;
   if (typeof value === 'number') return Number.isFinite(value) ? value : '#NUM!';
@@ -354,6 +357,57 @@ function aggregateNumbers(values) {
   }
   return result;
 }
+function aggregateDirectArguments(args) {
+  const result = [];
+  for (const argument of args) {
+    if (argument?.[FORMULA_TEXT_LITERAL]) {
+      const value = numeric(argument.value);
+      if (typeof value !== 'number') return value;
+      result.push(value);
+      continue;
+    }
+    if (argument?.[FORMULA_REFERENCE_VALUE]) {
+      const value = argument.value;
+      if (isError(value)) return value;
+      if (typeof value === 'number' && Number.isFinite(value)) result.push(value);
+      continue;
+    }
+    if (!isFormulaRange(argument) && !Array.isArray(argument)) {
+      if (isError(argument)) return argument;
+      if (typeof argument === 'number' && Number.isFinite(argument)) result.push(argument);
+      else if (typeof argument === 'boolean') result.push(argument ? 1 : 0);
+      else if (typeof argument === 'string') {
+        const value = numeric(argument);
+        if (typeof value !== 'number') return value;
+        result.push(value);
+      }
+      continue;
+    }
+    for (const value of flatten([argument])) {
+      if (isError(value)) return value;
+      if (typeof value === 'number' && Number.isFinite(value)) result.push(value);
+    }
+  }
+  return result;
+}
+function countDirectArguments(args) {
+  let count = 0;
+  for (const argument of args) {
+    if (argument?.[FORMULA_TEXT_LITERAL]) {
+      if (isError(argument.value)) return argument.value;
+      const value = numeric(argument.value);
+      if (typeof value === 'number') count++;
+      continue;
+    }
+    if (argument?.[FORMULA_REFERENCE_VALUE]) {
+      if (typeof argument.value === 'number' && Number.isFinite(argument.value)) count++;
+      continue;
+    }
+    if (!isFormulaRange(argument) && !Array.isArray(argument) && typeof argument === 'boolean') { count++; continue; }
+    for (const value of flatten([argument])) if (typeof value === 'number' && Number.isFinite(value)) count++;
+  }
+  return count;
+}
 function varianceValue(numbers, sample, returnStandardDeviation = false) {
   const divisor = numbers.length - (sample ? 1 : 0);
   const directSum = numbers.reduce((sum, value) => sum + value, 0);
@@ -536,6 +590,8 @@ function call1904DateFunction(name, args, context) {
 }
 
 function callFunction(name, args, context = {}) {
+  const sourceArgs = args;
+  args = args.map(value => value?.[FORMULA_TEXT_LITERAL] || value?.[FORMULA_REFERENCE_VALUE] ? value.value : value);
   if (context.date1904 && (DATE_1904_INPUTS.has(name) || DATE_1904_SERIAL_RESULTS.has(name))) return call1904DateFunction(name, args, context);
   const sparseRangeSupported = ['SUM', 'PRODUCT', 'AVERAGE', 'AVERAGEA', 'MEDIAN', 'MIN', 'MINA', 'MAX', 'MAXA', 'LARGE', 'SMALL', 'MODE.SNGL', 'MODE.MULT', 'FREQUENCY', 'COUNT', 'COUNTA', 'COUNTBLANK', 'COUNTIF', 'SUMIF', 'AVERAGEIF', 'COUNTIFS', 'SUMIFS', 'AVERAGEIFS', 'MAXIFS', 'MINIFS', 'SUBTOTAL', 'ROWS', 'COLUMNS', 'INDEX', 'NETWORKDAYS', 'NETWORKDAYS.INTL', 'WORKDAY', 'WORKDAY.INTL', 'SUMSQ', 'DEVSQ', 'AVEDEV', 'GEOMEAN', 'HARMEAN', 'CORREL', 'PEARSON', 'COVARIANCE.P', 'COVARIANCE.S', 'SLOPE', 'INTERCEPT', 'RSQ', 'STEYX', 'FORECAST', 'FORECAST.LINEAR', 'GCD', 'LCM', 'MULTINOMIAL', 'SUMXMY2', 'SUMX2MY2', 'SUMX2PY2', 'TRANSPOSE', 'TOCOL', 'TOROW', 'WRAPROWS', 'WRAPCOLS', 'HSTACK', 'VSTACK', 'STDEV.S', 'STDEV.P', 'STDEVA', 'STDEVPA', 'VAR.S', 'VAR.P', 'VARA', 'VARPA', 'NPV', 'IRR', 'MIRR', 'XNPV', 'XIRR', 'FVSCHEDULE'];
   if (args.some(isFormulaRange) && !sparseRangeSupported.includes(name)) return '#VALUE!';
@@ -1227,6 +1283,7 @@ function callFunction(name, args, context = {}) {
         if (isError(number)) return number;
         if (typeof number !== 'number' || !Number.isFinite(number)) continue;
         sum += number;
+        if (!Number.isFinite(sum)) return '#NUM!';
         count++;
       }
       const criteriaCellCount = isFormulaRange(criteriaRange) ? criteriaRange.cellCount : criteriaHeight * criteriaWidth;
@@ -1242,6 +1299,7 @@ function callFunction(name, args, context = {}) {
       if (isError(number)) return number;
       if (typeof number !== 'number' || !Number.isFinite(number)) continue;
       sum += number;
+      if (!Number.isFinite(sum)) return '#NUM!';
       count++;
     }
     if (name === 'COUNTIF') return count;
@@ -1272,6 +1330,7 @@ function callFunction(name, args, context = {}) {
         }
         if (typeof value !== 'number' || !Number.isFinite(value)) continue;
         sum += value;
+        if (!Number.isFinite(sum)) return '#NUM!';
         count++;
       }
       if (name === 'COUNTIFS') {
@@ -1299,6 +1358,7 @@ function callFunction(name, args, context = {}) {
       }
       if (typeof value !== 'number' || !Number.isFinite(value)) continue;
       sum += value;
+      if (!Number.isFinite(sum)) return '#NUM!';
       count++;
     }
     if (name === 'COUNTIFS') return count;
@@ -2398,7 +2458,7 @@ function callFunction(name, args, context = {}) {
     return Number.isFinite(result) ? result : '#NUM!';
   }
   if (name === 'COUNTA') return values.filter(value => value !== null && value !== undefined).length;
-  if (name === 'COUNT') return values.filter(value => typeof value === 'number' && Number.isFinite(value)).length;
+  if (name === 'COUNT') return countDirectArguments(sourceArgs);
   if (['AVERAGEA', 'MINA', 'MAXA'].includes(name)) {
     const items = flatten(args).filter(value => value !== null && value !== undefined).map(value => typeof value === 'number' ? value : typeof value === 'boolean' ? Number(value) : 0);
     if (name === 'AVERAGEA') {
@@ -2414,7 +2474,7 @@ function callFunction(name, args, context = {}) {
   }
   if (['SUM', 'PRODUCT', 'AVERAGE', 'MEDIAN', 'MIN', 'MAX'].includes(name)) {
     if (name === 'PRODUCT' && !args.length) return '#VALUE!';
-    const numbers = aggregateNumbers(args);
+    const numbers = name === 'SUM' || name === 'AVERAGE' ? aggregateDirectArguments(sourceArgs) : aggregateNumbers(args);
     if (typeof numbers === 'string') return numbers;
     if (name === 'SUM') {
       let sum = 0;
@@ -2786,6 +2846,7 @@ function callFunction(name, args, context = {}) {
   if (name === 'POWER' && args.length === 2) {
     const exponent = numeric(args[1]);
     if (typeof exponent === 'string') return exponent;
+    if (first === 0 && exponent < 0) return '#DIV/0!';
     const result = first ** exponent;
     return Number.isFinite(result) ? result : '#NUM!';
   }
@@ -2796,12 +2857,16 @@ function evaluateFormula(formula, context = {}) {
   try {
     const tokens = tokenize(formula);
     let position = 0;
+    let captureFunctionArguments = 0;
     const peek = () => tokens[position];
     const take = type => { if (peek().type !== type) throw new Error('#VALUE!'); return tokens[position++]; };
     const precedence = { '=': 1, '<>': 1, '<': 1, '>': 1, '<=': 1, '>=': 1, '&': 2, '+': 3, '-': 3, '*': 4, '/': 4, '^': 5 };
     function primary() {
       const token = peek();
-      if (token.type === 'value') { position++; return token.value; }
+      if (token.type === 'value') {
+        position++;
+        return captureFunctionArguments && typeof token.value === 'string' ? { [FORMULA_TEXT_LITERAL]: true, value: token.value } : token.value;
+      }
       if (token.type === 'error') { position++; return token.value; }
       if (token.type === 'structuredReference') {
         position++;
@@ -2832,7 +2897,10 @@ function evaluateFormula(formula, context = {}) {
         if (height * width > MAX_RANGE_CELLS) return '#VALUE!';
         const sheetName = start.sheetName || end.sheetName;
         if (start.sheetName && end.sheetName && start.sheetName.toLocaleLowerCase() !== end.sheetName.toLocaleLowerCase()) return '#REF!';
-        if (height === 1 && width === 1 && end === start) return context.getCell?.(start.row, start.column, sheetName) ?? null;
+        if (height === 1 && width === 1 && end === start) {
+          const value = context.getCell?.(start.row, start.column, sheetName) ?? null;
+          return captureFunctionArguments ? { [FORMULA_REFERENCE_VALUE]: true, value } : value;
+        }
         const top = Math.min(start.row, end.row), bottom = Math.max(start.row, end.row), left = Math.min(start.column, end.column), right = Math.max(start.column, end.column);
         const values = [], entries = [];
         for (let row = top; row <= bottom; row++) {
@@ -2980,7 +3048,11 @@ function evaluateFormula(formula, context = {}) {
         if (peek().type !== ')') {
           do {
             if (peek().type === ',') args.push(null);
-            else args.push(expression(0));
+            else {
+              captureFunctionArguments++;
+              try { args.push(expression(0)); }
+              finally { captureFunctionArguments--; }
+            }
             if (peek().type !== ',') break;
             position++;
             if (peek().type === ')') { args.push(null); break; }
@@ -3007,10 +3079,17 @@ function evaluateFormula(formula, context = {}) {
       let left = unary();
       while (Object.hasOwn(precedence, peek().type) && precedence[peek().type] >= minimum) {
         const operator = tokens[position++].type, level = precedence[operator];
-        const right = expression(level + (operator === '^' ? 0 : 1));
+        let right = expression(level + (operator === '^' ? 0 : 1));
         if (isError(left)) return left;
         if (isError(right)) return right;
-        if (operator === '&') { left = String(left ?? '') + String(right ?? ''); continue; }
+        if (operator === '&') {
+          if (left?.[FORMULA_TEXT_LITERAL] || left?.[FORMULA_REFERENCE_VALUE]) left = left.value;
+          if (right?.[FORMULA_TEXT_LITERAL] || right?.[FORMULA_REFERENCE_VALUE]) right = right.value;
+          left = String(left ?? '') + String(right ?? '');
+          continue;
+        }
+        if (left?.[FORMULA_TEXT_LITERAL] || left?.[FORMULA_REFERENCE_VALUE]) left = left.value;
+        if (right?.[FORMULA_TEXT_LITERAL] || right?.[FORMULA_REFERENCE_VALUE]) right = right.value;
         if (['=', '<>', '<', '>', '<=', '>='].includes(operator)) {
           const a = typeof left === 'string' && typeof right === 'string' ? left.toLocaleLowerCase() : (typeof left === 'string' && typeof right === 'number' ? numeric(left) : left);
           const b = typeof left === 'string' && typeof right === 'string' ? right.toLocaleLowerCase() : (typeof right === 'string' && typeof left === 'number' ? numeric(right) : right);
@@ -3024,6 +3103,7 @@ function evaluateFormula(formula, context = {}) {
         else if (operator === '-') left = a - b;
         else if (operator === '*') left = a * b;
         else if (operator === '/') left = b === 0 ? '#DIV/0!' : a / b;
+        else if (a === 0 && b < 0) left = '#DIV/0!';
         else { const value = a ** b; left = Number.isFinite(value) ? value : '#NUM!'; }
         if (typeof left === 'number' && !Number.isFinite(left)) left = '#NUM!';
       }

@@ -57,6 +57,9 @@ test('기본 수식 계산은 연산자 우선순위·셀 참조·범위 집계�
   const context = { getCell: (row, column) => cells.get(row + ':' + column) ?? null };
   assert.equal(evaluateFormula('1+2*3'), 7);
   assert.equal(evaluateFormula('(1+2)^3'), 27);
+  assert.equal(evaluateFormula('0^(-1)'), '#DIV/0!', 'a negative exponent on zero reports division by zero');
+  assert.equal(evaluateFormula('POWER(0,-1)'), '#DIV/0!', 'POWER reports division by zero for a negative exponent on zero');
+  assert.equal(evaluateFormula('(-1)^0.5'), '#NUM!', 'a fractional power of a negative base reports a numeric error');
   assert.equal(evaluateFormula('-2^2'), -4);
   assert.equal(evaluateFormula('50%+10%'), 0.6);
   assert.equal(evaluateFormula('A1+$B$1', context), 5);
@@ -495,6 +498,21 @@ assert.equal(evaluateFormula('VLOOKUP("B?ta",A1:B3,2,FALSE)', lookupContext), 20
   assert.equal(evaluateFormula('ISBLANK(A1,A2)'), '#VALUE!');
   assert.equal(evaluateFormula("'Sales O''Brien'!A1*2", { getCell: (row, column, sheet) => sheet === "Sales O'Brien" ? 21 : null }), 42);
   assert.equal(evaluateFormula('AVERAGE(A1:B2)', context), 3.5);
+  const directTextAggregateContext = { getCell: (row, column) => [[5, '2', true]][row]?.[column] ?? null };
+  assert.equal(evaluateFormula('SUM(1,"2")'), 3, 'SUM coerces numeric text written directly as an argument');
+  assert.equal(evaluateFormula('SUM(1,"text")'), '#VALUE!', 'SUM rejects nonnumeric text written directly as an argument');
+  assert.equal(evaluateFormula('SUM(B1)', directTextAggregateContext), 0, 'SUM ignores text returned by a single-cell reference');
+  assert.equal(evaluateFormula('SUM(C1)', directTextAggregateContext), 0, 'SUM ignores a logical value returned by a single-cell reference');
+  assert.equal(evaluateFormula('SUM(A1:C1)', directTextAggregateContext), 5, 'SUM ignores text and logical values in a referenced range');
+  assert.equal(evaluateFormula('SUM(TRUE(),2)'), 3, 'SUM includes a logical value passed directly as an argument');
+  assert.equal(evaluateFormula('AVERAGE(1,"2")'), 1.5, 'AVERAGE counts numeric text written directly as an argument');
+  assert.equal(evaluateFormula('AVERAGE(B1)', directTextAggregateContext), '#DIV/0!', 'AVERAGE ignores text returned by a single-cell reference');
+  assert.equal(evaluateFormula('AVERAGE(A1:C1)', directTextAggregateContext), 5, 'AVERAGE ignores text and logical values in a referenced range');
+  assert.equal(evaluateFormula('COUNT(1,"2")'), 2, 'COUNT counts numeric text written directly as an argument');
+  assert.equal(evaluateFormula('COUNT(TRUE(),2)'), 2, 'COUNT counts logical values passed directly as arguments');
+  assert.equal(evaluateFormula('COUNT(B1)', directTextAggregateContext), 0, 'COUNT ignores text returned by a single-cell reference');
+  assert.equal(evaluateFormula('COUNT(C1)', directTextAggregateContext), 0, 'COUNT ignores a logical value returned by a single-cell reference');
+  assert.equal(evaluateFormula('COUNT(A1:C1)', directTextAggregateContext), 1, 'COUNT ignores text and logical values in a referenced range');
   assert.equal(evaluateFormula('MEDIAN(1,5,3,9)'), 4);
   assert.equal(evaluateFormula('MEDIAN(1E308,1E308)'), 1E308, 'the midpoint avoids overflowing the sum of large values');
   assert.equal(evaluateFormula('MEDIAN(-1E308,1E308)'), 0, 'the midpoint handles large opposite-signed values');
@@ -789,6 +807,13 @@ assert.equal(evaluateFormula('NOT(FALSE)'), true);
   assert.equal(evaluateFormula('SUMIFS(C1:C4,A1:A4,"East",B1:B4,"Apples")', multiConditionContext), 100);
   assert.equal(evaluateFormula('AVERAGEIFS(C1:C4,A1:A4,"East",B1:B4,"Apples")', multiConditionContext), 100);
   assert.equal(evaluateFormula('COUNTIFS(A1:A4,"East",B1:B3,"Apples")', multiConditionContext), '#VALUE!');
+  const overflowingCriteriaContext = { getCell: (row, column) => [[1, 1E308], [1, 1E308]][row]?.[column] ?? null };
+  for (const formula of [
+    'SUMIF(A1:A2,">0",B1:B2)', 'AVERAGEIF(A1:A2,">0",B1:B2)',
+    'SUMIFS(B1:B2,A1:A2,">0")', 'AVERAGEIFS(B1:B2,A1:A2,">0")',
+    'SUMIF(HSTACK(1,1),">0",HSTACK(1E308,1E308))', 'AVERAGEIF(HSTACK(1,1),">0",HSTACK(1E308,1E308))',
+    'SUMIFS(HSTACK(1E308,1E308),HSTACK(1,1),">0")', 'AVERAGEIFS(HSTACK(1E308,1E308),HSTACK(1,1),">0")'
+  ]) assert.equal(evaluateFormula(formula, overflowingCriteriaContext), '#NUM!', `${formula} reports aggregate overflow`);
   const productContext = { getCell: (row, column) => [[1, 5], [2, 7], ['text', 9]][row]?.[column] ?? null };
   assert.equal(evaluateFormula('SUMPRODUCT(A1:A2,B1:B2)', productContext), 19);
   assert.equal(evaluateFormula('SUMPRODUCT(A1:B2)', productContext), 15);
@@ -866,6 +891,31 @@ const wildcardContext = { getCell: (row, column) => [['apple', 'apricot', 'pear'
   assert.equal(evaluateFormula('CONCAT("ok",1/0)'), '#DIV/0!');
   assert.equal(evaluateFormula('1/0'), '#DIV/0!');
   assert.equal(evaluateFormula('UNKNOWN(1)'), '#NAME?');
+});
+
+test('XMATCH 근사 이진 검색은 오름차순·내림차순 경계와 중복 키에서 선형 결과를 유지한다', () => {
+  const sortedArrays = (prefix, remaining, minimum = 0) => {
+    if (!remaining) return [prefix];
+    const arrays = [];
+    for (let value = minimum; value <= 3; value++) arrays.push(...sortedArrays([...prefix, value], remaining - 1, value));
+    return arrays;
+  };
+  for (let length = 1; length <= 7; length++) for (const ascendingValues of sortedArrays([], length)) {
+    for (const ascending of [true, false]) {
+      const values = ascending ? ascendingValues : [...ascendingValues].reverse();
+      const context = { getCell: row => values[row] ?? null };
+      const binarySearchMode = ascending ? 2 : -2;
+      for (let target = -1; target <= 4; target++) for (const matchMode of [-1, 1]) {
+        const matches = values.filter(value => matchMode === -1 ? value <= target : value >= target);
+        const expected = matches.length ? (matchMode === -1 ? Math.max(...matches) : Math.min(...matches)) : '#N/A';
+        for (const searchMode of [1, -1, binarySearchMode]) {
+          const result = evaluateFormula(`XMATCH(${target},A1:A${length},${matchMode},${searchMode})`, context);
+          const actual = Number.isInteger(result) && result > 0 ? values[result - 1] : result;
+          assert.equal(actual, expected, `${values} target=${target} match=${matchMode} search=${searchMode}`);
+        }
+      }
+    }
+  }
 });
 
 test('수식 계산기는 통합문서 시트명을 기준으로 공백·아포스트로피가 있는 교차 시트 참조를 계산한다', () => {

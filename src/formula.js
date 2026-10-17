@@ -9,7 +9,7 @@ const MAX_CALC_STEPS = 100000;
 const MAX_DISTRIBUTION_SIZE = 100000;
 const FORMULA_RANGE = Symbol('formulaRange');
 const FORMULA_RANGE_METADATA = Symbol('formulaRangeMetadata');
-const ERROR_TYPE_CODES = new Map([['#NULL!', 1], ['#DIV/0!', 2], ['#VALUE!', 3], ['#REF!', 4], ['#NAME?', 5], ['#NUM!', 6], ['#N/A', 7], ['#N/A!', 7], ['#GETTING_DATA', 8]]);
+const ERROR_TYPE_CODES = new Map([['#NULL!', 1], ['#DIV/0!', 2], ['#VALUE!', 3], ['#REF!', 4], ['#NAME?', 5], ['#NUM!', 6], ['#N/A', 7], ['#N/A!', 7], ['#GETTING_DATA', 8], ['#SPILL!', 9], ['#CALC!', 14]]);
 
 function columnNumber(letters) {
   let result = 0;
@@ -189,6 +189,15 @@ function logFactorial(value) {
   for (let index = 2; index <= value; index++) result += Math.log(index);
   return result;
 }
+function compensatedSum(values) {
+  let total = 0, compensation = 0;
+  for (const value of values) {
+    const corrected = value - compensation, next = total + corrected;
+    compensation = (next - total) - corrected;
+    total = next;
+  }
+  return total;
+}
 function binomialDistribution(trials, probability) {
   if (probability === 0) return Array.from({ length: trials + 1 }, (_, index) => index === 0 ? 1 : 0);
   if (probability === 1) return Array.from({ length: trials + 1 }, (_, index) => index === trials ? 1 : 0);
@@ -198,13 +207,24 @@ function binomialDistribution(trials, probability) {
   probabilities[mode] = Math.exp(combinations + mode * Math.log(probability) + (trials - mode) * Math.log1p(-probability));
   for (let successes = mode; successes > 0; successes--) probabilities[successes - 1] = probabilities[successes] * successes / (trials - successes + 1) * (1 - probability) / probability;
   for (let successes = mode; successes < trials; successes++) probabilities[successes + 1] = probabilities[successes] * (trials - successes) / (successes + 1) * probability / (1 - probability);
+  const total = compensatedSum(probabilities);
+  if (!(Number.isFinite(total) && total > 0)) return '#NUM!';
+  for (let index = 0; index < probabilities.length; index++) probabilities[index] /= total;
   return probabilities;
 }
 function poissonDistribution(value, mean) {
   if (mean === 0) return Array.from({ length: value + 1 }, (_, index) => index === 0 ? 1 : 0);
   if (mean > MAX_DISTRIBUTION_SIZE || value > MAX_DISTRIBUTION_SIZE) return '#NUM!';
   const mode = Math.floor(mean), probabilities = Array(Math.max(value, mode) + 1).fill(0);
-  const modeProbability = Math.exp(-mean + mode * Math.log(mean) - logFactorial(mode));
+  let logModeProbability;
+  if (mode === 0) logModeProbability = -mean;
+  else if (mode < 32) logModeProbability = -mean + mode * Math.log(mean) - logFactorial(mode);
+  else {
+    const delta = mean - mode, inverse = 1 / mode, inverseSquared = inverse * inverse;
+    const correction = inverse * (1 / 12 + inverseSquared * (-1 / 360 + inverseSquared * (1 / 1260 + inverseSquared * (-1 / 1680 + inverseSquared / 1188))));
+    logModeProbability = mode * Math.log1p(delta / mode) - delta - 0.5 * Math.log(2 * Math.PI * mode) - correction;
+  }
+  const modeProbability = Math.exp(logModeProbability);
   probabilities[mode] = modeProbability;
   for (let count = mode; count > 0; count--) probabilities[count - 1] = probabilities[count] * count / mean;
   for (let count = mode; count < Math.max(value, mode); count++) probabilities[count + 1] = probabilities[count] * mean / (count + 1);
@@ -224,6 +244,20 @@ function sortCompareValues(left, right, locale = 'en') {
   if (leftRank === 1) return left - right;
   if (leftRank === 2) return String(left).localeCompare(String(right), locale, { sensitivity: 'base' });
   return String(left).localeCompare(String(right));
+}
+function interpolationFraction(lower, upper, value) {
+  const span = upper - lower, offset = value - lower;
+  if (Number.isFinite(span) && Number.isFinite(offset) && span !== 0) return offset / span;
+  const scale = Math.max(Math.abs(lower), Math.abs(upper), Math.abs(value));
+  if (scale === 0) return 0;
+  return (value / scale - lower / scale) / (upper / scale - lower / scale);
+}
+function interpolateNumber(lower, upper, fraction) {
+  if (fraction <= 0) return lower;
+  if (fraction >= 1) return upper;
+  return lower < 0 && upper > 0
+    ? lower * (1 - fraction) + upper * fraction
+    : lower + (upper - lower) * fraction;
 }
 function criterionMatch(value, criterion) {
   const text = typeof criterion === 'string' ? criterion : String(criterion ?? '');
@@ -319,6 +353,27 @@ function aggregateNumbers(values) {
     else if (typeof value === 'boolean') result.push(value ? 1 : 0);
   }
   return result;
+}
+function varianceValue(numbers, sample, returnStandardDeviation = false) {
+  const divisor = numbers.length - (sample ? 1 : 0);
+  const directSum = numbers.reduce((sum, value) => sum + value, 0);
+  if (Number.isFinite(directSum)) {
+    const mean = directSum / numbers.length;
+    const sumSquares = numbers.reduce((sum, value) => sum + (value - mean) ** 2, 0);
+    const variance = sumSquares / divisor;
+    if (Number.isFinite(variance)) return returnStandardDeviation ? Math.sqrt(variance) : variance;
+  }
+  const scale = Math.max(...numbers.map(Math.abs));
+  if (scale === 0) return 0;
+  const normalized = numbers.map(value => value / scale);
+  const mean = normalized.reduce((sum, value) => sum + value, 0) / numbers.length;
+  const normalizedVariance = normalized.reduce((sum, value) => sum + (value - mean) ** 2, 0) / divisor;
+  if (normalizedVariance === 0) return 0;
+  const standardDeviation = scale * Math.sqrt(normalizedVariance);
+  if (!Number.isFinite(standardDeviation)) return '#NUM!';
+  if (returnStandardDeviation) return standardDeviation;
+  const variance = standardDeviation * standardDeviation;
+  return Number.isFinite(variance) ? variance : '#NUM!';
 }
 function financialCashFlows(args) {
   const entries = [];
@@ -1539,8 +1594,10 @@ function callFunction(name, args, context = {}) {
     if (typeof value !== 'number' || typeof mean !== 'number' || typeof deviation !== 'number') return [value, mean, deviation].find(item => typeof item !== 'number');
     if (typeof cumulative !== 'boolean') return '#VALUE!';
     if (deviation <= 0) return '#NUM!';
-    const z = (value - mean) / deviation;
-    return cumulative ? standardNormalCdf(z) : Math.exp(-z * z / 2) / (deviation * Math.sqrt(2 * Math.PI));
+    const difference = value - mean;
+    const z = Number.isFinite(difference) ? difference / deviation : value / deviation - mean / deviation;
+    if (Number.isNaN(z)) return '#NUM!';
+    return cumulative ? standardNormalCdf(z) : Math.exp(-z * z / 2) / deviation / Math.sqrt(2 * Math.PI);
   }
   if (name === 'NORM.S.INV' || name === 'NORM.INV') {
     const standard = name === 'NORM.S.INV';
@@ -1549,7 +1606,9 @@ function callFunction(name, args, context = {}) {
     if (typeof probability !== 'number' || typeof mean !== 'number' || typeof deviation !== 'number') return [probability, mean, deviation].find(item => typeof item !== 'number');
     if (probability <= 0 || probability >= 1 || deviation <= 0) return '#NUM!';
     const value = standardNormalInverse(probability);
-    return typeof value === 'number' ? mean + deviation * value : value;
+    if (typeof value !== 'number') return value;
+    const result = mean + deviation * value;
+    return Number.isFinite(result) ? result : '#NUM!';
   }
   if (name === 'BINOM.DIST') {
     if (args.length !== 4) return '#VALUE!';
@@ -1559,7 +1618,8 @@ function callFunction(name, args, context = {}) {
     if (typeof cumulative !== 'boolean') return '#VALUE!';
     if (trials > MAX_DISTRIBUTION_SIZE) return '#NUM!';
     const distribution = binomialDistribution(trials, probability);
-    return cumulative ? distribution.slice(0, successes + 1).reduce((sum, value) => sum + value, 0) : distribution[successes];
+    if (typeof distribution === 'string') return distribution;
+    return cumulative ? compensatedSum(distribution.slice(0, successes + 1)) : distribution[successes];
   }
   if (name === 'POISSON.DIST') {
     if (args.length !== 3) return '#VALUE!';
@@ -1569,7 +1629,7 @@ function callFunction(name, args, context = {}) {
     if (typeof cumulative !== 'boolean') return '#VALUE!';
     const distribution = poissonDistribution(value, mean);
     if (typeof distribution === 'string') return distribution;
-    return cumulative ? distribution.reduce((sum, probability) => sum + probability, 0) : distribution[value];
+    return cumulative ? compensatedSum(distribution.slice(0, value + 1)) : distribution[value];
   }
   if (name === 'NPV') {
     if (args.length < 2) return '#VALUE!';
@@ -2315,9 +2375,27 @@ function callFunction(name, args, context = {}) {
       const result = numbers.length / numbers.reduce((sum, value) => sum + 1 / value, 0);
       return Number.isFinite(result) ? result : '#NUM!';
     }
-    const mean = numbers.reduce((sum, value) => sum + value, 0) / numbers.length;
-    const deviations = numbers.reduce((sum, value) => sum + Math.abs(value - mean), 0);
-    return name === 'AVEDEV' ? deviations / numbers.length : numbers.reduce((sum, value) => sum + (value - mean) ** 2, 0);
+    const directSum = numbers.reduce((sum, value) => sum + value, 0);
+    if (Number.isFinite(directSum)) {
+      const directMean = directSum / numbers.length;
+      const deviations = numbers.reduce((sum, value) => sum + Math.abs(value - directMean), 0);
+      const result = name === 'AVEDEV' ? deviations / numbers.length : numbers.reduce((sum, value) => sum + (value - directMean) ** 2, 0);
+      if (Number.isFinite(result)) return result;
+    }
+    const scale = Math.max(...numbers.map(Math.abs));
+    if (scale === 0) return 0;
+    const normalized = numbers.map(value => value / scale);
+    const mean = normalized.reduce((sum, value) => sum + value, 0) / numbers.length;
+    if (name === 'AVEDEV') {
+      const normalizedDeviation = normalized.reduce((sum, value) => sum + Math.abs(value - mean), 0) / numbers.length;
+      const result = normalizedDeviation * scale;
+      return Number.isFinite(result) ? result : '#NUM!';
+    }
+    const normalizedSquares = normalized.reduce((sum, value) => sum + (value - mean) ** 2, 0);
+    if (normalizedSquares === 0) return 0;
+    const root = scale * Math.sqrt(normalizedSquares);
+    const result = root * root;
+    return Number.isFinite(result) ? result : '#NUM!';
   }
   if (name === 'COUNTA') return values.filter(value => value !== null && value !== undefined).length;
   if (name === 'COUNT') return values.filter(value => typeof value === 'number' && Number.isFinite(value)).length;
@@ -2338,7 +2416,11 @@ function callFunction(name, args, context = {}) {
     if (name === 'PRODUCT' && !args.length) return '#VALUE!';
     const numbers = aggregateNumbers(args);
     if (typeof numbers === 'string') return numbers;
-    if (name === 'SUM') return numbers.reduce((sum, value) => sum + value, 0);
+    if (name === 'SUM') {
+      let sum = 0;
+      for (const value of numbers) { sum += value; if (!Number.isFinite(sum)) return '#NUM!'; }
+      return sum;
+    }
     if (name === 'PRODUCT') {
       let product = 1;
       for (const number of numbers) { product *= number; if (!Number.isFinite(product)) return '#NUM!'; }
@@ -2348,9 +2430,17 @@ function callFunction(name, args, context = {}) {
       if (!numbers.length) return '#NUM!';
       numbers.sort((a, b) => a - b);
       const middle = Math.floor(numbers.length / 2);
-      return numbers.length % 2 ? numbers[middle] : (numbers[middle - 1] + numbers[middle]) / 2;
+      if (numbers.length % 2) return numbers[middle];
+      const lower = numbers[middle - 1], upper = numbers[middle];
+      return Math.sign(lower) === Math.sign(upper) ? lower + (upper - lower) / 2 : lower / 2 + upper / 2;
     }
-    if (name === 'AVERAGE') return numbers.length ? numbers.reduce((sum, value) => sum + value, 0) / numbers.length : '#DIV/0!';
+    if (name === 'AVERAGE') {
+      if (!numbers.length) return '#DIV/0!';
+      let sum = 0;
+      for (const value of numbers) { sum += value; if (!Number.isFinite(sum)) return '#NUM!'; }
+      const average = sum / numbers.length;
+      return Number.isFinite(average) ? average : '#NUM!';
+    }
     if (!numbers.length) return 0;
     return name === 'MIN' ? Math.min(...numbers) : Math.max(...numbers);
   }
@@ -2428,7 +2518,7 @@ function callFunction(name, args, context = {}) {
     else {
       const upper = numbers.findIndex(value => value > sought);
       const lower = upper - 1;
-      rank = lower + 1 + (sought - numbers[lower]) / (numbers[upper] - numbers[lower]);
+      rank = lower + 1 + interpolationFraction(numbers[lower], numbers[upper], sought);
     }
     const exclusive = name.endsWith('.EXC');
     const percentile = exclusive ? rank / (numbers.length + 1) : numbers.length === 1 ? 0 : (rank - 1) / (numbers.length - 1);
@@ -2451,27 +2541,20 @@ function callFunction(name, args, context = {}) {
     const position = exclusive ? (numbers.length + 1) * k - 1 : (numbers.length - 1) * k;
     if (position < 0 || position > numbers.length - 1) return '#NUM!';
     const lower = Math.floor(position), fraction = position - lower;
-    return numbers[lower] + (numbers[Math.min(lower + 1, numbers.length - 1)] - numbers[lower]) * fraction;
+    return interpolateNumber(numbers[lower], numbers[Math.min(lower + 1, numbers.length - 1)], fraction);
   }
   if (['STDEV.S', 'STDEV.P', 'VAR.S', 'VAR.P'].includes(name)) {
     const numbers = aggregateNumbers(args);
     if (typeof numbers === 'string') return numbers;
     const sample = name.endsWith('.S');
     if (numbers.length < (sample ? 2 : 1)) return '#DIV/0!';
-    const mean = numbers.reduce((sum, value) => sum + value, 0) / numbers.length;
-    const squaredDeviations = numbers.reduce((sum, value) => sum + (value - mean) ** 2, 0);
-    const variance = squaredDeviations / (numbers.length - (sample ? 1 : 0));
-    return name.startsWith('STDEV') ? Math.sqrt(variance) : variance;
+    return varianceValue(numbers, sample, name.startsWith('STDEV'));
   }
   if (['STDEVA', 'STDEVPA', 'VARA', 'VARPA'].includes(name)) {
     const numbers = flatten(args).filter(value => value !== null && value !== undefined).map(value => typeof value === 'number' ? value : typeof value === 'boolean' ? Number(value) : 0);
     const sample = name === 'STDEVA' || name === 'VARA';
     if (numbers.length < (sample ? 2 : 1)) return '#DIV/0!';
-    const mean = numbers.reduce((sum, value) => sum + value, 0) / numbers.length;
-    const squaredDeviations = numbers.reduce((sum, value) => sum + (value - mean) ** 2, 0);
-    const variance = squaredDeviations / (numbers.length - (sample ? 1 : 0));
-    if (!Number.isFinite(variance)) return '#NUM!';
-    return name.startsWith('STDEV') ? Math.sqrt(variance) : variance;
+    return varianceValue(numbers, sample, name.startsWith('STDEV'));
   }
   if (['CORREL', 'PEARSON', 'COVARIANCE.P', 'COVARIANCE.S', 'SLOPE', 'INTERCEPT', 'RSQ', 'STEYX', 'FORECAST', 'FORECAST.LINEAR'].includes(name)) {
     const forecast = name === 'FORECAST' || name === 'FORECAST.LINEAR';
@@ -2481,25 +2564,58 @@ function callFunction(name, args, context = {}) {
     if (typeof pairs === 'string') return pairs;
     const minimum = name === 'COVARIANCE.P' ? 1 : name === 'STEYX' ? 3 : 2;
     if (pairs.length < minimum) return '#DIV/0!';
-    const count = pairs.length, meanX = pairs.reduce((sum, pair) => sum + pair[0], 0) / count, meanY = pairs.reduce((sum, pair) => sum + pair[1], 0) / count;
-    if (!Number.isFinite(meanX) || !Number.isFinite(meanY)) return '#NUM!';
+    const constantX = pairs.every(pair => pair[0] === pairs[0][0]);
+    const constantY = pairs.every(pair => pair[1] === pairs[0][1]);
+    if (['COVARIANCE.P', 'COVARIANCE.S'].includes(name) && (constantX || constantY)) return 0;
+    if (constantX || (['CORREL', 'PEARSON', 'RSQ'].includes(name) && constantY)) return '#DIV/0!';
+    if (constantY) {
+      if (name === 'SLOPE' || name === 'STEYX') return 0;
+      if (name === 'INTERCEPT' || forecast) return pairs[0][1];
+    }
+    const count = pairs.length;
+    let workPairs = pairs, xScale = 1, yScale = 1, scaled = false;
+    let meanX = pairs.reduce((sum, pair) => sum + pair[0], 0) / count;
+    let meanY = pairs.reduce((sum, pair) => sum + pair[1], 0) / count;
     let sumXY = 0, sumXX = 0, sumYY = 0;
-    for (const [x, y] of pairs) { const dx = x - meanX, dy = y - meanY; sumXY += dx * dy; sumXX += dx * dx; sumYY += dy * dy; }
-    if (![sumXY, sumXX, sumYY].every(Number.isFinite)) return '#NUM!';
-    if (name === 'COVARIANCE.P') return sumXY / count;
-    if (name === 'COVARIANCE.S') return sumXY / (count - 1);
+    if (Number.isFinite(meanX) && Number.isFinite(meanY)) {
+      for (const [x, y] of pairs) { const dx = x - meanX, dy = y - meanY; sumXY += dx * dy; sumXX += dx * dx; sumYY += dy * dy; }
+    }
+    if (![meanX, meanY, sumXY, sumXX, sumYY].every(Number.isFinite)) {
+      scaled = true;
+      xScale = Math.max(...pairs.map(pair => Math.abs(pair[0]))) || 1;
+      yScale = Math.max(...pairs.map(pair => Math.abs(pair[1]))) || 1;
+      workPairs = pairs.map(([x, y]) => [x / xScale, y / yScale]);
+      meanX = workPairs.reduce((sum, pair) => sum + pair[0], 0) / count;
+      meanY = workPairs.reduce((sum, pair) => sum + pair[1], 0) / count;
+      sumXY = 0; sumXX = 0; sumYY = 0;
+      for (const [x, y] of workPairs) { const dx = x - meanX, dy = y - meanY; sumXY += dx * dy; sumXX += dx * dx; sumYY += dy * dy; }
+      if (![meanX, meanY, sumXY, sumXX, sumYY].every(Number.isFinite)) return '#NUM!';
+    }
+    if (name === 'COVARIANCE.P' || name === 'COVARIANCE.S') {
+      const covariance = sumXY / (name === 'COVARIANCE.P' ? count : count - 1);
+      if (!scaled) return covariance;
+      const smallerScale = Math.min(xScale, yScale), largerScale = Math.max(xScale, yScale);
+      const result = covariance * smallerScale * largerScale;
+      return Number.isFinite(result) ? result : '#NUM!';
+    }
     if (sumXX === 0 || (name === 'CORREL' || name === 'PEARSON' || name === 'RSQ') && sumYY === 0) return '#DIV/0!';
-    const slope = sumXY / sumXX, correlation = sumXY / Math.sqrt(sumXX * sumYY), intercept = meanY - slope * meanX;
+    const normalizedSlope = sumXY / sumXX, scaleRatio = scaled ? yScale / xScale : 1;
+    const slope = normalizedSlope * scaleRatio, correlation = sumXY / Math.sqrt(sumXX) / Math.sqrt(sumYY);
+    const normalizedIntercept = meanY - normalizedSlope * meanX, intercept = scaled ? normalizedIntercept * yScale : normalizedIntercept;
+    if (![slope, correlation, intercept].every(Number.isFinite)) return '#NUM!';
     if (name === 'CORREL' || name === 'PEARSON') return correlation;
     if (name === 'SLOPE') return slope;
     if (name === 'INTERCEPT') return intercept;
     if (name === 'RSQ') return correlation * correlation;
     if (name === 'STEYX') {
-      const residuals = pairs.reduce((sum, [x, y]) => sum + (y - (intercept + slope * x)) ** 2, 0);
-      return Math.sqrt(residuals / (count - 2));
+      const residuals = workPairs.reduce((sum, [x, y]) => sum + (y - (normalizedIntercept + normalizedSlope * x)) ** 2, 0);
+      const error = Math.sqrt(residuals / (count - 2)) * (scaled ? yScale : 1);
+      return Number.isFinite(error) ? error : '#NUM!';
     }
     const x = numeric(args[0]);
-    return typeof x === 'number' ? intercept + slope * x : x;
+    if (typeof x !== 'number') return x;
+    const forecastValue = scaled ? (normalizedIntercept + normalizedSlope * (x / xScale)) * yScale : intercept + slope * x;
+    return Number.isFinite(forecastValue) ? forecastValue : '#NUM!';
   }
   const first = ['GCD', 'LCM', 'MULTINOMIAL'].includes(name) && (isFormulaRange(args[0]) || args[0]?.[FORMULA_RANGE_METADATA]) ? 0 : numeric(args[0]);
   if (typeof first === 'string') return first;

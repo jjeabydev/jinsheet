@@ -9,7 +9,7 @@ async function main() {
   const locale = process.env.JINSHEET_HOST_LOCALE;
   if (locale && !locale.toLowerCase().startsWith('ko')) throw new Error('JINSHEET_HOST_LOCALE currently supports the Korean locale only.');
   const localeSuffix = locale ? '-' + locale.toLowerCase().replace(/[^a-z0-9-]/g, '-') : '';
-  const userDataDir = path.join(require('node:os').tmpdir(), 'jinsheet-host-user-data' + localeSuffix);
+  const userDataDir = path.join(require('node:os').tmpdir(), 'jsh' + localeSuffix);
   const extensionsDir = path.join(require('node:os').tmpdir(), 'jinsheet-host-extensions' + localeSuffix);
   if (locale) {
     fs.mkdirSync(userDataDir, { recursive: true });
@@ -54,36 +54,41 @@ async function main() {
     const localization = languagePack.contributes?.localizations?.find(item => item.languageId === 'ko');
     const translationsConfigFile = localization?.translations?.find(item => item.id === 'vscode')?.path;
     if (!translationsConfigFile) throw new Error('The VS Code Korean language pack does not declare its core translations.');
-    const nlsConfig = {
-      userLocale: 'ko',
-      osLocale: Intl.DateTimeFormat().resolvedOptions().locale || 'en',
-      resolvedLanguage: 'ko',
-      defaultMessagesFile,
-      languagePack: { messagesFile: path.join(userDataDir, 'korean-nls.messages.json'), translationsConfigFile: path.join(languagePackDirectory, translationsConfigFile) }
-    };
     const keysPath = path.join(path.dirname(defaultMessagesFile), 'nls.keys.json');
-    const messagesPath = defaultMessagesFile;
     const languagePackMessages = JSON.parse(fs.readFileSync(path.join(languagePackDirectory, translationsConfigFile), 'utf8'));
-    const defaultMessages = JSON.parse(fs.readFileSync(messagesPath, 'utf8'));
+    const defaultMessages = JSON.parse(fs.readFileSync(defaultMessagesFile, 'utf8'));
     const keys = JSON.parse(fs.readFileSync(keysPath, 'utf8'));
     if (!languagePackMessages.contents || typeof languagePackMessages.contents !== 'object' || !Array.isArray(keys)) throw new Error('VS Code Korean translation metadata has an unsupported format.');
     const localizedMessages = [];
     let messageIndex = 0;
     for (const [moduleId, messageKeys] of keys) for (const key of messageKeys) localizedMessages.push(languagePackMessages.contents[moduleId]?.[key] || defaultMessages[messageIndex++]);
-    fs.writeFileSync(nlsConfig.languagePack.messagesFile, JSON.stringify(localizedMessages));
-    process.env.VSCODE_NLS_CONFIG = JSON.stringify(nlsConfig);
-    process.env.VSCODE_PORTABLE = userDataDir;
-    fs.writeFileSync(path.join(userDataDir, 'argv.json'), JSON.stringify({ locale: 'ko' }));
+    const portablePath = userDataDir;
+    const portableDataPath = path.join(portablePath, 'user-data');
+    fs.mkdirSync(path.join(portableDataPath, 'User'), { recursive: true });
+    const languagePackHash = 'jsh-ko-test';
+    const cacheDirectory = path.join(portableDataPath, 'clp', `${languagePackHash}.ko`, 'test-build');
+    fs.mkdirSync(cacheDirectory, { recursive: true });
+    const messagesFile = path.join(cacheDirectory, 'nls.messages.json');
+    const translationsFile = path.join(path.dirname(cacheDirectory), 'tcf.json');
+    fs.writeFileSync(messagesFile, JSON.stringify(localizedMessages));
+    fs.writeFileSync(translationsFile, JSON.stringify([{ id: 'vscode', path: path.join(languagePackDirectory, translationsConfigFile) }]));
+    fs.writeFileSync(path.join(portableDataPath, 'languagepacks.json'), JSON.stringify({ ko: {
+      hash: languagePackHash,
+      extensions: [{ extensionIdentifier: { id: 'ms-ceintl.vscode-language-pack-ko' }, version: languagePack.version }],
+      translations: Object.fromEntries(languagePack.contributes.localizations.find(item => item.languageId === 'ko').translations.map(item => [item.id, path.join(languagePackDirectory, item.path)])),
+      label: '한국어'
+    } }));
+    fs.writeFileSync(path.join(portablePath, 'argv.json'), JSON.stringify({ locale: 'ko' }));
+    process.env.VSCODE_PORTABLE = portablePath;
   }
   const launchArgs = [...(locale ? [] : ['--disable-extensions']), '--disable-gpu', '--remote-debugging-port=9333', '--remote-allow-origins=*', `--user-data-dir=${userDataDir}`];
-  if (locale) launchArgs.push(`--locale=${locale.split('-')[0]}`, `--extensions-dir=${extensionsDir}`);
+  if (locale) launchArgs.push(`--locale=${locale}`, `--extensions-dir=${extensionsDir}`);
   if (process.platform === 'linux') launchArgs.push('--no-sandbox');
   if (locale) Object.assign(process.env, { LANG: 'ko_KR.UTF-8', LANGUAGE: 'ko_KR:ko', LC_ALL: 'ko_KR.UTF-8' });
   const code = await runTests({
     vscodeExecutablePath,
     extensionDevelopmentPath: path.resolve(__dirname, '..'),
     extensionTestsPath: path.resolve(__dirname, 'host'),
-    extensionTestsEnv: locale ? { VSCODE_NLS_CONFIG: process.env.VSCODE_NLS_CONFIG, VSCODE_PORTABLE: process.env.VSCODE_PORTABLE } : undefined,
     launchArgs
   });
   if (code !== 0) process.exitCode = code || 1;

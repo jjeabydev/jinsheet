@@ -834,7 +834,11 @@ suite('JinSheet Extension Host', () => {
       const sizeDeadline = Date.now() + 3000;
       while (Date.now() < sizeDeadline && await evaluate('(()=>{const cell=document.querySelector("#cell-1-2");return cell?getComputedStyle(cell).fontSize:"missing"})()') !== '24px') await new Promise(resolve => setTimeout(resolve, 25));
       assert.equal(await evaluate('(()=>{const cell=document.querySelector("#cell-1-2");return cell?getComputedStyle(cell).fontSize:"missing"})()'), '24px');
+      while (Date.now() < sizeDeadline && vscode.window.tabGroups.activeTabGroup.activeTab?.isDirty !== true) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(vscode.window.tabGroups.activeTabGroup.activeTab?.isDirty, true, 'applying a font size marks the workbook modified before saving');
       await vscode.commands.executeCommand('workbench.action.files.save');
+      const fontSizeSaveDeadline = Date.now() + 5000;
+      while (Date.now() < fontSizeSaveDeadline && analyze(await fs.readFile(file)).sheets[0].cells.get('C2')?.styleProperties.fontSize !== 18) await new Promise(resolve => setTimeout(resolve, 25));
       saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
       assert.equal(saved.styleProperties.fontSize, 18);
       assert.equal(saved.styleProperties.underline, true);
@@ -3922,7 +3926,7 @@ suite('JinSheet Extension Host', () => {
       await waitFor('Boolean(document.querySelector("#removeDuplicatesPanel").hidden === false)', 'the duplicate preview panel opens');
       await new Promise(resolve => setTimeout(resolve, 250));
       const isKorean = await evaluate('document.documentElement.lang === "ko"');
-      if (process.env.JINSHEET_HOST_LOCALE?.toLowerCase().startsWith('ko')) assert.equal(isKorean, true, 'the requested Korean VS Code locale selects the Korean JinSheet UI; html lang='+await evaluate('document.documentElement.lang')+'; host language='+vscode.env.language);
+      if (process.env.JINSHEET_HOST_LOCALE?.toLowerCase().startsWith('ko')) assert.equal(isKorean, true, 'the requested Korean locale selects the Korean JinSheet UI');
       const previewStatus = await evaluate('document.querySelector("#removeDuplicatesStatus")?.textContent');
       assert.match(previewStatus, isKorean ? /중복 행 2개/ : /2 duplicate rows/, 'the preview reports two duplicate rows');
       assert.equal(await evaluate('document.querySelector("#removeDuplicatesApply").disabled'), false);

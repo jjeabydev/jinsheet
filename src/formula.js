@@ -255,6 +255,22 @@ function criterionMatch(value, criterion) {
   return actual >= expected;
 }
 function criteriaPairs(criteriaRange, sumRange) {
+  const criteriaMetadata = criteriaRange?.[FORMULA_RANGE_METADATA];
+  const sumMetadata = sumRange?.[FORMULA_RANGE_METADATA];
+  if (criteriaMetadata && sumMetadata) {
+    const criteriaBounds = criteriaMetadata.bounds, sumBounds = sumMetadata.bounds;
+    const criteriaValues = new Map(criteriaMetadata.entries.map(entry => [`${entry.row}:${entry.column}`, entry.value]));
+    const sumValues = new Map(sumMetadata.entries.map(entry => [`${entry.row - sumBounds.top}:${entry.column - sumBounds.left}`, entry.value]));
+    const pairs = [];
+    for (let row = criteriaBounds.top; row <= criteriaBounds.bottom; row++) {
+      for (let column = criteriaBounds.left; column <= criteriaBounds.right; column++) {
+        const criteria = criteriaValues.get(`${row}:${column}`) ?? null;
+        const sumRow = row - criteriaBounds.top, sumColumn = column - criteriaBounds.left;
+        pairs.push([criteria, sumValues.get(`${sumRow}:${sumColumn}`) ?? null]);
+      }
+    }
+    return pairs;
+  }
   const criteria = flatten([criteriaRange]), sums = flatten([sumRange]);
   if (criteria.length !== sums.length) return null;
   return criteria.map((value, index) => [value, sums[index]]);
@@ -1129,21 +1145,37 @@ function callFunction(name, args, context = {}) {
     if ((name === 'COUNTIF' && args.length !== 2) || (name !== 'COUNTIF' && (args.length < 2 || args.length > 3))) return '#VALUE!';
     const criteriaRange = args[0], criteria = args[1], sumRange = args[2] ?? criteriaRange;
     if (isFormulaRange(criteriaRange) || isFormulaRange(sumRange)) {
-      if (!sameSparseShape([criteriaRange, sumRange])) return '#VALUE!';
-      const criteriaValues = sparseRangeIndex(criteriaRange), sumValues = sparseRangeIndex(sumRange);
-      const positions = sparsePositionUnion([criteriaRange, sumRange]);
+      const criteriaBounds = isFormulaRange(criteriaRange) ? criteriaRange.bounds : criteriaRange?.[FORMULA_RANGE_METADATA]?.bounds;
+      const sumMetadata = isFormulaRange(sumRange) ? sumRange : sumRange?.[FORMULA_RANGE_METADATA];
+      const sumBounds = sumMetadata?.bounds;
+      if (!criteriaBounds || !sumBounds) return '#VALUE!';
+      const criteriaEntries = isFormulaRange(criteriaRange) ? criteriaRange.entries : criteriaRange[FORMULA_RANGE_METADATA].entries;
+      const sumEntries = sumMetadata.entries;
+      const criteriaValues = new Map(criteriaEntries.map(entry => [`${entry.row - criteriaBounds.top}:${entry.column - criteriaBounds.left}`, entry.value]));
+      const sumValues = new Map(sumEntries.map(entry => [`${entry.row - sumBounds.top}:${entry.column - sumBounds.left}`, entry.value]));
+      const criteriaHeight = criteriaBounds.bottom - criteriaBounds.top + 1;
+      const criteriaWidth = criteriaBounds.right - criteriaBounds.left + 1;
+      const sumHeight = sumBounds.bottom - sumBounds.top + 1;
+      const sumWidth = sumBounds.right - sumBounds.left + 1;
+      const positions = new Set(criteriaValues.keys());
+      for (const entry of sumEntries) {
+        const row = entry.row - sumBounds.top, column = entry.column - sumBounds.left;
+        if (row < criteriaHeight && column < criteriaWidth) positions.add(`${row}:${column}`);
+      }
       let count = 0, sum = 0;
       for (const position of positions) {
-        const value = criteriaValues.has(position) ? criteriaValues.get(position) : null;
+        const value = criteriaValues.get(position) ?? null;
         if (!criterionMatch(value, criteria)) continue;
         if (name === 'COUNTIF') { count++; continue; }
-        const number = sumValues.has(position) ? sumValues.get(position) : null;
+        const [row, column] = position.split(':').map(Number);
+        const number = row < sumHeight && column < sumWidth ? sumValues.get(position) ?? null : null;
         if (isError(number)) return number;
         if (typeof number !== 'number' || !Number.isFinite(number)) continue;
         sum += number;
         count++;
       }
-      if (name === 'COUNTIF') return count + (criterionMatch(null, criteria) ? criteriaRange.cellCount - positions.size : 0);
+      const criteriaCellCount = isFormulaRange(criteriaRange) ? criteriaRange.cellCount : criteriaHeight * criteriaWidth;
+      if (name === 'COUNTIF') return count + (criterionMatch(null, criteria) ? criteriaCellCount - positions.size : 0);
       return name === 'SUMIF' ? sum : count ? sum / count : '#DIV/0!';
     }
     const pairs = criteriaPairs(criteriaRange, sumRange);

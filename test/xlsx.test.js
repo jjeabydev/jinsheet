@@ -716,6 +716,9 @@ assert.equal(evaluateFormula('NOT(FALSE)'), true);
   assert.equal(evaluateFormula('AVERAGEIF(A1:B2,">3")', context), 4.5);
   const conditionContext = { getCell: (row, column) => [[1, 5, 'apple'], [2, '7', 'apricot'], [0, 9, 'pear']][row]?.[column] ?? null };
   assert.equal(evaluateFormula('SUMIF(A1:A3,">0",B1:B3)', conditionContext), 5, 'SUMIF ignores text cells in the sum range');
+  const mismatchedSumContext = { getCell: (row, column) => [[10, 1], [20, 0], [30, 1]][row]?.[column] ?? null };
+  assert.equal(evaluateFormula('SUMIF(B1:B3,1,A1:A2)', mismatchedSumContext), 10, 'SUMIF aligns a smaller sum range from its top-left cell and treats missing aligned cells as zero');
+  assert.equal(evaluateFormula('SUMIF(B1:B2,1,A1:A3)', mismatchedSumContext), 10, 'SUMIF ignores sum-range cells outside the criteria range dimensions');
   assert.equal(evaluateFormula('COUNTIF(C1:C3,"ap*")', conditionContext), 2);
   const criterionTypeContext = { getCell: (row, column) => [[null], [0], [''], [false], ['0'], ['text']][row]?.[column] ?? null };
   assert.equal(evaluateFormula('COUNTIF(A1:A6,"0")', criterionTypeContext), 3, 'numeric zero criteria use spreadsheet comparison semantics for numeric, logical, and numeric-text cells');
@@ -1283,7 +1286,8 @@ test('수식 계산기는 희소 셀만 순회해 전체 행·열 참조를 집�
     ['M2', { address: 'M2', row: 1, column: 12, value: '', kind: 'number', formula: 'MINIFS(B:B,A:A,">0")' }],
     ['N2', { address: 'N2', row: 1, column: 13, value: '', kind: 'number', formula: 'COUNTIFS(A:A,">0",B:B,">3")' }],
     ['O2', { address: 'O2', row: 1, column: 14, value: '', kind: 'number', formula: 'COUNTIFS(A:A,"",B:B,"")' }],
-    ['P2', { address: 'P2', row: 1, column: 15, value: '', kind: 'number', formula: 'SUMIF(A:A,"",B:B)' }]
+    ['P2', { address: 'P2', row: 1, column: 15, value: '', kind: 'number', formula: 'SUMIF(A:A,"",B:B)' }],
+    ['Q2', { address: 'Q2', row: 1, column: 16, value: '', kind: 'number', formula: 'SUMIF(A:A,">0",B1:B3)' }]
   ]);
   const document = {
     state: { sheets: [{ name: 'Data', cells }] },
@@ -1309,6 +1313,7 @@ test('수식 계산기는 희소 셀만 순회해 전체 행·열 참조를 집�
   assert.equal(calculator.value(0, 1, 13), 1, 'COUNTIFS evaluates multiple aligned sparse criteria ranges');
   assert.equal(calculator.value(0, 1, 14), 1048574, 'COUNTIFS counts rows blank in every sparse full-column criteria range');
   assert.equal(calculator.value(0, 1, 15), 0, 'SUMIF does not shift sums onto nonmatching blank criterion rows');
+  assert.equal(calculator.value(0, 1, 16), 3, 'SUMIF aligns a bounded sum range to a full-column criteria range without enumerating the entire column');
 });
 
 function fixture({ formula = false, extra = undefined, workbookXml = undefined, formatted = false, columnDefinitions = '', sheetViews = '', cellExtension = '', autoFilter = '' } = {}) {

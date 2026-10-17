@@ -36,6 +36,25 @@ async function main() {
       env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
     });
     if (install.error || install.status !== 0) throw new Error(`Could not install the VS Code Korean language pack: ${install.error?.message || install.stderr || install.stdout || `exit ${install.status}`}`);
+    const languagePackDirectory = fs.readdirSync(extensionsDir, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && entry.name.toLowerCase().startsWith('ms-ceintl.vscode-language-pack-ko-'))
+      .map(entry => path.join(extensionsDir, entry.name))
+      .find(candidate => fs.existsSync(path.join(candidate, 'package.json')));
+    if (!languagePackDirectory) throw new Error('The VS Code Korean language pack was not installed in the isolated test extension directory.');
+    const languagePack = JSON.parse(fs.readFileSync(path.join(languagePackDirectory, 'package.json'), 'utf8'));
+    const localization = languagePack.contributes?.localizations?.find(item => item.languageId === 'ko');
+    const translationsConfigFile = localization?.translations?.find(item => item.id === 'vscode')?.path;
+    if (!translationsConfigFile) throw new Error('The VS Code Korean language pack does not declare its core translations.');
+    const nlsConfig = {
+      userLocale: 'ko',
+      osLocale: Intl.DateTimeFormat().resolvedOptions().locale || 'en',
+      resolvedLanguage: 'ko',
+      defaultMessagesFile,
+      languagePack: {
+        translationsConfigFile: path.join(languagePackDirectory, translationsConfigFile)
+      }
+    };
+    process.env.VSCODE_NLS_CONFIG = JSON.stringify(nlsConfig);
   }
   const launchArgs = [...(locale ? [] : ['--disable-extensions']), '--disable-gpu', '--remote-debugging-port=9333', '--remote-allow-origins=*', `--user-data-dir=${userDataDir}`];
   if (locale) launchArgs.push(`--locale=${locale.split('-')[0]}`, `--extensions-dir=${extensionsDir}`);

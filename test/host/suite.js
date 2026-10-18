@@ -1920,21 +1920,28 @@ suite('JinSheet Extension Host', () => {
         if (response.exceptionDetails) throw new Error(response.exceptionDetails.text);
         return response.result?.value;
       };
+      const saveUntil = async predicate => {
+        const deadline = Date.now() + 5000;
+        do {
+          await vscode.commands.executeCommand('workbench.action.files.save');
+          const workbook = analyze(await fs.readFile(file));
+          if (predicate(workbook)) return workbook;
+          await new Promise(resolve => setTimeout(resolve, 25));
+        } while (Date.now() < deadline);
+        assert.fail('Conditional-format save did not reach the expected state');
+      };
       await evaluate('document.querySelector("#manageConditionalFormats").click()');
       const deadline = Date.now() + 5000;
       while (Date.now() < deadline && (pickCount < 4 || inputCount < 1)) await new Promise(resolve => setTimeout(resolve, 25));
       assert.equal(pickCount, 4); assert.equal(inputCount, 1);
       assert.equal(inputDefault, '100', 'switching from a large count to a percentage clamps the default into range');
-      await vscode.commands.executeCommand('workbench.action.files.save');
-      let saved = analyze(await fs.readFile(file));
+      let saved = await saveUntil(workbook => workbook.sheets[0].conditionalFormats[0]?.top10?.rank === 50 && workbook.sheets[0].conditionalFormats[0]?.top10?.percent === true && workbook.sheets[0].conditionalFormats[0]?.top10?.bottom === true);
       assert.deepEqual(saved.sheets[0].conditionalFormats[0].top10, { rank: 50, percent: true, bottom: true });
       await vscode.commands.executeCommand('jinsheet.undo');
-      await vscode.commands.executeCommand('workbench.action.files.save');
-      saved = analyze(await fs.readFile(file));
+      saved = await saveUntil(workbook => workbook.sheets[0].conditionalFormats[0]?.top10?.rank === 500 && workbook.sheets[0].conditionalFormats[0]?.top10?.percent === false && workbook.sheets[0].conditionalFormats[0]?.top10?.bottom === false);
       assert.deepEqual(saved.sheets[0].conditionalFormats[0].top10, { rank: 500, percent: false, bottom: false });
       await vscode.commands.executeCommand('jinsheet.redo');
-      await vscode.commands.executeCommand('workbench.action.files.save');
-      saved = analyze(await fs.readFile(file));
+      saved = await saveUntil(workbook => workbook.sheets[0].conditionalFormats[0]?.top10?.rank === 50 && workbook.sheets[0].conditionalFormats[0]?.top10?.percent === true && workbook.sheets[0].conditionalFormats[0]?.top10?.bottom === true);
       assert.deepEqual(saved.sheets[0].conditionalFormats[0].top10, { rank: 50, percent: true, bottom: true });
     } finally {
       vscode.window.showQuickPick = originalQuickPick; vscode.window.showInputBox = originalInputBox;

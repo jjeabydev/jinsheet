@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { unzipSync, zipSync } = require('../vendor/node_modules/fflate');
 const { SaxesParser } = require('../vendor/node_modules/saxes');
-const { analyze, calculateChartPreviews, formatCellValue, inspectZip, patchCell, patchCells, patchColumnWidths, patchRowHeights, patchRowHeightValues, patchPrintSettings, patchPrintArea, patchDefinedName, patchPrintTitles, patchHeaderFooter, patchPageBreaks, patchAutoFilters, patchFilterVisibility, patchHiddenRows, patchHiddenColumns, patchOutlineGroups, patchFreezePanes, patchMergedCells, patchAddTable, patchTableStyles, patchTableRanges, patchTableTotals, patchAddChart, patchChartMetadata, patchChartPlacement, patchChartSource, patchDeleteChart, patchClearConditionalFormats, patchDeleteConditionalFormatRule, patchMoveConditionalFormatRule, patchEditConditionalFormatRule, patchIconSetConditionalFormat, patchCellValueConditionalFormat, patchDuplicateValuesConditionalFormat, patchSheetName, patchAddSheet, patchDeleteSheet, patchMoveSheet, translateFormulaReferences, transformStructure } = require('../src/xlsx');
+const { analyze, calculateChartPreviews, formatCellValue, inspectZip, patchCell, patchCells, patchColumnWidths, patchRowHeights, patchRowHeightValues, patchPrintSettings, patchPrintArea, patchDefinedName, patchPrintTitles, patchHeaderFooter, patchPageBreaks, patchAutoFilters, patchFilterVisibility, patchHiddenRows, patchHiddenColumns, patchOutlineGroups, patchFreezePanes, patchMergedCells, patchAddTable, patchTableStyles, patchTableRanges, patchTableTotals, patchAddChart, patchChartMetadata, patchChartPlacement, patchChartSource, patchDeleteChart, patchClearConditionalFormats, patchDeleteConditionalFormatRule, patchMoveConditionalFormatRule, patchEditConditionalFormatRule, patchIconSetConditionalFormat, patchCellValueConditionalFormat, patchDuplicateValuesConditionalFormat, patchSheetName, patchAddSheet, patchDeleteSheet, patchMoveSheet, planTableExpansion, prepareTableExpansion, translateFormulaReferences, transformStructure } = require('../src/xlsx');
 const { createFormulaCalculator, evaluateFormula } = require('../src/formula');
 const { chartPrintGeometry } = require('../src/chart-print');
 const { ICON_SET_LENGTHS } = require('../src/auto-filter');
@@ -65,6 +65,21 @@ test('기본 수식 계산은 연산자 우선순위·셀 참조·범위 집계�
   assert.equal(evaluateFormula('A1+$B$1', context), 5);
   assert.equal(evaluateFormula('Z9', context), 0);
   assert.equal(evaluateFormula('SUM(A1:B2)', context), 14);
+  const operatorArrayContext = { ...context, allowArrayResult: true };
+  assert.deepEqual(evaluateFormula('A1:A2+B1:B2', operatorArrayContext), [[5], [9]], 'binary addition aligns equal-sized range arrays');
+  assert.deepEqual(evaluateFormula('A1:A2-B1:B2', operatorArrayContext), [[-1], [-1]], 'binary subtraction aligns range arrays');
+  assert.deepEqual(evaluateFormula('A1:A2*2', operatorArrayContext), [[4], [8]], 'binary multiplication broadcasts a scalar');
+  assert.deepEqual(evaluateFormula('B1:B2/A1:A2', operatorArrayContext), [[1.5], [1.25]], 'binary division aligns range arrays');
+  assert.deepEqual(evaluateFormula('A1:A2^2', operatorArrayContext), [[4], [16]], 'binary exponentiation broadcasts a scalar exponent');
+  assert.deepEqual(evaluateFormula('A1:A2>=3', operatorArrayContext), [[false], [true]], 'comparisons map range values to Boolean results');
+  assert.deepEqual(evaluateFormula('A1:A2&"x"', operatorArrayContext), [['2x'], ['4x']], 'string concatenation broadcasts a scalar');
+  assert.deepEqual(evaluateFormula('-A1:A2', operatorArrayContext), [[-2], [-4]], 'unary negation maps over a range');
+  assert.deepEqual(evaluateFormula('A1:A2%', operatorArrayContext), [[0.02], [0.04]], 'percent operators map over a range');
+  assert.equal(evaluateFormula('A1:A2+B1:C1', operatorArrayContext), '#VALUE!', 'binary operators reject differently shaped arrays');
+  const operatorErrorContext = { allowArrayResult: true, getCell: row => [2, 4, '#N/A'][row] ?? null, getCellKind: row => row === 2 ? 'error' : 'number' };
+  const operatorErrorResult = evaluateFormula('A1:A3+1', operatorErrorContext);
+  assert.deepEqual(operatorErrorResult.slice(0, 2), [[3], [5]], 'arithmetic continues for unaffected range positions');
+  assert.equal(operatorErrorResult[2][0].value, '#N/A', 'arithmetic preserves errors at their array position');
   assert.equal(evaluateFormula('TEXT(1234.5,"#,##0.00")'), '1,234.50');
   assert.equal(evaluateFormula('TEXT(1234.5,"#,##0.##")'), '1,234.5', 'optional decimal places trim insignificant zeros');
   assert.equal(evaluateFormula('TEXT(12,"0.##")'), '12', 'optional decimal places do not force a decimal separator');
@@ -335,6 +350,12 @@ assert.equal(evaluateFormula('MINIFS(B1:B2,A1:A2,">2")', context), 5);
   assert.equal(evaluateFormula('FIND("E","Excel")'), 1, 'FIND is case-sensitive');
   assert.equal(evaluateFormula('FIND("e","Excel",3)'), 4, 'FIND honors the one-based start position');
   assert.equal(evaluateFormula('FIND("e","Excel",5)'), '#VALUE!', 'FIND reports text that is not found from the requested position');
+  const textRange = { allowArrayResult: true, getCell: (row, column) => ({ '0:0': 'Excel', '1:0': '😀Excel', '0:1': 'EXCEL', '1:1': 'no match' }[row + ':' + column] ?? null) };
+  assert.deepEqual(evaluateFormula('FIND("e",A1:A2)', textRange), [[4], [5]], 'FIND maps over a text range and returns per-cell positions');
+  assert.deepEqual(evaluateFormula('SEARCH("e",A1:A2,2)', textRange), [[4], [2]], 'SEARCH maps over a text range and broadcasts a scalar start position');
+  assert.deepEqual(evaluateFormula('SEARCH(B1:B2,A1:A2)', textRange), [[1], ['#VALUE!']], 'SEARCH maps paired ranges and preserves per-item errors');
+  assert.deepEqual(evaluateFormula('FIND("e",A1:A2,2)', { allowArrayResult: true, getCell: (row, column) => row === 0 ? 'Excel' : '#N/A' }), [[4], ['#N/A']], 'range expansion preserves errors in individual cells');
+  assert.equal(evaluateFormula('SEARCH(A1:A2,B1:B1)', textRange), '#VALUE!', 'FIND and SEARCH require array arguments with matching dimensions');
   assert.equal(evaluateFormula('SEARCH("e","Excel")'), 1, 'SEARCH ignores case');
   assert.equal(evaluateFormula('SEARCH("a?c","abc")'), 1, 'SEARCH supports wildcard characters');
   assert.equal(evaluateFormula('SEARCH("a~*c","a*c")'), 1, 'SEARCH supports tilde-escaped literal wildcards');
@@ -919,8 +940,27 @@ assert.equal(evaluateFormula('VARPA(-1E308,1E308)'), '#NUM!');
   assert.equal(evaluateFormula('TRUNC(1,101)'), '#NUM!');
   assert.equal(evaluateFormula('ROUNDUP(1)'), '#VALUE!');
   assert.equal(evaluateFormula('ROUNDDOWN(1,101)'), '#NUM!');
+  const numericArrayContext = { allowArrayResult: true, getCell: row => [-1.2, 2.5, -2.5][row] ?? null };
+  assert.deepEqual(evaluateFormula('ABS(A1:A3)', numericArrayContext), [[1.2], [2.5], [2.5]], 'ABS maps across a numeric range');
+  assert.deepEqual(evaluateFormula('INT(A1:A3)', numericArrayContext), [[-2], [2], [-3]], 'INT maps across a numeric range and rounds negative values down');
+  assert.deepEqual(evaluateFormula('ROUND(A1:A3,0)', numericArrayContext), [[-1], [3], [-3]], 'ROUND broadcasts a scalar digit count across a range');
+  assert.deepEqual(evaluateFormula('MOD(A1:A3,2)', numericArrayContext), [[0.8], [0.5], [1.5]], 'MOD maps across a range using Excel divisor-sign semantics');
+  assert.deepEqual(evaluateFormula('POWER(A1:A3,2)', numericArrayContext), [[1.44], [6.25], [6.25]], 'POWER broadcasts a scalar exponent across a range');
+  assert.deepEqual(evaluateFormula('SQRT(A1:A3)', numericArrayContext), [['#NUM!'], [Math.sqrt(2.5)], ['#NUM!']], 'SQRT returns cell-level domain errors in an array');
+  assert.deepEqual(evaluateFormula('COMBIN(A1:A3,1)', { allowArrayResult: true, getCell: row => [2,3,4][row] ?? null }), [[2], [3], [4]], 'COMBIN maps over a range');
+  assert.equal(evaluateFormula('MOD(A1:A2,B1:B1)', { allowArrayResult: true, getCell: () => 1 }), '#VALUE!', 'elementwise arithmetic requires matching array shapes');
   assert.equal(evaluateFormula('IF(1=1,"yes",1/0)'), 'yes');
   assert.equal(evaluateFormula('IF(FALSE,1/0)'), false);
+  const logicRange = { allowArrayResult: true, getCell: row => [true, false, '#N/A'][row] ?? null, getCellKind: row => row === 2 ? 'error' : 'boolean' };
+  const ifArray = evaluateFormula('IF(A1:A3,"yes","no")', logicRange);
+  assert.deepEqual(ifArray.slice(0, 2), [['yes'], ['no']], 'IF applies each range condition');
+  assert.equal(ifArray[2][0].value, '#N/A', 'IF keeps a condition error in its result position');
+  assert.deepEqual(evaluateFormula('IFERROR(A1:A3,"recovered")', logicRange), [[true], [false], ['recovered']], 'IFERROR handles errors independently in each range cell');
+  assert.deepEqual(evaluateFormula('IFNA(A1:A3,"missing")', logicRange), [[true], [false], ['missing']], 'IFNA handles only #N/A values in each range cell');
+  const notArray = evaluateFormula('NOT(A1:A3)', logicRange);
+  assert.deepEqual(notArray.slice(0, 2), [[false], [true]], 'NOT maps over the range');
+  assert.equal(notArray[2][0].value, '#N/A', 'NOT preserves a cell error');
+  assert.equal(evaluateFormula('IF(A1:A2,B1:C1,0)', { allowArrayResult: true, getCell: () => true }), '#VALUE!', 'IF rejects condition and value arrays with incompatible shapes');
   assert.equal(evaluateFormula('CHOOSE(2,"red","blue","green")'), 'blue');
   assert.equal(evaluateFormula('CHOOSE(2.9,"red","blue")'), 'blue', 'CHOOSE truncates its index to an integer');
   assert.equal(evaluateFormula('CHOOSE(0,"red")'), '#VALUE!');
@@ -930,6 +970,18 @@ assert.equal(evaluateFormula('VARPA(-1E308,1E308)'), '#NUM!');
   assert.equal(evaluateFormula('SWITCH("Green","red",1,"green",2,0)'), 2);
   assert.equal(evaluateFormula('SWITCH(4,1,"one",2,"two")'), '#N/A');
   assert.equal(evaluateFormula('SWITCH(4,1,"one",2,"two",0)'), 0);
+  const branchArrayContext = {
+    allowArrayResult: true,
+    getCell: (row, column) => ({ '0:0': 1, '1:0': 2, '2:0': 9, '0:1': 'a', '1:1': 'b', '2:1': 'c' }[row + ':' + column] ?? null),
+    getCellKind: (row, column) => column === 1 ? 'string' : 'number'
+  };
+  assert.deepEqual(evaluateFormula('CHOOSE(A1:A3,"first","second")', branchArrayContext), [['first'], ['second'], ['#VALUE!']], 'CHOOSE maps index ranges and keeps invalid indexes at their corresponding positions');
+  assert.deepEqual(evaluateFormula('IFS(A1:A3<2,"small",A1:A3<9,"medium",TRUE,"large")', branchArrayContext), [['small'], ['medium'], ['large']], 'IFS evaluates conditions independently for each array element');
+  assert.deepEqual(evaluateFormula('SWITCH(B1:B3,"a",10,"b",20,0)', branchArrayContext), [[10], [20], [0]], 'SWITCH compares each expression value and broadcasts scalar choices');
+  assert.equal(evaluateFormula('CHOOSE(A1:A2,B1:B1)', branchArrayContext), '#VALUE!', 'branch functions reject mismatched array shapes');
+  const branchErrorContext = { ...branchArrayContext, getCell: (row, column) => row === 1 ? '#N/A' : row + 1, getCellKind: (row, column) => row === 1 ? 'error' : 'number' };
+  const chooseErrors = evaluateFormula('CHOOSE(A1:A3,"first","second","third")', branchErrorContext);
+  assert.deepEqual([chooseErrors[0][0], chooseErrors[1][0].value, chooseErrors[2][0]], ['first', '#N/A', 'third'], 'CHOOSE propagates source errors cell by cell');
   assert.equal(evaluateFormula('IFERROR(1/0,9)'), 9);
   assert.equal(evaluateFormula('IFERROR("#N/A","fallback")'), '#N/A', 'IFERROR preserves quoted text that resembles an error');
   assert.equal(evaluateFormula('SUM("#N/A")'), '#VALUE!', 'SUM reports nonnumeric quoted error-like text as a value error');
@@ -1162,6 +1214,28 @@ const wildcardContext = { getCell: (row, column) => [['apple', 'apricot', 'pear'
   assert.equal(evaluateFormula('MID("스프레드시트",2,3)'), '프레드');
   assert.equal(evaluateFormula('LEN("😀a")'), 2);
   assert.equal(evaluateFormula('TRIM("  Jin   Sheet  ")'), 'Jin Sheet');
+  assert.deepEqual(evaluateFormula('TRIM(A1:A4)', { getCell: row => ['  Jin   Sheet  ', null, ' \t ', '\u00A0Oak\u00A0  Pine\u00A0'][row] ?? null, allowArrayResult: true }), [['Jin Sheet'], [''], ['\t'], ['\u00A0Oak\u00A0 Pine\u00A0']], 'TRIM spills over ranges, collapses ASCII spaces, and leaves tabs and nonbreaking spaces intact');
+  assert.deepEqual(evaluateFormula('LEFT(A1:A2,2)', { getCell: row => ['Jin','Sheet'][row] ?? null, allowArrayResult: true }), [['Ji'], ['Sh']], 'a scalar character count broadcasts across a referenced range');
+  const shortTextRange = { getCell: row => ['Jin','Sheet'][row] ?? null, allowArrayResult: true };
+  assert.deepEqual(evaluateFormula('RIGHT(A1:A2,2)', shortTextRange), [['in'], ['et']]);
+  assert.deepEqual(evaluateFormula('MID(A1:A2,2,2)', shortTextRange), [['in'], ['he']]);
+  assert.deepEqual(evaluateFormula('LEN(A1:A2)', shortTextRange), [[3], [5]]);
+  assert.deepEqual(evaluateFormula('LOWER(A1:A2)', shortTextRange), [['jin'], ['sheet']]);
+  assert.deepEqual(evaluateFormula('UPPER(A1:B1)', { getCell: (row, column) => [['#N/A','Jin']][row]?.[column] ?? null, getCellKind: () => 'string', allowArrayResult: true }), [['#N/A', 'JIN']], 'array text conversion keeps error-looking range text as text');
+const mappedTextRange = { allowArrayResult: true, getCell: (row, column) => ({ '0:0':'abab', '1:0':'banana', '0:1':'Jin', '1:1':'jIN sHEET', '0:2':'Jin', '1:2':'Jin', '0:3':'a\u0001b', '1:3':'c\u0002d' })[row + ':' + column] ?? null };
+assert.deepEqual(evaluateFormula('SUBSTITUTE(A1:A2,"a","x",2)', mappedTextRange), [['abxb'], ['banxna']], 'SUBSTITUTE applies an occurrence limit to every range item');
+assert.deepEqual(evaluateFormula('REPLACE(A1:A2,2,1,"x")', mappedTextRange), [['axab'], ['bxnana']], 'REPLACE maps its scalar start and count over a range');
+assert.deepEqual(evaluateFormula('EXACT(C1:C2,A1:A2)', mappedTextRange), [[false], [false]], 'EXACT compares aligned range items case-sensitively');
+assert.deepEqual(evaluateFormula('PROPER(B1:B2)', mappedTextRange), [['Jin'], ['Jin Sheet']], 'PROPER maps Unicode words over a range');
+assert.deepEqual(evaluateFormula('CLEAN(D1:D2)', mappedTextRange), [['ab'], ['cd']], 'CLEAN removes control characters from each range item');
+assert.deepEqual(evaluateFormula('REPT(C1:C2,2)', mappedTextRange), [['JinJin'], ['JinJin']], 'REPT broadcasts a scalar count over a range');
+assert.deepEqual(evaluateFormula('T(A1:A2)', mappedTextRange), [['abab'], ['banana']], 'T maps over range values');
+assert.deepEqual(evaluateFormula('SUBSTITUTE(A1:A2,"a","x")', { allowArrayResult: true, getCell: row => row === 0 ? 'text' : '#N/A' }), [['text'], ['#N/A']], 'array text functions preserve an error in an individual input cell');
+assert.deepEqual(evaluateFormula('VALUE(A1:A2)', { allowArrayResult: true, getCell: row => ['12.5','1,234.5'][row] ?? null }), [[12.5], [1234.5]], 'VALUE converts numeric text in each referenced cell');
+assert.deepEqual(evaluateFormula('NUMBERVALUE(A1:A2,",",".")', { allowArrayResult: true, getCell: row => ['12,5','1.234,5'][row] ?? null }), [[12.5], [1234.5]], 'NUMBERVALUE maps explicit separators over a range');
+assert.deepEqual(evaluateFormula('TEXT(A1:A2,"0.00")', { allowArrayResult: true, getCell: row => [1.5,2][row] ?? null }), [['1.50'], ['2.00']], 'TEXT applies one format to every numeric range item');
+assert.deepEqual(evaluateFormula('VALUE(A1:A2)', { allowArrayResult: true, getCell: row => row === 0 ? '12' : 'bad' }), [[12], ['#VALUE!']], 'VALUE keeps conversion failures at their array positions');
+  assert.equal(evaluateFormula('LEFT(A1:A2,B1:C1)', { getCell: (row, column) => ({ '0:0':'a','1:0':'b','0:1':1,'0:2':2 })[row+':'+column] ?? null, allowArrayResult: true }), '#VALUE!', 'array arguments with incompatible shapes are rejected');
   assert.equal(evaluateFormula('LOWER("JinSHEET")'), 'jinsheet');
   assert.equal(evaluateFormula('UPPER("JinSheet")'), 'JINSHEET');
   assert.equal(evaluateFormula('CONCAT("Jin",TRUE,1)'), 'JinTRUE1');
@@ -1516,6 +1590,57 @@ test('TEXTSPLIT 결과는 수식 셀에서 행·열로 spill한다', () => {
   assert.equal(calculator.cell(0, 1, 1).isSpill, true);
   assert.deepEqual([calculator.cell(0, 0, 4).value, calculator.cell(0, 0, 5).value], ['İx', 'y']);
   assert.equal(calculator.cell(0, 0, 5).isSpill, true);
+});
+
+test('범위 산술은 수식 결과로 spill하고 spill 참조에서 다시 계산한다', () => {
+  const cells = new Map([
+    ['A1', { address: 'A1', row: 0, column: 0, value: '1', kind: 'number' }],
+    ['A2', { address: 'A2', row: 1, column: 0, value: '2', kind: 'number' }],
+    ['A3', { address: 'A3', row: 2, column: 0, value: '3', kind: 'number' }],
+    ['D1', { address: 'D1', row: 0, column: 3, value: '', kind: 'number', formula: 'A1:A3*2', hasFormula: true }],
+    ['F1', { address: 'F1', row: 0, column: 5, value: '', kind: 'number', formula: 'SUM(D1#)', hasFormula: true }]
+  ]);
+  const document = { state: { formulas: true, sheets: [{ name: 'Data', cells, mergedCells: [], tables: [] }] }, getCell: (row, column) => [...cells.values()].find(cell => cell.row === row && cell.column === column) || null };
+  const calculator = createFormulaCalculator(document);
+  assert.deepEqual([calculator.cell(0, 0, 3).value, calculator.cell(0, 1, 3).value, calculator.cell(0, 2, 3).value], ['2', '4', '6']);
+  assert.equal(calculator.cell(0, 1, 3).isSpill, true);
+  assert.equal(calculator.cell(0, 0, 5).value, '12', 'SUM resolves the complete arithmetic spill range');
+});
+
+test('CHOOSE·IFS·SWITCH 범위 결과는 수식 셀에서 동적 배열로 spill한다', () => {
+  const cells = new Map([
+    ['A1', { address: 'A1', row: 0, column: 0, value: '1', kind: 'number' }],
+    ['A2', { address: 'A2', row: 1, column: 0, value: '2', kind: 'number' }],
+    ['A3', { address: 'A3', row: 2, column: 0, value: '3', kind: 'number' }],
+    ['B1', { address: 'B1', row: 0, column: 1, value: 'a', kind: 'string' }],
+    ['B2', { address: 'B2', row: 1, column: 1, value: 'b', kind: 'string' }],
+    ['B3', { address: 'B3', row: 2, column: 1, value: 'c', kind: 'string' }],
+    ['D1', { address: 'D1', row: 0, column: 3, value: '', kind: 'string', formula: 'CHOOSE(A1:A3,"one","two","three")', hasFormula: true }],
+    ['F1', { address: 'F1', row: 0, column: 5, value: '', kind: 'string', formula: 'IFS(A1:A3<2,"small",A1:A3<3,"medium",TRUE,"large")', hasFormula: true }],
+    ['H1', { address: 'H1', row: 0, column: 7, value: '', kind: 'string', formula: 'SWITCH(B1:B3,"a","A","b","B","?")', hasFormula: true }]
+  ]);
+  const document = { state: { formulas: true, sheets: [{ name: 'Data', cells, mergedCells: [], tables: [] }] }, getCell: (row, column) => [...cells.values()].find(cell => cell.row === row && cell.column === column) || null };
+  const calculator = createFormulaCalculator(document);
+  assert.deepEqual([0, 1, 2].map(row => calculator.cell(0, row, 3).value), ['one', 'two', 'three']);
+  assert.deepEqual([0, 1, 2].map(row => calculator.cell(0, row, 5).value), ['small', 'medium', 'large']);
+  assert.deepEqual([0, 1, 2].map(row => calculator.cell(0, row, 7).value), ['A', 'B', '?']);
+  assert.equal(calculator.cell(0, 1, 3).isSpill, true);
+  assert.equal(calculator.cell(0, 1, 5).isSpill, true);
+  assert.equal(calculator.cell(0, 1, 7).isSpill, true);
+});
+
+test('텍스트 정리 함수는 참조 범위 결과를 셀로 spill하고 오류 셀을 개별 전파한다', () => {
+  const cells = new Map([
+    ['A1', { address: 'A1', row: 0, column: 0, value: '  Jin   Sheet  ', kind: 'string' }],
+    ['A2', { address: 'A2', row: 1, column: 0, value: '  Excel  ', kind: 'string' }],
+    ['A3', { address: 'A3', row: 2, column: 0, value: '#N/A', kind: 'error' }],
+    ['E1', { address: 'E1', row: 0, column: 4, value: '', kind: 'string', formula: 'TRIM(A1:A3)', hasFormula: true }]
+  ]);
+  const document = { state: { formulas: true, sheets: [{ name: 'Data', cells, mergedCells: [], tables: [] }] }, getCell: (row, column) => [...cells.values()].find(cell => cell.row === row && cell.column === column) || null };
+  const calculator = createFormulaCalculator(document);
+  assert.deepEqual([calculator.cell(0, 0, 4).value, calculator.cell(0, 1, 4).value, calculator.cell(0, 2, 4).value], ['Jin Sheet', 'Excel', '#N/A']);
+  assert.equal(calculator.cell(0, 1, 4).isSpill, true);
+  assert.equal(calculator.cell(0, 2, 4).kind, 'error');
 });
 
 test('UNICHAR와 UNICODE는 BMP·보충 평면 문자를 왕복하고 잘못된 코드 포인트를 거부한다', () => {
@@ -4798,31 +4923,33 @@ test('LibreOffice 복합 XLSX는 표 안에 열 삽입·삭제 후 필터·수�
   assert.equal(source.writable, true, source.readOnlyReason);
   const original = source.sheets[0];
 
-  const inserted = analyze(transformStructure(source, { sheetIndex: 0, axis: 'column', action: 'insert', index: 1 }).bytes);
+  let inserted = source;
+  for (const index of [1, 2]) inserted = transformStructure(inserted, { sheetIndex: 0, axis: 'column', action: 'insert', index }).model;
   assert.equal(inserted.writable, true, inserted.readOnlyReason);
   const shifted = inserted.sheets[0];
-  assert.deepEqual(shifted.tables[0].range, { top: 0, bottom: 3, left: 0, right: 3 });
-  assert.deepEqual(shifted.tables[0].columns, ['상품', 'Column2', '수량', '단가']);
-  assert.deepEqual(shifted.tables[0].autoFilter.columns, [{ column: 2, values: ['12'], blanks: false }]);
-  assert.equal(shifted.cells.get('E1').formula, 'SUM(C2:C3)');
-  assert.equal(shifted.cells.get('C4').formula, 'SUBTOTAL(109,[[#data],[수량]])');
-  assert.deepEqual(shifted.conditionalFormats[0].ranges, [{ top: 1, bottom: 2, left: 2, right: 3 }]);
-  assert.deepEqual(shifted.dataValidations[0].ranges, [{ top: 1, bottom: 2, left: 2, right: 2 }]);
+  assert.deepEqual(shifted.tables[0].range, { top: 0, bottom: 3, left: 0, right: 4 });
+  assert.deepEqual(shifted.tables[0].columns, ['상품', 'Column2', 'Column3', '수량', '단가']);
+  assert.deepEqual(shifted.tables[0].autoFilter.columns, [{ column: 3, values: ['12'], blanks: false }]);
+  assert.equal(shifted.cells.get('F1').formula, 'SUM(D2:D3)');
+  assert.equal(shifted.cells.get('D4').formula, 'SUBTOTAL(109,[[#data],[수량]])');
+  assert.deepEqual(shifted.conditionalFormats[0].ranges, [{ top: 1, bottom: 2, left: 3, right: 4 }]);
+  assert.deepEqual(shifted.dataValidations[0].ranges, [{ top: 1, bottom: 2, left: 3, right: 3 }]);
   assert.deepEqual(shifted.charts[0].series[0].values, [12, 7]);
   assert.deepEqual(shifted.charts[0].series[0].categories, ['사과', '배']);
   const shiftedChartXml = new TextDecoder().decode(inserted.files['xl/charts/chart1.xml']);
   assert.match(shiftedChartXml, /<c:f>재고!\$A\$2:\$A\$3<\/c:f>/);
-  assert.match(shiftedChartXml, /<c:f>재고!\$C\$2:\$C\$3<\/c:f>/);
+  assert.match(shiftedChartXml, /<c:f>재고!\$D\$2:\$D\$3<\/c:f>/);
   const getShiftedCell = (row, column) => shifted.cells.get(String.fromCharCode(65 + column) + (row + 1)) || null;
   const shiftedCalculator = createFormulaCalculator({ state: shifted, getCell: getShiftedCell });
   const shiftedPreview = calculateChartPreviews(inserted, 0, shiftedCalculator, getShiftedCell, []);
   assert.deepEqual(shiftedPreview[0].series[0].categories, ['사과', '']);
   assert.deepEqual(shiftedPreview[0].series[0].values, [12, null], 'the filtered source row stays hidden from the chart preview');
   assert.deepEqual(shifted.nativeHiddenRows, original.nativeHiddenRows);
-  assert.deepEqual(shifted.mergedCells.map(({ top, bottom, left, right }) => ({ top, bottom, left, right })), [{ top: 0, bottom: 0, left: 5, right: 6 }]);
+  assert.deepEqual(shifted.mergedCells.map(({ top, bottom, left, right }) => ({ top, bottom, left, right })), [{ top: 0, bottom: 0, left: 6, right: 7 }]);
   assert.deepEqual(shifted.freezePane, original.freezePane);
 
-  const restored = analyze(transformStructure(inserted, { sheetIndex: 0, axis: 'column', action: 'delete', index: 1 }).bytes);
+  let restored = inserted;
+  for (let i = 0; i < 2; i++) restored = transformStructure(restored, { sheetIndex: 0, axis: 'column', action: 'delete', index: 1 }).model;
   assert.equal(restored.writable, true, restored.readOnlyReason);
   const finalSheet = restored.sheets[0];
   assert.deepEqual(finalSheet.tables[0].range, original.tables[0].range);
@@ -5993,6 +6120,70 @@ test('표 생성은 수식 머리글·활성 spill·부분 필터 겹침과 병�
 
 test('표 생성은 기존 차트의 관계·도형·캐시 바이트를 보존한다',()=>{
   const original=analyze(fixtureWithCachedChart()),model=patchAddTable(original,{sheetIndex:0,range:{top:0,bottom:2,left:3,right:4},name:'ChartData'}).model;assert.equal(model.writable,true,model.readOnlyReason);assert.equal(model.sheets[0].tables[0].name,'ChartData');assert.deepEqual(model.sheets[0].tables[0].range,{top:0,bottom:2,left:3,right:4});assert.equal(model.sheets[0].charts.length,1);for(const part of ['xl/drawings/drawing1.xml','xl/drawings/_rels/drawing1.xml.rels','xl/charts/chart1.xml'])assert.deepEqual(model.files[part],original.files[part],part);const relations=new TextDecoder().decode(model.files['xl/worksheets/_rels/sheet1.xml.rels']);assert.match(relations,/Id="rId3"[^>]+Type="[^"]+\/drawing"/);assert.match(relations,/Type="[^"]+\/table"/);
+});
+
+test('표 자동 확장은 차트 계열 참조와 캐시를 함께 늘리고 축소는 참조를 보호한다',()=>{
+  const charted=analyze(fixtureWithCachedChart()),unrelated=patchAddTable(charted,{sheetIndex:0,range:{top:0,bottom:2,left:3,right:4},name:'ChartData'}).model;
+  const edits=[{row:3,column:3,value:'new'},{row:3,column:4,value:'5'}],plan=planTableExpansion(unrelated,0,edits);
+  assert.equal(plan.requests.length,1);assert.equal(plan.requests[0].range.bottom,3);
+  const prepared=prepareTableExpansion(unrelated,plan.requests),expanded=patchTableRanges(prepared,plan.requests).model;
+  assert.equal(expanded.sheets[0].tables[0].range.bottom,3);
+  assert.deepEqual(expanded.files['xl/charts/chart1.xml'],unrelated.files['xl/charts/chart1.xml']);
+
+  const overlapping=patchAddTable(charted,{sheetIndex:0,range:{top:0,bottom:2,left:0,right:1},name:'ChartData'}).model;
+  const chartPlan=planTableExpansion(overlapping,0,[{row:3,column:0,value:'Mar'},{row:3,column:1,value:'8'}]);
+  assert.equal(chartPlan.requests.length,1);
+  const chartExpanded=patchTableRanges(prepareTableExpansion(overlapping,chartPlan.requests),chartPlan.requests).model;
+  let chartXml=new TextDecoder().decode(chartExpanded.files['xl/charts/chart1.xml']);
+  assert.match(chartXml,/Data!\$A\$2:\$A\$4/);assert.match(chartXml,/Data!\$B\$2:\$B\$4/);
+  assert.match(chartXml,/ptCount val="3"/);
+  const withNewData=patchCells(chartExpanded,[{sheetIndex:0,address:'A4',value:'Mar'},{sheetIndex:0,address:'B4',value:'8'}]).model;
+  chartXml=new TextDecoder().decode(withNewData.files['xl/charts/chart1.xml']);
+  assert.match(chartXml,/<c:pt idx="2"><c:v>Mar<\/c:v><\/c:pt>/);
+  assert.match(chartXml,/<c:pt idx="2"><c:v>8<\/c:v><\/c:pt>/);
+  assert.throws(()=>patchTableRanges(chartExpanded,[{sheetIndex:0,tableName:'ChartData',range:{top:0,bottom:2,left:0,right:1}}]),/차트 원본과 겹치는 표 범위는 줄일 수 없습니다/);
+  const seriesEdits=[
+    {sheetIndex:0,address:'A1',value:'Month'},{sheetIndex:0,address:'B1',value:'Revenue'},{sheetIndex:0,address:'C1',value:'Profit'},
+    {sheetIndex:0,address:'A2',value:'Jan'},{sheetIndex:0,address:'A3',value:'Feb'},{sheetIndex:0,address:'B2',value:'4',kind:'number'},{sheetIndex:0,address:'B3',value:'6',kind:'number'},{sheetIndex:0,address:'C2',value:'2',kind:'number'},{sheetIndex:0,address:'C3',value:'3',kind:'number'}
+  ];
+  const withSecondSeries=patchCells(charted,seriesEdits).model;
+  const withTable=patchAddTable(withSecondSeries,{sheetIndex:0,range:{top:0,bottom:2,left:0,right:1},name:'ChartData'}).model;
+  const addedColumn=patchTableRanges(withTable,[{sheetIndex:0,tableName:'ChartData',range:{top:0,bottom:2,left:0,right:2}}]).model;
+  assert.equal(addedColumn.writable,true,addedColumn.readOnlyReason);
+  assert.deepEqual(addedColumn.sheets[0].tables[0].columns,['Month','Revenue','Profit']);
+  assert.deepEqual(addedColumn.sheets[0].charts[0].series.map(series=>series.name),['Revenue','Profit']);
+  assert.deepEqual(addedColumn.sheets[0].charts[0].series[1].categories,['Jan','Feb']);
+  assert.deepEqual(addedColumn.sheets[0].charts[0].series[1].values,[2,3]);
+  const addedChartXml=new TextDecoder().decode(addedColumn.files['xl/charts/chart1.xml']);
+  assert.match(addedChartXml,/(?:Data|&apos;Data&apos;)!\$C\$1/);assert.match(addedChartXml,/(?:Data|&apos;Data&apos;)!\$C\$2:\$C\$3/);
+  const headerOnly=patchCells(charted,seriesEdits.filter(edit=>!['C2','C3'].includes(edit.address))).model;
+  const headerOnlyTable=patchAddTable(headerOnly,{sheetIndex:0,range:{top:0,bottom:2,left:0,right:1},name:'HeaderOnlyChartData'}).model;
+  const headerOnlyExpanded=patchTableRanges(headerOnlyTable,[{sheetIndex:0,tableName:'HeaderOnlyChartData',range:{top:0,bottom:2,left:0,right:2}}]).model;
+  assert.deepEqual(headerOnlyExpanded.sheets[0].charts[0].series[1].values,[null,null]);
+  const completedHeaderSeries=patchCells(headerOnlyExpanded,[{sheetIndex:0,address:'C2',value:'2',kind:'number'},{sheetIndex:0,address:'C3',value:'3',kind:'number'}]).model;
+  assert.deepEqual(completedHeaderSeries.sheets[0].charts[0].series[1].values,[2,3]);
+  assert.match(new TextDecoder().decode(completedHeaderSeries.files['xl/charts/chart1.xml']),/<c:pt idx="0"><c:v>2<\/c:v><\/c:pt>/);
+  for(const chartType of ['line','area','scatter']){
+    let typed=patchAddTable(withSecondSeries,{sheetIndex:0,range:{top:0,bottom:2,left:0,right:1},name:'TypedData'}).model;
+    if(chartType==='scatter')typed=patchCells(typed,[{sheetIndex:0,address:'A2',value:'1',kind:'number'},{sheetIndex:0,address:'A3',value:'2',kind:'number'}]).model;
+    typed=patchAddChart(typed,0,{top:0,bottom:2,left:0,right:1},chartType).model;
+    typed=patchTableRanges(typed,[{sheetIndex:0,tableName:'TypedData',range:{top:0,bottom:2,left:0,right:2}}]).model;
+    assert.equal(typed.sheets[0].charts.length,2,chartType);assert.equal(typed.sheets[0].charts[1].type,chartType);
+    for(const [index,chart] of typed.sheets[0].charts.entries()){
+      const chartPath=typed.sheets[0].chartPaths[index];
+      assert.equal(chart.series.length,2,chartPath);assert.deepEqual(chart.series[1].values,[2,3],chartPath);
+      assert.match(new TextDecoder().decode(typed.files[chartPath]),/(?:Data|&apos;Data&apos;)!\$C\$2:\$C\$3/,chartPath);
+    }
+  }
+  for(const chartType of ['pie','doughnut']){
+    let typed=patchAddTable(withSecondSeries,{sheetIndex:0,range:{top:0,bottom:2,left:0,right:1},name:'ProtectedData'}).model;
+    typed=patchAddChart(typed,0,{top:0,bottom:2,left:0,right:1},chartType).model;
+    const before=typed.bytes;
+    assert.throws(()=>patchTableRanges(typed,[{sheetIndex:0,tableName:'ProtectedData',range:{top:0,bottom:2,left:0,right:2}}]),/모든 데이터 열을 계열로 참조하지 않아 열을 자동 연결할 수 없습니다/);
+    assert.deepEqual(typed.bytes,before,chartType+' rejection leaves the original workbook untouched');
+  }
+  const incomplete=patchAddTable(charted,{sheetIndex:0,range:{top:0,bottom:2,left:0,right:2},name:'PartialChartData'}).model;
+  assert.throws(()=>patchTableRanges(incomplete,[{sheetIndex:0,tableName:'PartialChartData',range:{top:0,bottom:2,left:0,right:3}}]),/모든 데이터 열을 계열로 참조하지 않아 열을 자동 연결할 수 없습니다/);
 });
 
 test('표 이름은 정의된 이름과 충돌하지 않고 머리글은 XML 특수문자·줄바꿈·최대 길이를 보존한다',()=>{

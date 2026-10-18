@@ -7,6 +7,15 @@ const MAX_RANGE_CELLS = 10000;
 const MAX_TOKENS = 20000;
 const MAX_CALC_STEPS = 100000;
 const MAX_DISTRIBUTION_SIZE = 100000;
+const ELEMENTWISE_MATH_ARITY = Object.freeze({
+  FACT: [1, 1], FACTDOUBLE: [1, 1], ABS: [1, 1], INT: [1, 1], SQRT: [1, 1],
+  SIN: [1, 1], COS: [1, 1], TAN: [1, 1], ASIN: [1, 1], ACOS: [1, 1], ATAN: [1, 1],
+  SINH: [1, 1], COSH: [1, 1], TANH: [1, 1], ASINH: [1, 1], ACOSH: [1, 1], ATANH: [1, 1],
+  DEGREES: [1, 1], RADIANS: [1, 1], EXP: [1, 1], LN: [1, 1], LOG10: [1, 1],
+  LOG: [1, 2], TRUNC: [1, 2], COMBIN: [2, 2], PERMUT: [2, 2], ATAN2: [2, 2],
+  CEILING: [2, 2], FLOOR: [2, 2], MROUND: [2, 2], ROUND: [2, 2], ROUNDUP: [2, 2],
+  ROUNDDOWN: [2, 2], MOD: [2, 2], POWER: [2, 2], 'CEILING.MATH': [1, 3], 'FLOOR.MATH': [1, 3]
+});
 const FORMULA_RANGE = Symbol('formulaRange');
 const FORMULA_RANGE_METADATA = Symbol('formulaRangeMetadata');
 const FORMULA_TEXT_LITERAL = Symbol('formulaTextLiteral');
@@ -852,9 +861,20 @@ function callFunction(name, args, context = {}) {
   const numericArgument = index => isTextLiteralArgument(index) && isError(args[index]) ? '#VALUE!' : numeric(sourceArgs[index]?.[FORMULA_REFERENCE_VALUE] ? sourceArgs[index].value : args[index]);
   const criteriaArgument = index => sourceArgs[index]?.[FORMULA_REFERENCE_VALUE] && (args[index] === null || args[index] === undefined) ? 0 : args[index];
   const textResult = value => formulaTextResult(value, context.preserveFormulaText);
+  const mapArrayArguments = functionName => {
+    if (!args.some(value => isFormulaRange(value) || Array.isArray(value))) return null;
+    const matrices = args.map(matrixValue), matrixIndexes = matrices.flatMap((matrix, index) => matrix ? [index] : []);
+    if (matrixIndexes.length !== args.filter(value => isFormulaRange(value) || Array.isArray(value)).length) return '#VALUE!';
+    const shape = matrices[matrixIndexes[0]], height = shape.length, width = shape[0].length;
+    if (matrixIndexes.some(index => matrices[index].length !== height || matrices[index][0].length !== width)) return '#VALUE!';
+    return Array.from({ length: height }, (_, row) => Array.from({ length: width }, (_, column) => {
+      const cellArgs = args.map((value, index) => matrices[index] ? matrices[index][row][column] : sourceArgs[index]?.[FORMULA_TEXT_LITERAL] || sourceArgs[index]?.[FORMULA_REFERENCE_VALUE] ? sourceArgs[index] : value);
+      return callFunction(functionName, cellArgs, context);
+    }));
+  };
   args = args.map(value => value?.[FORMULA_TEXT_LITERAL] || value?.[FORMULA_REFERENCE_VALUE] ? value.value : value);
   if (context.date1904 && (DATE_1904_INPUTS.has(name) || DATE_1904_SERIAL_RESULTS.has(name))) return call1904DateFunction(name, args, context);
-  const sparseRangeSupported = ['SUM', 'PRODUCT', 'AVERAGE', 'AVERAGEA', 'MEDIAN', 'MIN', 'MINA', 'MAX', 'MAXA', 'LARGE', 'SMALL', 'MODE.SNGL', 'MODE.MULT', 'FREQUENCY', 'COUNT', 'COUNTA', 'COUNTBLANK', 'COUNTIF', 'SUMIF', 'AVERAGEIF', 'COUNTIFS', 'SUMIFS', 'AVERAGEIFS', 'MAXIFS', 'MINIFS', 'SUBTOTAL', 'AGGREGATE', 'ROWS', 'COLUMNS', 'INDEX', 'MATCH', 'XMATCH', 'XLOOKUP', 'VLOOKUP', 'HLOOKUP', 'LOOKUP', 'NETWORKDAYS', 'NETWORKDAYS.INTL', 'WORKDAY', 'WORKDAY.INTL', 'SUMSQ', 'DEVSQ', 'AVEDEV', 'GEOMEAN', 'HARMEAN', 'CORREL', 'PEARSON', 'COVARIANCE.P', 'COVARIANCE.S', 'SLOPE', 'INTERCEPT', 'RSQ', 'STEYX', 'FORECAST', 'FORECAST.LINEAR', 'GCD', 'LCM', 'MULTINOMIAL', 'SUMXMY2', 'SUMX2MY2', 'SUMX2PY2', 'TRANSPOSE', 'TOCOL', 'TOROW', 'WRAPROWS', 'WRAPCOLS', 'HSTACK', 'VSTACK', 'STDEV.S', 'STDEV.P', 'STDEVA', 'STDEVPA', 'VAR.S', 'VAR.P', 'VARA', 'VARPA', 'NPV', 'IRR', 'MIRR', 'XNPV', 'XIRR', 'FVSCHEDULE', 'SUMPRODUCT', 'CONCAT', 'CONCATENATE', 'TEXTJOIN'];
+  const sparseRangeSupported = ['SUM', 'PRODUCT', 'AVERAGE', 'AVERAGEA', 'MEDIAN', 'MIN', 'MINA', 'MAX', 'MAXA', 'LARGE', 'SMALL', 'MODE.SNGL', 'MODE.MULT', 'FREQUENCY', 'COUNT', 'COUNTA', 'COUNTBLANK', 'COUNTIF', 'SUMIF', 'AVERAGEIF', 'COUNTIFS', 'SUMIFS', 'AVERAGEIFS', 'MAXIFS', 'MINIFS', 'SUBTOTAL', 'AGGREGATE', 'ROWS', 'COLUMNS', 'INDEX', 'MATCH', 'XMATCH', 'XLOOKUP', 'VLOOKUP', 'HLOOKUP', 'LOOKUP', 'NETWORKDAYS', 'NETWORKDAYS.INTL', 'WORKDAY', 'WORKDAY.INTL', 'SUMSQ', 'DEVSQ', 'AVEDEV', 'GEOMEAN', 'HARMEAN', 'CORREL', 'PEARSON', 'COVARIANCE.P', 'COVARIANCE.S', 'SLOPE', 'INTERCEPT', 'RSQ', 'STEYX', 'FORECAST', 'FORECAST.LINEAR', 'GCD', 'LCM', 'MULTINOMIAL', 'SUMXMY2', 'SUMX2MY2', 'SUMX2PY2', 'TRANSPOSE', 'TOCOL', 'TOROW', 'WRAPROWS', 'WRAPCOLS', 'HSTACK', 'VSTACK', 'STDEV.S', 'STDEV.P', 'STDEVA', 'STDEVPA', 'VAR.S', 'VAR.P', 'VARA', 'VARPA', 'NPV', 'IRR', 'MIRR', 'XNPV', 'XIRR', 'FVSCHEDULE', 'SUMPRODUCT', 'CONCAT', 'CONCATENATE', 'TEXTJOIN', 'LEFT', 'RIGHT', 'MID', 'LEN', 'LOWER', 'UPPER', 'TRIM', 'FIND', 'SEARCH', 'EXACT', 'PROPER', 'REPT', 'CLEAN', 'T', 'SUBSTITUTE', 'REPLACE', 'VALUE', 'NUMBERVALUE', 'TEXT', 'IF', 'IFERROR', 'IFNA', 'NOT', 'CHOOSE', 'IFS', 'SWITCH', 'FACT', 'FACTDOUBLE', 'COMBIN', 'PERMUT', 'ABS', 'INT', 'SQRT', 'SIN', 'COS', 'TAN', 'ASIN', 'ACOS', 'ATAN', 'SINH', 'COSH', 'TANH', 'ASINH', 'ACOSH', 'ATANH', 'DEGREES', 'RADIANS', 'ATAN2', 'EXP', 'LN', 'LOG10', 'LOG', 'TRUNC', 'CEILING.MATH', 'FLOOR.MATH', 'CEILING', 'FLOOR', 'MROUND', 'ROUND', 'ROUNDUP', 'ROUNDDOWN', 'MOD', 'POWER'];
   if (args.some(isFormulaRange) && !sparseRangeSupported.includes(name)) return '#VALUE!';
   const values = flatten(args);
   const textValue = value => { value = plainFormulaValue(value); return value === null || value === undefined ? '' : value === true ? 'TRUE' : value === false ? 'FALSE' : String(value); };
@@ -885,6 +905,8 @@ function callFunction(name, args, context = {}) {
   if (name === 'VALUE') {
     if (args.length !== 1) return '#VALUE!';
     if (argumentError(0) !== null) return argumentError(0);
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
     if (typeof args[0] === 'number') return Number.isFinite(args[0]) ? args[0] : '#VALUE!';
     const source = textValue(args[0]).trim();
     if (!source) return '#VALUE!';
@@ -896,6 +918,8 @@ function callFunction(name, args, context = {}) {
   if (name === 'NUMBERVALUE') {
     if (args.length < 1 || args.length > 3) return '#VALUE!';
     if (argumentError(0) !== null) return argumentError(0);
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
     const decimalSeparator = args.length > 1 && args[1] !== null ? args[1] : '.';
     const groupSeparator = args.length > 2 && args[2] !== null ? args[2] : ',';
     if (typeof decimalSeparator !== 'string' || typeof groupSeparator !== 'string'
@@ -1228,6 +1252,8 @@ function callFunction(name, args, context = {}) {
   if (name === 'TEXT') {
     if (args.length !== 2) return '#VALUE!';
     if (argumentError() !== null) return argumentError();
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
     const format = textValue(args[1]).trim();
     const value = numericArgument(0);
     if (typeof value !== 'number') return value;
@@ -1291,11 +1317,15 @@ function callFunction(name, args, context = {}) {
   if (name === 'EXACT') {
     if (args.length !== 2) return '#VALUE!';
     if (argumentError() !== null) return argumentError();
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
     return textValue(args[0]) === textValue(args[1]);
   }
   if (name === 'PROPER') {
     if (args.length !== 1) return '#VALUE!';
     if (argumentError(0) !== null) return argumentError(0);
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
     return textResult(textValue(args[0]).replace(/\p{L}+/gu, word => {
       const characters = Array.from(word);
       return characters[0].toLocaleUpperCase() + characters.slice(1).join('').toLocaleLowerCase();
@@ -1304,6 +1334,8 @@ function callFunction(name, args, context = {}) {
   if (name === 'REPT') {
     if (args.length !== 2) return '#VALUE!';
     if (argumentError() !== null) return argumentError();
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
     const count = numericArgument(1);
     if (typeof count !== 'number' || count < 0) return '#VALUE!';
     const repetitions = Math.floor(count), source = textValue(args[0]);
@@ -1314,11 +1346,15 @@ function callFunction(name, args, context = {}) {
   if (name === 'CLEAN') {
     if (args.length !== 1) return '#VALUE!';
     if (argumentError(0) !== null) return argumentError(0);
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
     return textResult(textValue(args[0]).replace(/[\x00-\x1F]/g, ''));
   }
   if (name === 'T') {
     if (args.length !== 1) return '#VALUE!';
     if (argumentError(0) !== null) return argumentError(0);
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
     const value = plainFormulaValue(args[0]);
     return textResult(typeof value === 'string' ? value : '');
   }
@@ -1453,6 +1489,8 @@ function callFunction(name, args, context = {}) {
   if (name === 'FIND' || name === 'SEARCH') {
     if (args.length < 2 || args.length > 3) return '#VALUE!';
     if (argumentError() !== null) return argumentError();
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
     const needle = textValue(args[0]), haystack = textValue(args[1]), characters = Array.from(haystack);
     const start = args.length === 3 ? numericArgument(2) : 1;
     if (typeof start !== 'number' || !Number.isInteger(start) || start < 1 || start > characters.length + 1) return '#VALUE!';
@@ -1568,6 +1606,8 @@ function callFunction(name, args, context = {}) {
   if (name === 'SUBSTITUTE') {
     if (args.length < 3 || args.length > 4) return '#VALUE!';
     if (argumentError() !== null) return argumentError();
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
     const source = textValue(args[0]), oldText = textValue(args[1]), newText = textValue(args[2]);
     if (!oldText) return textResult(source);
     if (args.length === 3) return textResult(source.split(oldText).join(newText));
@@ -1579,6 +1619,8 @@ function callFunction(name, args, context = {}) {
   if (name === 'REPLACE') {
     if (args.length !== 4) return '#VALUE!';
     if (argumentError() !== null) return argumentError();
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
     const source = Array.from(textValue(args[0])), start = numericArgument(1), count = numericArgument(2);
     if (typeof start !== 'number' || typeof count !== 'number' || !Number.isInteger(start) || !Number.isInteger(count) || start < 1 || count < 0) return '#VALUE!';
     const beginning = source.slice(0, start - 1), ending = source.slice(start - 1 + count);
@@ -1628,6 +1670,8 @@ function callFunction(name, args, context = {}) {
     const expectedArgs = name === 'LEFT' || name === 'RIGHT' ? [1, 2] : name === 'MID' ? [3, 3] : [1, 1];
     if (args.length < expectedArgs[0] || args.length > expectedArgs[1]) return '#VALUE!';
     if (argumentError() !== null) return argumentError();
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
     const characters = Array.from(textValue(args[0]));
     if (name === 'LEN') return characters.length;
     if (name === 'LOWER') return textResult(textValue(args[0]).toLowerCase());
@@ -2116,6 +2160,8 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'CHOOSE') {
     if (args.length < 2 || args.length > 255) return '#VALUE!';
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
     const index = numericArgument(0);
     if (typeof index !== 'number') return index;
     const choice = Math.trunc(index);
@@ -2123,6 +2169,8 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'IFS') {
     if (!args.length || args.length % 2 || args.length > 254) return '#VALUE!';
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
     for (let index = 0; index < args.length; index += 2) {
       const condition = logicalArgument(index);
       if (isError(condition)) return condition;
@@ -2132,6 +2180,8 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'SWITCH') {
     if (args.length < 3 || args.length > 255) return '#VALUE!';
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
     const expression = args[0];
     if (argumentError(0) !== null) return argumentError(0);
     const hasDefault = args.length % 2 === 0;
@@ -2139,25 +2189,33 @@ function callFunction(name, args, context = {}) {
     for (let index = 1; index < pairEnd; index += 2) {
       const candidate = args[index];
       if (argumentError(index) !== null) return argumentError(index);
-      const equal = typeof expression === 'string' && typeof candidate === 'string'
-        ? expression.toLocaleLowerCase() === candidate.toLocaleLowerCase()
-        : expression === candidate;
+      const expressionValue = expression?.[FORMULA_TYPED_TEXT] ? expression.value : expression;
+      const candidateValue = candidate?.[FORMULA_TYPED_TEXT] ? candidate.value : candidate;
+      const equal = typeof expressionValue === 'string' && typeof candidateValue === 'string'
+        ? expressionValue.toLocaleLowerCase() === candidateValue.toLocaleLowerCase()
+        : expressionValue === candidateValue;
       if (equal) return textResult(args[index + 1]);
     }
     return hasDefault ? textResult(args.at(-1)) : '#N/A';
   }
   if (name === 'IF') {
     if (args.length < 2 || args.length > 3) return '#VALUE!';
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
     const condition = logicalArgument(0);
     if (isError(condition)) return condition;
     return textResult(condition ? args[1] : (args.length === 3 ? args[2] : false));
   }
   if (name === 'IFERROR') {
     if (args.length !== 2) return '#VALUE!';
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
     return textResult(argumentError(0) !== null ? args[1] : args[0]);
   }
   if (name === 'IFNA') {
     if (args.length !== 2) return '#VALUE!';
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
     const value = plainFormulaValue(args[0]);
     return textResult(!isTextLiteralArgument(0) && (value === '#N/A' || value === '#N/A!') ? args[1] : args[0]);
   }
@@ -2175,6 +2233,8 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'NOT') {
     if (args.length !== 1) return '#VALUE!';
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
     const truth = logicalArgument(0);
     return isError(truth) ? truth : !truth;
   }
@@ -3297,6 +3357,12 @@ function callFunction(name, args, context = {}) {
     const forecastValue = scaled ? (normalizedIntercept + normalizedSlope * (x / xScale)) * yScale : intercept + slope * x;
     return Number.isFinite(forecastValue) ? forecastValue : '#NUM!';
   }
+  const mathArity = Object.hasOwn(ELEMENTWISE_MATH_ARITY, name) ? ELEMENTWISE_MATH_ARITY[name] : null;
+  if (mathArity) {
+    if (args.length < mathArity[0] || args.length > mathArity[1]) return '#VALUE!';
+    const arrayResult = mapArrayArguments(name);
+    if (arrayResult !== null) return arrayResult;
+  }
   const first = ['GCD', 'LCM', 'MULTINOMIAL'].includes(name) && (isFormulaRange(args[0]) || args[0]?.[FORMULA_RANGE_METADATA]) ? 0 : numericArgument(0);
   if (typeof first === 'string') return first;
   if (name === 'FACT' || name === 'FACTDOUBLE') {
@@ -3686,49 +3752,69 @@ function evaluateFormula(formula, context = {}) {
       }
       throw new Error('#VALUE!');
     }
+    function unaryOperator(operator, value) {
+      if (isFormulaRange(value) || Array.isArray(value)) {
+        const values = matrixValue(value);
+        if (!values) return '#VALUE!';
+        return values.map(row => row.map(item => unaryOperator(operator, item)));
+      }
+      const number = numeric(value);
+      if (typeof number !== 'number') return number;
+      return operator === '-' ? -number : operator === '%' ? number / 100 : number;
+    }
     function unary() {
-      if (peek().type === '+') { position++; return numeric(expression(5)); }
-      if (peek().type === '-') { position++; const value = numeric(expression(5)); return typeof value === 'number' ? -value : value; }
+      if (peek().type === '+') { position++; return unaryOperator('+', expression(5)); }
+      if (peek().type === '-') { position++; return unaryOperator('-', expression(5)); }
       let value = primary();
       while (peek().type === '%') {
         position++;
-        value = numeric(value);
+        value = unaryOperator('%', value);
         if (typeof value === 'string') return value;
-        value /= 100;
       }
       return value;
+    }
+    function binary(operator, left, right) {
+      const leftIsArray = isFormulaRange(left) || Array.isArray(left), rightIsArray = isFormulaRange(right) || Array.isArray(right);
+      if (leftIsArray || rightIsArray) {
+        const leftMatrix = leftIsArray ? matrixValue(left) : null, rightMatrix = rightIsArray ? matrixValue(right) : null;
+        if (leftIsArray && !leftMatrix || rightIsArray && !rightMatrix) return '#VALUE!';
+        const height = (leftMatrix || rightMatrix).length, width = (leftMatrix || rightMatrix)[0].length;
+        if (leftMatrix && (leftMatrix.length !== height || leftMatrix[0].length !== width)
+          || rightMatrix && (rightMatrix.length !== height || rightMatrix[0].length !== width)) return '#VALUE!';
+        return Array.from({ length: height }, (_, row) => Array.from({ length: width }, (_, column) => binary(operator,
+          leftMatrix ? leftMatrix[row][column] : left, rightMatrix ? rightMatrix[row][column] : right)));
+      }
+      if (isError(left)) return left;
+      if (isError(right)) return right;
+      if (operator === '&') {
+        left = plainFormulaValue(left?.[FORMULA_TEXT_LITERAL] || left?.[FORMULA_REFERENCE_VALUE] ? left.value : left);
+        right = plainFormulaValue(right?.[FORMULA_TEXT_LITERAL] || right?.[FORMULA_REFERENCE_VALUE] ? right.value : right);
+        return formulaTextResult(String(left ?? '') + String(right ?? ''), context.preserveFormulaText);
+      }
+      left = plainFormulaValue(left?.[FORMULA_TEXT_LITERAL] || left?.[FORMULA_REFERENCE_VALUE] ? left.value : left);
+      right = plainFormulaValue(right?.[FORMULA_TEXT_LITERAL] || right?.[FORMULA_REFERENCE_VALUE] ? right.value : right);
+      if (['=', '<>', '<', '>', '<=', '>='].includes(operator)) {
+        const a = typeof left === 'string' && typeof right === 'string' ? left.toLocaleLowerCase() : (typeof left === 'string' && typeof right === 'number' ? numeric(left) : left);
+        const b = typeof left === 'string' && typeof right === 'string' ? right.toLocaleLowerCase() : (typeof right === 'string' && typeof left === 'number' ? numeric(right) : right);
+        if (isError(a) || isError(b)) return isError(a) ? a : b;
+        return operator === '=' ? a === b : operator === '<>' ? a !== b : operator === '<' ? a < b : operator === '>' ? a > b : operator === '<=' ? a <= b : a >= b;
+      }
+      const a = numeric(left), b = numeric(right);
+      if (typeof a === 'string' || typeof b === 'string') return typeof a === 'string' ? a : b;
+      if (operator === '+') left = a + b;
+      else if (operator === '-') left = a - b;
+      else if (operator === '*') left = a * b;
+      else if (operator === '/') left = b === 0 ? '#DIV/0!' : a / b;
+      else if (a === 0 && b < 0) left = '#DIV/0!';
+      else { const value = a ** b; left = Number.isFinite(value) ? value : '#NUM!'; }
+      return typeof left === 'number' && !Number.isFinite(left) ? '#NUM!' : left;
     }
     function expression(minimum) {
       let left = unary();
       while (Object.hasOwn(precedence, peek().type) && precedence[peek().type] >= minimum) {
         const operator = tokens[position++].type, level = precedence[operator];
         let right = expression(level + (operator === '^' ? 0 : 1));
-        if (isError(left)) return left;
-        if (isError(right)) return right;
-        if (operator === '&') {
-          left = plainFormulaValue(left?.[FORMULA_TEXT_LITERAL] || left?.[FORMULA_REFERENCE_VALUE] ? left.value : left);
-          right = plainFormulaValue(right?.[FORMULA_TEXT_LITERAL] || right?.[FORMULA_REFERENCE_VALUE] ? right.value : right);
-          left = formulaTextResult(String(left ?? '') + String(right ?? ''), context.preserveFormulaText);
-          continue;
-        }
-        left = plainFormulaValue(left?.[FORMULA_TEXT_LITERAL] || left?.[FORMULA_REFERENCE_VALUE] ? left.value : left);
-        right = plainFormulaValue(right?.[FORMULA_TEXT_LITERAL] || right?.[FORMULA_REFERENCE_VALUE] ? right.value : right);
-        if (['=', '<>', '<', '>', '<=', '>='].includes(operator)) {
-          const a = typeof left === 'string' && typeof right === 'string' ? left.toLocaleLowerCase() : (typeof left === 'string' && typeof right === 'number' ? numeric(left) : left);
-          const b = typeof left === 'string' && typeof right === 'string' ? right.toLocaleLowerCase() : (typeof right === 'string' && typeof left === 'number' ? numeric(right) : right);
-          if (isError(a) || isError(b)) return isError(a) ? a : b;
-          left = operator === '=' ? a === b : operator === '<>' ? a !== b : operator === '<' ? a < b : operator === '>' ? a > b : operator === '<=' ? a <= b : a >= b;
-          continue;
-        }
-        const a = numeric(left), b = numeric(right);
-        if (typeof a === 'string' || typeof b === 'string') { left = typeof a === 'string' ? a : b; continue; }
-        if (operator === '+') left = a + b;
-        else if (operator === '-') left = a - b;
-        else if (operator === '*') left = a * b;
-        else if (operator === '/') left = b === 0 ? '#DIV/0!' : a / b;
-        else if (a === 0 && b < 0) left = '#DIV/0!';
-        else { const value = a ** b; left = Number.isFinite(value) ? value : '#NUM!'; }
-        if (typeof left === 'number' && !Number.isFinite(left)) left = '#NUM!';
+        left = binary(operator, left, right);
       }
       return left;
     }
@@ -3804,7 +3890,9 @@ function createFormulaCalculator(document, options = {}) {
     if (spillScannedSheets.has(sheetIndex)) return;
     spillScannedSheets.add(sheetIndex);
     if (document.state?.formulas === false && !document.formulaDrafts?.size) return;
-    const producesArray = formula => typeof formula === 'string' && (/\b(?:LET|SEQUENCE|FILTER|SORT|SORTBY|UNIQUE|TRANSPOSE|TEXTSPLIT|INDIRECT|OFFSET|INDEX|CHOOSECOLS|CHOOSEROWS|TAKE|DROP|TOCOL|TOROW|WRAPROWS|WRAPCOLS|HSTACK|VSTACK|MODE\.MULT|FREQUENCY|RANDARRAY)\s*\(/i.test(formula) || document.state.definedNames?.some(item => new RegExp(`(?<![A-Z0-9_.])${item.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Z0-9_.])`, 'i').test(formula)));
+    const producesArray = formula => typeof formula === 'string' && (/\b(?:LET|SEQUENCE|FILTER|SORT|SORTBY|UNIQUE|TRANSPOSE|TEXTSPLIT|INDIRECT|OFFSET|INDEX|CHOOSE|IFS|SWITCH|CHOOSECOLS|CHOOSEROWS|TAKE|DROP|TOCOL|TOROW|WRAPROWS|WRAPCOLS|HSTACK|VSTACK|MODE\.MULT|FREQUENCY|RANDARRAY|FIND|SEARCH|LEFT|RIGHT|MID|LEN|LOWER|UPPER|TRIM|SUBSTITUTE|REPLACE|EXACT|PROPER|REPT|CLEAN|T|VALUE|NUMBERVALUE|TEXT|IF|IFERROR|IFNA|NOT|FACT|FACTDOUBLE|COMBIN|PERMUT|ABS|INT|SQRT|SIN|COS|TAN|ASIN|ACOS|ATAN|SINH|COSH|TANH|ASINH|ACOSH|ATANH|DEGREES|RADIANS|ATAN2|EXP|LN|LOG10|LOG|TRUNC|CEILING\.MATH|FLOOR\.MATH|CEILING|FLOOR|MROUND|ROUND|ROUNDUP|ROUNDDOWN|MOD|POWER)\s*\(/i.test(formula)
+      || /(?<![A-Z0-9_.])\$?[A-Z]{1,3}\$?[1-9]\d*\s*:\s*\$?[A-Z]{1,3}\$?[1-9]\d*(?![A-Z0-9_.])/i.test(formula)
+      || document.state.definedNames?.some(item => new RegExp(`(?<![A-Z0-9_.])${item.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Z0-9_.])`, 'i').test(formula)));
     const referencesSpill = formula => typeof formula === 'string' && /(?:'[^']+'|[A-Za-z_][\w. ]*)!\$?[A-Z]{1,3}\$?[1-9]\d*#|\$?[A-Z]{1,3}\$?[1-9]\d*#/i.test(formula);
     const formulas = [...(document.state?.sheets?.[sheetIndex]?.cells?.values?.() || [])]
       .filter(cell => cell.formula)

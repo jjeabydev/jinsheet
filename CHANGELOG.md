@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.5.0 / 2026-10-18
+- 범위·배열의 텍스트 및 수학 함수와 산술·비교·문자열 연산을 요소별로 계산하고 동적 배열로 표시합니다. 단일 값은 각 위치에 적용하며 배열 모양이 다르면 오류를 반환합니다.
+- `CHOOSE`, `IFS`, `SWITCH`가 범위별 조건과 분기를 계산해 spill 결과를 표시합니다. 셀별 오류와 `SWITCH`의 기본 분기를 유지합니다.
+- 표가 확장될 때 표 끝에 연결된 차트 계열 범위·캐시를 갱신하고, 지원되는 표 구성은 오른쪽 열 추가를 차트 계열에 연결합니다.
+- 검색 도구 모음의 Find·Clear 흐름을 보여 주도록 Marketplace 미리보기 이미지를 갱신했습니다.
+
 ## 1.4.0 / 2026-10-18
 - Match direct-value coercion and reference handling for `SUMSQ`, `DEVSQ`, `AVEDEV`, `GEOMEAN`, and `HARMEAN`.
 - Ignore nonnumeric logical and text values in `RANK.EQ` and `RANK.AVG` reference lists.

@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { performance } = require('node:perf_hooks');
 const { zipSync } = require('../../vendor/node_modules/fflate');
-const { analyze, patchColumnWidths, patchOutlineGroups, patchAddChart, patchAutoFilters, patchPrintArea, patchPrintSettings, patchPrintTitles, patchHeaderFooter } = require('../../src/xlsx');
+const { analyze, patchColumnWidths, patchOutlineGroups, patchAddChart, patchAddTable, patchAutoFilters, patchPrintArea, patchPrintSettings, patchPrintTitles, patchHeaderFooter } = require('../../src/xlsx');
 const { onePagePdf } = require('../helpers/pdf-fixture');
 const { DEFAULT_PRINT_SETTINGS, renderPrintDocument } = require('../../src/printing');
 const { defaultHeaderFooter } = require('../../src/header-footer');
@@ -208,9 +208,17 @@ suite('JinSheet Extension Host', () => {
       'xl/workbook.xml': '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="s1"/></sheets></workbook>',
       'xl/_rels/workbook.xml.rels': '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="s1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
       'xl/worksheets/sheet1.xml': '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
-        + '<row r="1"><c r="A1"><v>1</v></c><c r="B1"><v>2</v></c><c r="C1"><v>3</v></c><c r="D1"><f>INDEX(A1:C3,2,0)</f><v>4</v></c><c r="G1"><f>SUM(D1#)</f><v>15</v></c><c r="I1"><f>INDEX(A1:C3,0,2)</f><v>2</v></c><c r="K1"><f>SUM(I1#)</f><v>15</v></c></row>'
+        + '<row r="1"><c r="A1"><v>1</v></c><c r="B1"><v>2</v></c><c r="C1"><v>3</v></c><c r="D1"><f>INDEX(A1:C3,2,0)</f><v>4</v></c><c r="G1"><f>SUM(D1#)</f><v>15</v></c><c r="I1"><f>INDEX(A1:C3,0,2)</f><v>2</v></c><c r="K1"><f>SUM(I1#)</f><v>15</v></c><c r="L1"><f>TRIM(A1:A3)</f><v>1</v></c><c r="N1"><f>CHOOSE(IF(A1:A3&lt;5,1,2),"low","high")</f><v>low</v></c><c r="P1"><f>IFS(A1:A3&lt;2,"small",A1:A3&lt;5,"medium",TRUE,"large")</f><v>small</v></c><c r="R1"><f>SWITCH(A1:A3,1,"one",4,"four","other")</f><v>one</v></c></row>'
         + '<row r="2"><c r="A2"><v>4</v></c><c r="B2"><v>5</v></c><c r="C2"><v>6</v></c></row>'
         + '<row r="3"><c r="A3"><v>7</v></c><c r="B3"><v>8</v></c><c r="C3"><v>9</v></c></row>'
+        + '<row r="4"><c r="B4"><f>D4:D5&amp;"!"</f><v>Excel!</v></c><c r="D4" t="inlineStr"><is><t>Excel</t></is></c><c r="F4"><f>FIND("e",D4:D5)</f><v>4</v></c><c r="H4"><f>SEARCH("e",D4:D5,2)</f><v>4</v></c><c r="J4"><f>SUBSTITUTE(D4:D5,"e","x")</f><v>Excxl</v></c><c r="L4"><f>REPLACE(D4:D5,2,1,"Z")</f><v>EZcel</v></c></row>'
+        + '<row r="5"><c r="D5" t="inlineStr"><is><t>😀Excel</t></is></c></row>'
+        + '<row r="9"><c r="A9" t="b"><v>1</v></c><c r="C9"><f>IF(A9:A11,"yes","no")</f><v>yes</v></c><c r="E9"><f>IFERROR(A9:A11,"recovered")</f><v>1</v></c><c r="G9"><f>IFNA(A9:A11,"missing")</f><v>1</v></c><c r="I9"><f>NOT(A9:A11)</f><v>0</v></c></row>'
+        + '<row r="10"><c r="A10" t="b"><v>0</v></c></row>'
+        + '<row r="11"><c r="A11" t="e"><v>#N/A</v></c></row>'
+        + '<row r="13"><c r="D13"><f>A1:A3+B1:B3</f><v>3</v></c><c r="F13"><f>A1:A3*2</f><v>2</v></c><c r="H13"><f>A1:A3&gt;=4</f><v>0</v></c><c r="J13"><f>-A1:A3</f><v>-1</v></c><c r="L13"><f>SUM(D13#)</f><v>27</v></c></row>'
+        + '<row r="7"><c r="D7" t="inlineStr"><is><t>12.5</t></is></c><c r="F7"><f>VALUE(D7:D8)</f><v>12.5</v></c><c r="H7"><f>TEXT(F7#,"0.00")</f><v>12.50</v></c><c r="J7"><f>ROUND(F7#,0)</f><v>13</v></c><c r="L7"><f>MOD(F7#,10)</f><v>2.5</v></c></row>'
+        + '<row r="8"><c r="D8" t="inlineStr"><is><t>1,234.5</t></is></c></row>'
         + '</sheetData></worksheet>'
     };
     await fs.writeFile(file, zipSync(Object.fromEntries(Object.entries(parts).map(([name, value]) => [name, new TextEncoder().encode(value)]))));
@@ -237,6 +245,54 @@ suite('JinSheet Extension Host', () => {
       await waitForCell(1, 8, 5, 'INDEX column result spills to the next row');
       await waitForCell(2, 8, 8, 'INDEX column result spills through the selected source column');
       await waitForCell(0, 10, 15, 'SUM reads the spilled INDEX column');
+      await waitForCell(0, 11, '1', 'TRIM converts the first range value and renders its anchor');
+      await waitForCell(1, 11, '4', 'TRIM spills the second range value');
+      await waitForCell(2, 11, '7', 'TRIM spills through the end of the referenced range');
+      await waitForCell(0, 13, 'low', 'CHOOSE renders the first array branch');
+      await waitForCell(1, 13, 'low', 'CHOOSE broadcasts its scalar branch over a range');
+      await waitForCell(2, 13, 'high', 'CHOOSE spills the alternate array branch');
+      await waitForCell(0, 15, 'small', 'IFS renders the first matching range condition');
+      await waitForCell(1, 15, 'medium', 'IFS evaluates the next condition for each array item');
+      await waitForCell(2, 15, 'large', 'IFS spills the fallback condition');
+      await waitForCell(0, 17, 'one', 'SWITCH renders the first matching expression');
+      await waitForCell(1, 17, 'four', 'SWITCH selects a different branch per array item');
+      await waitForCell(2, 17, 'other', 'SWITCH broadcasts its default branch');
+      await waitForCell(3, 5, 4, 'FIND returns the first range result');
+      await waitForCell(4, 5, 5, 'FIND spills the Unicode-aware second range result');
+      await waitForCell(3, 7, 4, 'SEARCH applies the scalar start position to the first range value');
+      await waitForCell(4, 7, 2, 'SEARCH spills the scalar-start second range result');
+      await waitForCell(3, 9, 'Excxl', 'SUBSTITUTE maps text edits over the referenced range');
+      await waitForCell(4, 9, '😀Excxl', 'SUBSTITUTE spills the Unicode source result');
+      await waitForCell(3, 11, 'EZcel', 'REPLACE maps character positions over the referenced range');
+      await waitForCell(4, 11, '😀Zxcel', 'REPLACE counts Unicode characters before spilling');
+      await waitForCell(6, 5, 12.5, 'VALUE spills the numeric value of the first text cell');
+      await waitForCell(7, 5, 1234.5, 'VALUE spills the grouped numeric text conversion');
+      await waitForCell(6, 7, '12.50', 'TEXT formats the first VALUE spill');
+      await waitForCell(7, 7, '1234.50', 'TEXT maps its format across a spill reference');
+      await waitForCell(6, 9, 13, 'ROUND maps over the VALUE spill reference');
+      await waitForCell(7, 9, 1235, 'ROUND spills the second calculated value');
+      await waitForCell(6, 11, 2.5, 'MOD maps over the VALUE spill reference');
+      await waitForCell(7, 11, 4.5, 'MOD spills the second remainder');
+      await waitForCell(8, 2, 'yes', 'IF selects from the first range condition');
+      await waitForCell(9, 2, 'no', 'IF spills the false branch for the next range condition');
+      await waitForCell(10, 2, '#N/A', 'IF preserves a condition error in its result array');
+      await waitForCell(8, 4, 'TRUE', 'IFERROR spills the first non-error value');
+      await waitForCell(10, 4, 'recovered', 'IFERROR handles an error in one array position');
+      await waitForCell(10, 6, 'missing', 'IFNA handles #N/A in one array position');
+      await waitForCell(8, 8, 'FALSE', 'NOT spills the inverse of the first Boolean');
+      await waitForCell(9, 8, 'TRUE', 'NOT spills the inverse of the second Boolean');
+      await waitForCell(3, 1, 'Excel!', 'string concatenation spills its first range result');
+      await waitForCell(4, 1, '😀Excel!', 'string concatenation spills its Unicode range result');
+      await waitForCell(12, 3, 3, 'range addition renders its anchor');
+      await waitForCell(13, 3, 9, 'range addition spills its second row');
+      await waitForCell(14, 3, 15, 'range addition spills its final row');
+      await waitForCell(12, 5, 2, 'range multiplication broadcasts a scalar');
+      await waitForCell(14, 5, 14, 'range multiplication spills the final row');
+      await waitForCell(12, 7, 'FALSE', 'range comparison spills a Boolean result');
+      await waitForCell(14, 7, 'TRUE', 'range comparison spills later Boolean results');
+      await waitForCell(12, 9, -1, 'unary negation spills from a range reference');
+      await waitForCell(14, 9, -7, 'unary negation spills the final range result');
+      await waitForCell(12, 11, 27, 'SUM reads the range arithmetic spill reference');
 
       const sourceCell = await evaluate(`(()=>{const rect=document.querySelector('#cell-1-0').getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2}})()`);
       await devtools.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: sourceCell.x + devtools.frameOffset.x, y: sourceCell.y + devtools.frameOffset.y, button: 'left', buttons: 1, clickCount: 1 });
@@ -244,6 +300,10 @@ suite('JinSheet Extension Host', () => {
       await evaluate(`(()=>{const input=document.querySelector('#formula');input.value='40';input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))})()`);
       await waitForCell(0, 3, 40, 'editing the source recalculates the INDEX row');
       await waitForCell(0, 6, 51, 'the formula using the row spill recalculates');
+      await waitForCell(1, 11, '40', 'editing the source recalculates the TRIM spill');
+      await waitForCell(1, 13, 'high', 'editing the source recalculates CHOOSE array branches');
+      await waitForCell(1, 15, 'large', 'editing the source recalculates IFS array conditions');
+      await waitForCell(1, 17, 'other', 'editing the source recalculates SWITCH array matching');
       await vscode.commands.executeCommand('workbench.action.files.save');
       const saved = analyze(await fs.readFile(file));
       assert.equal(saved.sheets[0].cells.get('A2').value, '40');
@@ -257,6 +317,7 @@ suite('JinSheet Extension Host', () => {
       await waitForCell(0, 3, 40, 'the saved INDEX array reopens with its recalculated anchor');
       await waitForCell(0, 6, 51, 'the saved spill reference reopens with the recalculated total');
       await waitForCell(2, 8, 8, 'the column INDEX array remains available after reopening');
+      await waitForCell(1, 11, '40', 'the saved TRIM spill reopens with the recalculated source');
     } finally {
       devtools?.close();
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
@@ -1276,7 +1337,7 @@ suite('JinSheet Extension Host', () => {
       '_rels/.rels': encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'),
       'xl/workbook.xml': encode('<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="r1"/></sheets></workbook>'),
       'xl/_rels/workbook.xml.rels': encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>'),
-      'xl/worksheets/sheet1.xml': encode('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B3"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Month</t></is></c><c r="B1" t="inlineStr"><is><t>Sales</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Jan</t></is></c><c r="B2"><v>4</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Feb</t></is></c><c r="B3"><v>6</v></c></row></sheetData></worksheet>')
+      'xl/worksheets/sheet1.xml': encode('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:C3"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Month</t></is></c><c r="B1" t="inlineStr"><is><t>Sales</t></is></c><c r="C1" t="inlineStr"><is><t>Profit</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Jan</t></is></c><c r="B2"><v>4</v></c><c r="C2"><v>2</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Feb</t></is></c><c r="B3"><v>6</v></c><c r="C3"><v>3</v></c></row></sheetData></worksheet>')
     });
     const initial = patchAddChart(analyze(base), 0, { top: 0, bottom: 2, left: 0, right: 1 });
     assert.equal(initial.model.writable, true, initial.model.readOnlyReason);
@@ -1309,6 +1370,77 @@ suite('JinSheet Extension Host', () => {
       await vscode.commands.executeCommand('workbench.action.files.save');
       const redone = analyze(await fs.readFile(file));
       assert.deepEqual(redone.sheets[0].charts[0].series[0].values, [4, null, 6]);
+    } finally {
+      devtools?.close();
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('Chromium Webview expands a chart-backed table and updates series ranges and caches through undo and redo', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-table-chart-expand-host-'));
+    const file = path.join(directory, 'table-chart.xlsx'), encode = text => new TextEncoder().encode(text);
+    const base = zipSync({
+      '[Content_Types].xml': encode('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>'),
+      '_rels/.rels': encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'),
+      'xl/workbook.xml': encode('<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="r1"/></sheets></workbook>'),
+      'xl/_rels/workbook.xml.rels': encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>'),
+      'xl/worksheets/sheet1.xml': encode('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:C3"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Month</t></is></c><c r="B1" t="inlineStr"><is><t>Sales</t></is></c><c r="C1" t="inlineStr"><is><t>Profit</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Jan</t></is></c><c r="B2"><v>4</v></c><c r="C2"><v>2</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Feb</t></is></c><c r="B3"><v>6</v></c><c r="C3"><v>3</v></c></row></sheetData></worksheet>')
+    });
+    let model = patchAddChart(analyze(base), 0, { top: 0, bottom: 2, left: 0, right: 1 }).model;
+    model = patchAddTable(model, { sheetIndex: 0, range: { top: 0, bottom: 2, left: 0, right: 1 }, name: 'MonthlySales' }).model;
+    await fs.writeFile(file, model.bytes);
+    let devtools;
+    try {
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      const evaluate = async expression => {
+        const response = await devtools.send('Runtime.evaluate', { expression, contextId: devtools.contextId, returnByValue: true, awaitPromise: true });
+        if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+        return response.result?.value;
+      };
+      const wait = async expression => {
+        const deadline = Date.now() + 6000;
+        while (Date.now() < deadline) { if (await evaluate(expression)) return; await new Promise(resolve => setTimeout(resolve, 25)); }
+        assert.fail('Chart-backed table resize timed out: ' + expression + ' ' + JSON.stringify(await evaluate('({notice:document.querySelector("#notice")?.textContent,series:document.querySelectorAll("[data-chart-series-name]").length,tableRange:document.querySelector("#tableTotalsColumn")?.options?.length,selected:document.querySelector("#address")?.value})')));
+      };
+      const edit = async (row, column, value) => evaluate(`(()=>{document.querySelector("#cell-${row}-${column}").click();const input=document.querySelector("#formula");input.value=${JSON.stringify(value)};input.dispatchEvent(new Event("input",{bubbles:true}));input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}))})()`);
+      await wait('Boolean(document.querySelector("#cell-3-0"))');
+      await edit(3, 0, 'Mar');
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline && await evaluate('document.querySelector("#cell-3-0")?.textContent') !== 'Mar') await new Promise(resolve => setTimeout(resolve, 25));
+      await edit(3, 1, '8');
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      let saved = analyze(await fs.readFile(file));
+      assert.equal(saved.sheets[0].tables[0].range.bottom, 3);
+      assert.deepEqual(saved.sheets[0].charts[0].series[0].categories, ['Jan', 'Feb', 'Mar']);
+      assert.deepEqual(saved.sheets[0].charts[0].series[0].values, [4, 6, 8]);
+      assert.match(new TextDecoder().decode(saved.files['xl/charts/chart1.xml']), /(?:Data|&apos;Data&apos;)!\$B\$2:\$B\$4/);
+      await vscode.commands.executeCommand('jinsheet.undo');
+      await vscode.commands.executeCommand('jinsheet.undo');
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      saved = analyze(await fs.readFile(file));
+      assert.equal(saved.sheets[0].tables[0].range.bottom, 2);
+      assert.deepEqual(saved.sheets[0].charts[0].series[0].values, [4, 6]);
+      assert.match(new TextDecoder().decode(saved.files['xl/charts/chart1.xml']), /(?:Data|&apos;Data&apos;)!\$B\$2:\$B\$3/);
+      await vscode.commands.executeCommand('jinsheet.redo');
+      await vscode.commands.executeCommand('jinsheet.redo');
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      saved = analyze(await fs.readFile(file));
+      assert.equal(saved.sheets[0].tables[0].range.bottom, 3);
+      assert.deepEqual(saved.sheets[0].charts[0].series[0].values, [4, 6, 8]);
+      await evaluate('(()=>{const address=document.querySelector("#address");address.value="A1:C4";address.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}))})()');
+      await wait('document.querySelectorAll(".cell[aria-selected=true]").length===12');
+      await wait('!document.querySelector("#resizeTable").disabled'); await evaluate('document.querySelector("#resizeTable").click()');
+      await wait('document.querySelectorAll("[data-chart-series-name]").length===2');
+      await vscode.commands.executeCommand('workbench.action.files.save'); saved = analyze(await fs.readFile(file));
+      assert.deepEqual(saved.sheets[0].tables[0].columns, ['Month', 'Sales', 'Profit']);
+      assert.equal(saved.sheets[0].charts[0].series.length, 2);
+      assert.deepEqual(saved.sheets[0].charts[0].series[1].values, [2, 3, null]);
+      await vscode.commands.executeCommand('jinsheet.undo'); await vscode.commands.executeCommand('workbench.action.files.save');
+      saved = analyze(await fs.readFile(file)); assert.deepEqual(saved.sheets[0].tables[0].columns, ['Month', 'Sales']); assert.equal(saved.sheets[0].charts[0].series.length, 1);
+      await vscode.commands.executeCommand('jinsheet.redo'); await vscode.commands.executeCommand('workbench.action.files.save');
+      saved = analyze(await fs.readFile(file)); assert.deepEqual(saved.sheets[0].tables[0].columns, ['Month', 'Sales', 'Profit']); assert.equal(saved.sheets[0].charts[0].series.length, 2);
     } finally {
       devtools?.close();
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');

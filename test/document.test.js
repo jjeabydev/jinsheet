@@ -1677,6 +1677,29 @@ test('선택한 행·열 개수만큼 구조를 한 번에 삽입·삭제하고 
   await xlsx.save();
   assert.equal(analyze(await fs.readFile(xlsxFile)).sheets[0].cells.get('A1').value, 'old');
   xlsx.dispose();
+
+  const tableFile = path.join(directory, 'table-columns.xlsx'), tableBytes = tableXlsx();
+  await fs.writeFile(tableFile, tableBytes);
+  const tableDocument = new JinSheetDocument(uri(tableFile), 'xlsx', analyze(tableBytes), tableBytes, true, '');
+  tableDocument.onDidChange(change => { operation = change; });
+  tableDocument.applyStructureChange({ axis: 'column', action: 'insert', index: 1, count: 2 });
+  assert.deepEqual(tableDocument.state.sheets[0].tables[0].columns, ['Name', 'Column2', 'Column3', 'Amount']);
+  assert.equal(tableDocument.getCell(1, 3).value, '10');
+  operation.undo();
+  assert.deepEqual(tableDocument.state.sheets[0].tables[0].columns, ['Name', 'Amount']);
+  assert.equal(tableDocument.getCell(1, 1).value, '10');
+  operation.redo();
+  await tableDocument.save();
+  assert.deepEqual(analyze(await fs.readFile(tableFile)).sheets[0].tables[0].columns, ['Name', 'Column2', 'Column3', 'Amount']);
+  tableDocument.applyStructureChange({ axis: 'column', action: 'delete', index: 1, count: 2 });
+  assert.deepEqual(tableDocument.state.sheets[0].tables[0].columns, ['Name', 'Amount']);
+  assert.equal(tableDocument.getCell(1, 1).value, '10');
+  operation.undo();
+  assert.deepEqual(tableDocument.state.sheets[0].tables[0].columns, ['Name', 'Column2', 'Column3', 'Amount']);
+  operation.redo();
+  await tableDocument.save();
+  assert.deepEqual(analyze(await fs.readFile(tableFile)).sheets[0].tables[0].columns, ['Name', 'Amount']);
+  tableDocument.dispose();
 });
 
 test('빈 TSV에 삽입한 첫 행을 저장하고 다시 열 수 있다', async t => {
@@ -6440,11 +6463,11 @@ test('자동 확장 뒤 필터는 새 값과 계산 열을 반영하고 수동 �
   await document.save();const saved=analyze(await fs.readFile(file));assert.deepEqual(saved.sheets[0].nativeHiddenRows,[1,3]);assert.deepEqual(saved.sheets[0].hiddenRows,[]);assert.equal(saved.sheets[0].tables[0].autoFilter.bottom,4);document.dispose();
 });
 
-test('표 확장 설정은 입력과 붙여넣기에 전달하고 차트 문서에서는 사용 불가를 표시한다', () => {
+test('표 확장 설정은 입력·붙여넣기에 전달하고 차트 문서에서도 사용할 수 있다', () => {
   const table={name:'Sales',range:{top:0,bottom:2,left:0,right:1},columns:['Name','Amount'],headerRowCount:1,totalsRowCount:0,calculatedColumns:[null,null],totalColumns:[{function:'none'},{function:'none'}]};const {elements,messages,documentListeners,dispatch}=runGridWebview(renderHtml(),{kind:'xlsx',rowCount:4,columnCount:3,tables:[table]});
   assert.equal(elements.get('autoExpandTables').checked,true);elements.get('autoExpandTables').checked=false;const formula=elements.get('formula');formula.value='7';formula.listeners.get('input')();formula.listeners.get('keydown')({target:formula,key:'Enter',preventDefault(){}});assert.equal(messages.findLast(message=>message.type==='edit').tableAutoExpand,false);
   documentListeners.get('keydown')({target:elements.get('grid'),key:'v',ctrlKey:true,metaKey:false,preventDefault(){}});assert.equal(messages.findLast(message=>message.type==='paste').tableAutoExpand,false);
-  dispatch({type:'model',kind:'xlsx',readOnly:false,sheetIndex:0,rowCount:4,columnCount:3,tables:[table],tableExpansionAvailable:false});assert.equal(elements.get('autoExpandTables').disabled,true);assert.match(elements.get('autoExpandTables').title,/charts/);
+  dispatch({type:'model',kind:'xlsx',readOnly:false,sheetIndex:0,rowCount:4,columnCount:3,tables:[table],charts:[{type:'line'}]});assert.equal(elements.get('autoExpandTables').disabled,false);assert.doesNotMatch(elements.get('autoExpandTables').title,/charts/);
 });
 
 test('표 머리글 변경은 구조화 참조·계산 열·저장·Undo를 함께 갱신한다', async t => {

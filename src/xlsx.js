@@ -5166,7 +5166,7 @@ function patchTableColumnNames(model, requests) {
 
 function planTableExpansion(model, sheetIndex, edits, getCell = (row, column, index) => model.sheets[index]?.cells.get(columnLetters(column + 1) + (row + 1)) || null) {
   const sheet = model.sheets[sheetIndex];
-  if (!sheet?.tables?.length || model.hasCharts) return { requests: [], edits };
+  if (!sheet?.tables?.length) return { requests: [], edits };
   const valid = edits.filter(edit => Number.isInteger(edit?.row) && Number.isInteger(edit?.column) && edit.row >= 0 && edit.row < LIMITS.rows && edit.column >= 0 && edit.column < LIMITS.columns && typeof edit.value === 'string');
   const inside = (row, column, range) => row >= range.top && row <= range.bottom && column >= range.left && column <= range.right;
   const meaningful = valid.filter(edit => {
@@ -5200,7 +5200,12 @@ function planTableExpansion(model, sheetIndex, edits, getCell = (row, column, in
     if (range.right !== table.range.right || range.bottom !== table.range.bottom) proposals.push({ sheetIndex, tableName: table.name, range, headers });
   }
   const overlaps = (left, right) => left.top <= right.bottom && left.bottom >= right.top && left.left <= right.right && left.right >= right.left;
-  const requests = proposals.filter(proposal => !sheet.mergedCells.some(range => overlaps(proposal.range, range)) && !sheet.tables.some(table => table.name !== proposal.tableName && overlaps(proposal.range, table.range)) && !proposals.some(other => other !== proposal && overlaps(proposal.range, other.range)));
+  const requests = proposals.filter(proposal => {
+    const table = sheet.tables.find(item => item.name === proposal.tableName);
+    const affectedRange = { top: Math.min(table.range.top, proposal.range.top), bottom: Math.max(table.range.bottom, proposal.range.bottom), left: Math.min(table.range.left, proposal.range.left), right: Math.max(table.range.right, proposal.range.right) };
+    const chartOverlap = proposal.range.right > table.range.right && (model.chartSourceRanges || []).some(source => source.sheetIndex === sheetIndex && overlaps(source, affectedRange));
+    return !chartOverlap && !sheet.mergedCells.some(range => overlaps(proposal.range, range)) && !sheet.tables.some(table => table.name !== proposal.tableName && overlaps(proposal.range, table.range)) && !proposals.some(other => other !== proposal && overlaps(proposal.range, other.range));
+  });
   const headerNames = new Map(requests.flatMap(request => request.headers).map(header => [header.row + ':' + header.column, header.value]));
   return { requests, edits: edits.map(edit => edit && headerNames.has(edit.row + ':' + edit.column) ? { ...edit, value: headerNames.get(edit.row + ':' + edit.column), kind: 'string', formula: null } : edit) };
 }
@@ -5336,10 +5341,103 @@ function patchTableStyles(model, edits) {
   return { bytes, model: checked };
 }
 
+function resizeChartRangesWithTable(model, sheetIndex, table, range, outputFiles) {
+  const oldDataBottom = table.range.bottom - (table.totalsRowCount || 0), nextDataBottom = range.bottom - (table.totalsRowCount || 0);
+  const growsRows = nextDataBottom > oldDataBottom, growsColumns = range.right > table.range.right;
+  const shrinks = nextDataBottom < oldDataBottom || range.right < table.range.right;
+  const overlaps = source => source.sheetIndex === sheetIndex && source.top <= table.range.bottom && source.bottom >= table.range.top && source.left <= table.range.right && source.right >= table.range.left;
+  const existingChartSources = (model.chartSourceRanges || []).filter(overlaps);
+  if (shrinks && existingChartSources.length) fail('차트 원본과 겹치는 표 범위는 줄일 수 없습니다.');
+  if (!growsRows && !growsColumns) return new Set();
+  const changed = new Set();
+  for (const chart of model.chartPaths || []) {
+    const chartSheet = model.sheets[chart.sheetIndex];
+    let xml = new TextDecoder().decode(outputFiles[chart.path] || model.files[chart.path]), updated = xml;
+    const root = parseXml(new TextEncoder().encode(xml), chart.path).root, prefix = root.name.includes(':') ? root.name.slice(0, root.name.indexOf(':') + 1) : '';
+    const replacements = [];
+    for (const referenceName of ['numRef', 'strRef']) for (const referenceRange of findElementRanges(xml, prefix + referenceName, undefined, true).values()) {
+      const referenceXml = xml.slice(referenceRange.start, referenceRange.end), referenceRoot = parseXml(new TextEncoder().encode(referenceXml), chart.path).root;
+      const formulaNode = childrenByLocalName(referenceRoot, 'f')[0];
+      if (!formulaNode) continue;
+      const originalFormula = formulaNode.text.trim(), source = parseRangeReference(originalFormula, chartSheet?.name);
+      if (!source || source.top !== source.bottom && source.left !== source.right) continue;
+      const sourceSheetIndex = source.sheetName ? model.sheets.findIndex(sheet => sheet.name.toLocaleLowerCase() === source.sheetName.toLocaleLowerCase()) : chart.sheetIndex;
+      if (sourceSheetIndex !== sheetIndex || source.left !== source.right || source.left < table.range.left || source.left > table.range.right) continue;
+      const includesTotals = Boolean(table.totalsRowCount) && source.bottom === table.range.bottom;
+      if (source.bottom !== oldDataBottom && !includesTotals) continue;
+      const nextBottom = includesTotals ? range.bottom : nextDataBottom;
+      if (nextBottom <= source.bottom) continue;
+      const sheetName = source.sheetName || chartSheet?.name;
+      if (!sheetName) fail('차트 원본 시트 이름을 확인할 수 없습니다.');
+      const quotedSheet = /^'(?:[^']|'')+'!/.test(originalFormula) || !/^[A-Za-z_][A-Za-z0-9_.]*$/.test(sheetName) ? "'" + sheetName.replaceAll("'", "''") + "'" : sheetName;
+      const address = row => '$' + columnLetters(source.left + 1) + '$' + (row + 1);
+      const formulaRange = quotedSheet + '!' + address(source.top) + ':' + address(nextBottom);
+      const formulaRanges = findElementRanges(referenceXml, prefix + 'f', undefined, true), formulaRangeNode = formulaRanges.values().next().value;
+      if (!formulaRangeNode || formulaRangeNode.selfClosing) continue;
+      const start = referenceRange.start + formulaRangeNode.startTagEnd, end = referenceRange.start + formulaRangeNode.closingStart;
+      replacements.push({ start, end, text: xmlEscape(formulaRange) });
+    }
+    if (!replacements.length) continue;
+    for (const replacement of replacements.sort((left, right) => right.start - left.start)) updated = updated.slice(0, replacement.start) + replacement.text + updated.slice(replacement.end);
+    outputFiles[chart.path] = new TextEncoder().encode(updated); changed.add(chart.path);
+  }
+  if (growsColumns && existingChartSources.length) {
+    if (range.left !== table.range.left || (table.headerRowCount || 0) !== 1) fail('차트 원본 표의 열 확장은 첫 열에 범주, 나머지 열에 계열이 있는 표에서만 지원합니다.');
+    const firstNewColumn = table.range.right + 1, lastNewColumn = range.right;
+    for (const chart of model.chartPaths || []) {
+      const chartSheet = model.sheets[chart.sheetIndex];
+      if (!chartSheet) fail('차트가 있는 워크시트를 찾을 수 없습니다.');
+      let xml = new TextDecoder().decode(outputFiles[chart.path] || model.files[chart.path]);
+      const parsed = readChartPreview(new TextEncoder().encode(xml), chart.path, chartSheet.name);
+      if (!parsed || !['bar', 'line', 'area', 'scatter', 'pie', 'doughnut'].includes(parsed.type)) fail('표와 연결된 차트 계열 구조를 안전하게 확장할 수 없습니다.');
+      const chartUsesTable = parsed.sourceRanges.some(source => {
+        const sourceSheetIndex = source.sheetName ? model.sheets.findIndex(item => item.name.toLocaleLowerCase() === source.sheetName.toLocaleLowerCase()) : chart.sheetIndex;
+        return sourceSheetIndex === sheetIndex && source.top <= table.range.bottom && source.bottom >= table.range.top && source.left <= table.range.right && source.right >= table.range.left;
+      });
+      if (!chartUsesTable) continue;
+      const root = parseXml(new TextEncoder().encode(xml), chart.path).root;
+      const prefix = root.name.includes(':') ? root.name.slice(0, root.name.indexOf(':') + 1) : '';
+      const plotArea = firstDescendant(root, ['plotArea']);
+      const chartNode = plotArea?.children.find(node => ['barChart', 'lineChart', 'areaChart', 'scatterChart', 'pieChart', 'doughnutChart'].includes(localName(node)));
+      if (!chartNode) fail('표와 연결된 차트 종류를 확인할 수 없습니다.');
+      const seriesNodes = childrenByLocalName(chartNode, 'ser'), type = parsed.type;
+      const resolveSource = formula => {
+        const source = parseRangeReference(formula, chartSheet.name);
+        if (!source) return null;
+        const sourceSheetIndex = source.sheetName ? model.sheets.findIndex(item => item.name.toLocaleLowerCase() === source.sheetName.toLocaleLowerCase()) : chart.sheetIndex;
+        return sourceSheetIndex === sheetIndex ? source : null;
+      };
+      const sameRange = (source, top, bottom, column) => source && source.top === top && source.bottom === bottom && source.left === column && source.right === column;
+      const dataBottom = nextDataBottom;
+      if (type === 'pie' || type === 'doughnut' || seriesNodes.length !== table.range.right - table.range.left) fail('이 차트는 표의 모든 데이터 열을 계열로 참조하지 않아 열을 자동 연결할 수 없습니다.');
+      for (const [index, seriesNode] of seriesNodes.entries()) {
+        const tx = childrenByLocalName(seriesNode, 'tx')[0], cat = childrenByLocalName(seriesNode, type === 'scatter' ? 'xVal' : 'cat')[0], val = childrenByLocalName(seriesNode, type === 'scatter' ? 'yVal' : 'val')[0];
+        const nameFormula = firstDescendant(tx || { children: [] }, ['f'])?.text.trim() || '', categoryFormula = firstDescendant(cat || { children: [] }, ['f'])?.text.trim() || '', valueFormula = firstDescendant(val || { children: [] }, ['f'])?.text.trim() || '';
+        const nameSource = resolveSource(nameFormula);
+        const categorySource = resolveSource(categoryFormula);
+        const valueSource = resolveSource(valueFormula);
+        const valueColumn = table.range.left + index + 1;
+        if (!sameRange(nameSource, table.range.top, table.range.top, valueColumn) || !sameRange(categorySource, table.range.top + 1, dataBottom, table.range.left) || !sameRange(valueSource, table.range.top + 1, dataBottom, valueColumn)) fail('표와 연결된 차트 계열이 표 열과 일치하지 않아 자동 확장할 수 없습니다.');
+      }
+      const chartElement = findElementRanges(xml, chartNode.name, undefined, true).values().next().value;
+      if (!chartElement || chartElement.selfClosing) fail('차트 계열을 추가할 위치를 찾을 수 없습니다.');
+      let insertion = chartElement.closingStart;
+      for (let column = firstNewColumn; column <= lastNewColumn; column++) {
+        const addition = buildChartSeries(model, sheetIndex, { top: table.range.top, bottom: dataBottom, left: table.range.left, right: column }, type, prefix, true).at(-1);
+        const index = seriesNodes.length + column - firstNewColumn;
+        const numbered = addition.replace(/(<(?:[\w.-]+:)?idx\b[^>]*\bval=")[^"]*(")/, '$1' + index + '$2').replace(/(<(?:[\w.-]+:)?order\b[^>]*\bval=")[^"]*(")/, '$1' + index + '$2');
+        xml = xml.slice(0, insertion) + numbered + xml.slice(insertion);
+        insertion += numbered.length;
+      }
+      outputFiles[chart.path] = new TextEncoder().encode(xml); changed.add(chart.path);
+    }
+  }
+  return changed;
+}
+
 function patchTableRanges(model, edits, options = {}) {
   if (!model.writable) fail(model.readOnlyReason || '이 통합문서는 읽기 전용입니다.');
   model = preserveImportedFilterVisibility(model);
-  if (model.hasCharts) fail('차트가 있는 통합문서에서는 표 범위를 변경할 수 없습니다.');
   if (!Array.isArray(edits) || edits.length > LIMITS.sheets) fail('Excel 표 범위 수정 요청이 유효하지 않습니다.');
   if (!edits.length) return { bytes: model.bytes, model };
   const outputFiles = Object.assign({}, model.files), changedPaths = new Set(), seen = new Set(), moves = [];
@@ -5347,6 +5445,7 @@ function patchTableRanges(model, edits, options = {}) {
     const { sheetIndex, tableName, range } = edit || {}, sheet = model.sheets[sheetIndex];
     const table = sheet?.tables?.find(item => item.name === tableName);
     if (!Number.isInteger(sheetIndex) || !sheet || !table || seen.has(sheetIndex + ':' + tableName) || !range || !['top', 'bottom', 'left', 'right'].every(key => Number.isInteger(range[key])) || range.top !== table.range.top || range.left < 0 || range.left > table.range.right || range.right < table.range.left || range.right >= LIMITS.columns || range.bottom < range.top + Math.max(1, (table.headerRowCount || 0) + (table.totalsRowCount || 0)) - 1 || range.bottom >= LIMITS.rows) fail('표 범위는 기존 머리글을 유지하고 유효한 데이터 행과 열을 포함해야 합니다.');
+    for (const chartPath of resizeChartRangesWithTable(model, sheetIndex, table, range, outputFiles)) changedPaths.add(chartPath);
     if (table.totalsRowCount && range.bottom !== table.range.bottom) {
       const source = { top: table.range.bottom, bottom: table.range.bottom, left: Math.max(table.range.left, range.left), right: Math.min(table.range.right, range.right) };
       const target = { ...source, top: range.bottom, bottom: range.bottom };
@@ -5415,6 +5514,15 @@ function patchTableRanges(model, edits, options = {}) {
     return bottom >= top ? [{ sheetIndex: edit.sheetIndex, tableName: edit.tableName, top, bottom }] : [];
   });
   if (growth.length) result = fillCalculatedRows(result.model, growth, options);
+  const chartPaths = new Set((model.chartPaths || []).map(chart => chart.path));
+  const resizedCharts = new Set([...changedPaths].filter(file => chartPaths.has(file)));
+  if (resizedCharts.size) {
+    const files = { ...result.model.files };
+    for (const chart of result.model.chartPaths || []) if (resizedCharts.has(chart.path)) files[chart.path] = patchChartCaches(files[chart.path], chart.path, chart.sheetIndex, result.model, null);
+    const refreshed = analyze(zipSync(files, { level: 0 }), result.model.extension);
+    if (!refreshed.writable) fail('표 자동 확장 후 차트 캐시 갱신에서 거절되었습니다: ' + refreshed.readOnlyReason);
+    result = { bytes: refreshed.bytes, model: refreshed };
+  }
   return patchFilterVisibility(result.model);
 }
 
@@ -5545,7 +5653,7 @@ function chartCacheElement(type, values) {
   return '<c:' + cacheName + '>' + (type === 'number' ? '<c:formatCode>General</c:formatCode>' : '') + '<c:ptCount val="' + values.length + '"/>' + points + '</c:' + cacheName + '>';
 }
 
-function buildChartSeries(model, sheetIndex, range, chartType, prefix = 'c:') {
+function buildChartSeries(model, sheetIndex, range, chartType, prefix = 'c:', allowEmpty = false) {
   const sheet = model.sheets[sheetIndex];
   if (!sheet || !range || !['top', 'bottom', 'left', 'right'].every(key => Number.isInteger(range[key])) || range.top < 0 || range.left < 0 || range.bottom <= range.top || range.right <= range.left || range.bottom >= LIMITS.rows || range.right >= LIMITS.columns || (range.bottom - range.top + 1) * (range.right - range.left + 1) > 1000) fail('차트를 만들려면 머리글 행과 범주 열을 포함해 1,000셀 이하의 사각형 범위를 선택하세요.');
   if (sheet.mergedCells?.some(merged => range.top <= merged.bottom && range.bottom >= merged.top && range.left <= merged.right && range.right >= merged.left)) fail('병합 셀이 포함된 범위에서는 차트를 만들 수 없습니다.');
@@ -5578,7 +5686,7 @@ function buildChartSeries(model, sheetIndex, range, chartType, prefix = 'c:') {
       const numeric = typeof raw === 'number' ? raw : (cell?.kind === 'number' || cell?.formula) && raw !== null ? Number(raw) : null;
       values.push(Number.isFinite(numeric) ? numeric : null);
     }
-    if (!values.some(value => value !== null)) fail('선택 범위에 숫자 데이터가 있는 계열이 없습니다.');
+    if (!allowEmpty && !values.some(value => value !== null)) fail('선택 범위에 숫자 데이터가 있는 계열이 없습니다.');
     const index = series.length;
     const categoryXml = chartType === 'scatter'
       ? '<c:xVal><c:numRef><c:f>' + xmlEscape(refRange(range.top + 1, range.left, range.bottom)) + '</c:f>' + chartCacheElement('number', categories) + '</c:numRef></c:xVal>'

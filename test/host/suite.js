@@ -568,9 +568,9 @@ assert.deepEqual(await evaluate(`(() => ({panelPosition:getComputedStyle(documen
       }, 'the open command panel overlays the worksheet without reducing its height');
 assert.equal(await evaluate(`(() => {const panel=document.querySelector('#formatBold').closest('.toolbarGroupContent'),style=getComputedStyle(panel);return parseFloat(style.maxHeight)<=Math.min(innerHeight*.4,360)+1&&style.overflowY==='auto'&&parseFloat(getComputedStyle(panel.querySelector('button')).minHeight)<=24})()`), true, 'the command panel stays short and scrollable so more worksheet data remains visible');
 assert.equal(await evaluate(`(() => {const root=document.documentElement,body=document.body;root.style.width='420px';body.style.width='420px';window.dispatchEvent(new Event('resize'));const panel=document.querySelector('#formatBold').closest('.toolbarGroupContent').getBoundingClientRect(),toolbar=document.querySelector('#toolbar').getBoundingClientRect();const fits=panel.left>=toolbar.left&&panel.right<=toolbar.right;root.style.width='';body.style.width='';window.dispatchEvent(new Event('resize'));return fits})()`), true, 'the command panel stays within a narrow editor');
-await evaluate(`document.querySelector('#toggleToolbar').click()`);
+await evaluate(`document.querySelector('#formatBold').focus();document.querySelector('#toggleToolbar').focus();document.querySelector('#toggleToolbar').click()`);
 assert.equal(await evaluate(`document.querySelector('#toolbar').hidden&&document.querySelector('#toolbarCommands details[open]')===null`), true, 'hiding the full menu closes its active command group');
-assert.deepEqual(await evaluate(`(() => {const toolbar=document.querySelector('#toolbar'),targets=[toolbar,...toolbar.querySelectorAll('*')];return {display:getComputedStyle(toolbar).display,visibility:getComputedStyle(toolbar).visibility,rendered:targets.filter(node=>node.getClientRects().length>0).map(node=>node.id||node.tagName).slice(0,8),pointerEvents:getComputedStyle(toolbar).pointerEvents,opacity:getComputedStyle(toolbar).opacity,inert:toolbar.inert}})()`), {display:'none',visibility:'hidden',rendered:[],pointerEvents:'none',opacity:'0',inert:true}, 'hidden menu text, icons, and command controls have no rendered boxes or pointer targets');
+assert.deepEqual(await evaluate(`(() => {const toolbar=document.querySelector('#toolbar'),targets=[toolbar,...toolbar.querySelectorAll('*')];return {display:getComputedStyle(toolbar).display,visibility:getComputedStyle(toolbar).visibility,rendered:targets.filter(node=>node.getClientRects().length>0).map(node=>node.id||node.tagName).slice(0,8),pointerEvents:getComputedStyle(toolbar).pointerEvents,opacity:getComputedStyle(toolbar).opacity,clipPath:getComputedStyle(toolbar).clipPath,contain:getComputedStyle(toolbar).contain,inert:toolbar.inert,focusMoved:document.activeElement.id==='toggleToolbar'}})()`), {display:'none',visibility:'hidden',rendered:[],pointerEvents:'none',opacity:'0',clipPath:'inset(100%)',contain:'strict',inert:true,focusMoved:true}, 'hidden menu text, icons, and command controls have no rendered boxes or pointer targets, and focus moves to the menu toggle');
 await evaluate(`document.querySelector('#toggleToolbar').click();document.querySelector('#toolbarCommands details[name="toolbar-section"]:nth-of-type(3) > summary').click()`);
 assert.equal(await evaluate(`!document.querySelector('#toolbar').hidden&&document.querySelector('#toolbarCommands details[open]')!==null`), true, 'the menu reopens without a stale hidden group');
 await evaluate(`document.querySelector('#toolbarCommands details[name="toolbar-section"]:nth-of-type(3) > summary').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))`);
@@ -4145,17 +4145,26 @@ assert.equal(await evaluate(`document.querySelector('#toolbarCommands details[op
         }
         assert.fail('Chart title did not update to ' + title);
       };
+      const waitForSavedSeriesName = async name => {
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline) {
+          await vscode.commands.executeCommand('workbench.action.files.save');
+          if (analyze(await fs.readFile(file)).sheets[0].charts[0].series[0].name === name) return;
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        assert.fail('Saved chart series did not update to ' + name);
+      };
       await waitForTitle('Chart');
       await evaluate(`(() => {document.querySelector('[data-chart-title]').value='재고 <현황> & 수량';document.querySelector('[data-chart-series-name]').value='재고 수량';document.querySelector('[data-chart-edit]').click()})()`);
       await waitForTitle('재고 <현황> & 수량');
-      await vscode.commands.executeCommand('workbench.action.files.save');
+      await waitForSavedSeriesName('재고 수량');
       const saved = analyze(await fs.readFile(file));
       assert.equal(saved.sheets[0].charts[0].title, '재고 <현황> & 수량');
       assert.equal(saved.sheets[0].charts[0].series[0].name, '재고 수량');
       assert.equal(saved.sheets[0].cells.get('B1').value, '수량');
       await vscode.commands.executeCommand('jinsheet.undo');
       await waitForTitle('Chart');
-      await vscode.commands.executeCommand('workbench.action.files.save');
+      await waitForSavedSeriesName('수량');
       assert.equal(analyze(await fs.readFile(file)).sheets[0].charts[0].series[0].name, '수량');
       await vscode.commands.executeCommand('jinsheet.redo');
       await waitForTitle('재고 <현황> & 수량');
@@ -4982,6 +4991,7 @@ assert.equal(await evaluate('document.querySelector("#cell-1-2")?.textContent'),
       };
       await waitFor('Boolean(document.querySelector("#cell-4-1"))', 'the selected data and duplicate records are rendered');
       await evaluate('document.querySelector("#toggleToolbar").click()');
+      await evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
       const first = await evaluate('(()=>{const r=document.querySelector("#cell-0-0").getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()');
       const last = await evaluate('(()=>{const r=document.querySelector("#cell-4-1").getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()');
       const mouse = (type, point) => devtools.send('Input.dispatchMouseEvent', { type, x: point.x + devtools.frameOffset.x, y: point.y + devtools.frameOffset.y, button: type === 'mouseMoved' ? 'none' : 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount: 1 });

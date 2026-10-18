@@ -14,6 +14,12 @@ test("Office files are associated with JinSheet as the default editor", () => {
   for (const extension of ["*.doc", "*.ppt"]) assert.ok(!patterns.has(extension), `${extension} remains unsupported`);
 });
 
+test("a localized command creates a new Excel workbook", () => {
+  const command = manifest.contributes.commands.find(item => item.command === "jinsheet.newWorkbook");
+  assert.ok(command);
+  assert.equal(command.title, "%command.newWorkbook%");
+});
+
 test("author metadata keeps jelly separate from the publisher identifier", () => {
   assert.equal(manifest.author.name, "jelly");
   assert.equal(manifest.author.url, "https://jellybeanz.medium.com");

@@ -18,10 +18,21 @@ const originalLoad = Module._load;
 Module._load = function(request, parent, isMain) { if (request === 'vscode') return { EventEmitter }; return originalLoad.call(this, request, parent, isMain); };
 const { autoFilterRange, autoFilterOptions, updateAutoFilterColumn, updateAutoFilterCustomColumn, currentRegion, chartPreviewHtml, findMatches, buildReplaceEdits, buildScopedReplaceEdits, getRange, isValidSheetRequest, resolveInternalHyperlink, matchesSelectedSheet, estimateDocumentColumnWidth, navigateCell, selectionSummary, parseClipboard, inferClipboardCellKind, parseClipboardDate, parseClipboardTime, parseClipboardPercentage, parseClipboardCurrency, buildDateTimeShortcutEdit, buildAutoSumFormula, buildClipboardKindMatrix, buildClipboardFormulaMatrix, isSameWorkbookClipboard, buildClearEdits, buildMoveEdits, buildSparseColumnMoveEdits, buildFillEdits, buildFillRangeEdits, buildSortEdits, planTextToColumns, buildTextToColumnsEdits, planRemoveDuplicates, removeDuplicateRows, buildNumberFormatEdits, buildFontFormatEdits, buildFontColorEdits, buildAlignmentFormatEdits, buildWrapTextEdits, buildAutomaticRowFitRequest, buildRowFitRequest, validateRowFitResult, buildBorderFormatEdits, buildFillFormatEdits, buildPasteEdits, buildSparseColumnPasteEdits, serializeClipboard, buildCopyPayload, JinSheetDocument, JinSheetProvider, buildPrintDocument, parsePrintTitleInputs, renderHtml, viewModel } = require('../src/extension');
 const { load } = require('../src/csv');
+const { isSupportedCustomNumberFormatCode } = require('../src/extension');
 const { analyze, formatCellValue } = require('../src/xlsx');
 const { messagesFor } = require('../src/i18n');
 const { chartPrintGeometry } = require('../src/chart-print');
 const { buildDataValidationRule } = require('../src/extension');
+
+test('custom number format input validation matches the supported display syntax', () => {
+  for (const format of ['#,##0.00', '#,##0.000 "kg"', '#,##0.0,', '0.00,,', '0.00E+00', '#.##E+00', '# ?/?', '?/?', '# ??/??', '# ?/8', '# ?/16', '0.0 "kg";(0.0 "kg");"zero"', '0.00%', '"$"#,##0.00', '0.00;(0.00);"zero";@', '#,##0.00;\\(#,##0.00\\);"zero";@', '0.' + '0'.repeat(10)]) {
+    assert.equal(isSupportedCustomNumberFormatCode(format), true, format);
+  }
+  for (const format of ['0.00 "kg', '[Red]0.00', '0.00E+0000', '#,##0.00E+00', '0E+00%', '# ?/0', '0,,,,', '0.' + '0'.repeat(11), '0,0', '0;0;0;@;@', '0;0;0;[Red]@', '0.00;[>=1]0.00']) {
+    assert.equal(isSupportedCustomNumberFormatCode(format), false, format);
+  }
+  assert.equal(isSupportedCustomNumberFormatCode('0'.repeat(256)), false, 'formats exceeding Excel length limits are rejected');
+});
 let activeDocument = null;
 
 test('클립보드 기록은 요청 순서로 완료되고 실패 뒤에도 다음 작업이 진행된다', async () => {
@@ -45,6 +56,13 @@ function minimalXlsx(sheetViews = '', rows = '<row r="1"><c r="A1" t="inlineStr"
     'xl/worksheets/sheet1.xml': `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${sheetViews}<sheetData>${rows}</sheetData>${autoFilter}</worksheet>`
   };
   return zipSync(Object.fromEntries(Object.entries(xml).map(([name, value]) => [name, new TextEncoder().encode(value)])));
+}
+function styledMinimalXlsx(sheetViews = '', rows = '<row r="1"><c r="A1" t="inlineStr"><is><t>old</t></is></c></row>', autoFilter = '') {
+  const files = unzipSync(minimalXlsx(sheetViews, rows, autoFilter));
+  files['xl/styles.xml'] = new TextEncoder().encode('<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font/></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>');
+  files['xl/_rels/workbook.xml.rels'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/_rels/workbook.xml.rels']).replace('</Relationships>', '<Relationship Id="styles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'));
+  files['[Content_Types].xml'] = new TextEncoder().encode(new TextDecoder().decode(files['[Content_Types].xml']).replace('</Types>', '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>'));
+  return zipSync(files);
 }
 function tableXlsx() {
   const files = Object.fromEntries(Object.entries(unzipSync(minimalXlsx('', '<row r="1"><c r="A1" t="inlineStr"><is><t>Name</t></is></c><c r="B1" t="inlineStr"><is><t>Amount</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Alpha</t></is></c><c r="B2"><v>10</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>Beta</t></is></c><c r="B3"><v>20</v></c></row><row r="4"><c r="B4"><f>SUBTOTAL(9,B2:B3)</f><v>30</v></c><c r="D4"><f>SUM(Sales[Amount])</f><v>0</v></c></row>'))).map(([name, bytes]) => [name, new TextDecoder().decode(bytes)]));
@@ -2231,7 +2249,8 @@ test('사용자 지정 정렬은 선택한 여러 기준과 각 방향을 전달
   first.onmousedown({ shiftKey: false, clientX: 80, clientY: 60, preventDefault() {} });
   last.onmouseenter();
   documentListeners.get('mouseup')();
-  const customSort = elements.get('toolbarCommands').children.find(item => item.id === 'customSort');
+  const findCommand = (node, id) => node.children.reduce((found, item) => found || (item.id === id ? item : findCommand(item, id)), null);
+  const customSort = findCommand(elements.get('toolbarCommands'), 'customSort');
   assert.ok(customSort, 'custom sort button is available in the toolbar');
   customSort.onclick();
   const panel = elements.get('body').children.find(item => item.id === 'sortPanel');
@@ -2262,7 +2281,8 @@ test('한국어 정렬 대화상자는 확장 셀 한도와 큰 범위 대안을
   const { document, documentListeners, elements } = runGridWebview(renderHtml(null, null, null, 'ko-KR'), { rowCount: 3, columnCount: 2 });
   const first = document.querySelector('[data-row="0"][data-column="0"]'), last = document.querySelector('[data-row="1"][data-column="1"]');
   first.onmousedown({ shiftKey: false, clientX: 80, clientY: 60, preventDefault() {} }); last.onmouseenter(); documentListeners.get('mouseup')();
-  elements.get('toolbarCommands').children.find(item => item.id === 'customSort').onclick();
+  const findCommand = (node, id) => node.children.reduce((found, item) => found || (item.id === id ? item : findCommand(item, id)), null);
+  findCommand(elements.get('toolbarCommands'), 'customSort').onclick();
   const panel = elements.get('body').children.find(item => item.id === 'sortPanel');
   assert.match(panel.children[3].children[2].textContent, /10,000셀/);
   assert.match(panel.children[3].children[2].textContent, /이 옵션을 끄세요/);
@@ -3803,7 +3823,7 @@ test('찾기 및 바꾸기는 셀 안의 모든 일치 텍스트를 바꾸고 XL
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const file = path.join(directory, 'replace.xlsx');
   const rows = '<row r="1"><c r="A1" s="1" t="inlineStr"><is><t>Alpha</t></is></c><c r="B1" t="str"><f>A1</f><v>Alpha</v></c></row>';
-  const bytes = minimalXlsx('', rows);
+  const bytes = styledMinimalXlsx('', rows);
   await fs.writeFile(file, bytes);
   const document = new JinSheetDocument(uri(file), 'xlsx', analyze(bytes), bytes, true, '');
   const style = document.getCell(0, 0, 0).style, formulas = buildReplaceEdits(document, 'alpha', 'Omega', 0);
@@ -5279,7 +5299,7 @@ test('XLSX 전체 열 복사·붙여넣기는 희소 셀만 수정하고 빈 칸
   const rows = '<row r="1"><c r="A1"><f>B1</f><v>stale</v></c><c r="B1" t="inlineStr"><is><t>replace</t></is></c></row>' +
     '<row r="2"><c r="B2" t="inlineStr"><is><t>clear me</t></is></c></row>' +
     '<row r="3"><c r="A3" s="2" t="inlineStr"><is><t>source</t></is></c><c r="B3" s="1" t="inlineStr"><is><t>replace me</t></is></c></row>';
-  const bytes = minimalXlsx('', rows), document = new JinSheetDocument(uri('/tmp/full-column-clipboard.xlsx'), 'xlsx', analyze(bytes), bytes, true, '');
+  const bytes = styledMinimalXlsx('', rows), document = new JinSheetDocument(uri('/tmp/full-column-clipboard.xlsx'), 'xlsx', analyze(bytes), bytes, true, '');
   const fullColumn = { startRow: 0, endRow: 1048575, startColumn: 0, endColumn: 0 };
   const copied = buildCopyPayload(document, fullColumn);
   assert.equal(copied.sparse, true);
@@ -5318,7 +5338,7 @@ test('XLSX 전체 열 잘라내기 이동은 값·수식·서식을 옮기고 �
   const rows = '<row r="1"><c r="A1"><f>B1</f><v>cached</v></c><c r="B1" t="inlineStr"><is><t>replace</t></is></c></row>' +
     '<row r="2"><c r="B2" t="inlineStr"><is><t>clear</t></is></c></row>' +
     '<row r="3"><c r="A3" s="2" t="inlineStr"><is><t>move</t></is></c><c r="B3" s="1" t="inlineStr"><is><t>replace</t></is></c></row>';
-  const bytes = minimalXlsx('', rows), document = new JinSheetDocument(uri('/tmp/full-column-move.xlsx'), 'xlsx', analyze(bytes), bytes, true, '');
+  const bytes = styledMinimalXlsx('', rows), document = new JinSheetDocument(uri('/tmp/full-column-move.xlsx'), 'xlsx', analyze(bytes), bytes, true, '');
   const sourceRange = { startRow: 0, endRow: 1048575, startColumn: 0, endColumn: 0 };
   assert.deepEqual(buildSparseColumnMoveEdits(document, sourceRange, 0, 0), [], 'moving a whole column back to itself changes nothing');
   const edits = buildSparseColumnMoveEdits(document, sourceRange, 0, 1);
@@ -5843,7 +5863,7 @@ test('열 자동 맞춤 버튼은 선택 열을 요청하고 유효한 응답만
 });
 
 test('워크시트 탭을 두 번 클릭해 이름을 편집하고 Enter로 확정한다', () => {
-  const { elements, messages, dispatch } = runGridWebview(renderHtml(), { kind: 'xlsx', rowCount: 2, columnCount: 2 });
+  const { document, elements, messages, dispatch } = runGridWebview(renderHtml(), { kind: 'xlsx', rowCount: 2, columnCount: 2 });
   dispatch({ type: 'model', kind: 'xlsx', readOnly: false, rowCount: 2, columnCount: 2, sheetIndex: 0, sheets: [{ name: 'Data', index: 0, visible: true }, { name: 'Hidden', index: 1, visible: false }] });
   const tab = elements.get('sheets').children[0];
   let prevented = false;
@@ -5853,9 +5873,9 @@ test('워크시트 탭을 두 번 클릭해 이름을 편집하고 Enter로 확�
   input.listeners.get('keydown')({ key: 'Enter', preventDefault() {} });
   assert.equal(prevented, true);
   assert.deepEqual(JSON.parse(JSON.stringify(messages.filter(message => message.type === 'rename-sheet').at(-1))), { type: 'rename-sheet', sheetIndex: 0, name: 'Quarter 2' });
-  elements.get('sheets').children.at(-2).onclick();
+  document.querySelector('#addSheet').onclick();
   assert.deepEqual(JSON.parse(JSON.stringify(messages.filter(message => message.type === 'add-sheet').at(-1))), { type: 'add-sheet', sheetIndex: 0 });
-  elements.get('sheets').children.at(-1).onclick();
+  document.querySelector('#deleteSheet').onclick();
   assert.deepEqual(JSON.parse(JSON.stringify(messages.filter(message => message.type === 'delete-sheet').at(-1))), { type: 'delete-sheet', sheetIndex: 0 });
 });
 

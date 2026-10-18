@@ -1711,6 +1711,8 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'COUNTIF' || name === 'SUMIF' || name === 'AVERAGEIF') {
     if ((name === 'COUNTIF' && args.length !== 2) || (name !== 'COUNTIF' && (args.length < 2 || args.length > 3))) return '#VALUE!';
+    const rangeError = argumentError(0, ...(name === 'COUNTIF' || args.length < 3 ? [] : [2]));
+    if (rangeError !== null) return rangeError;
     if (argumentError(1) !== null) return argumentError(1);
     const criteriaRange = args[0], criteria = criteriaArgument(1), sumRange = args[2] ?? criteriaRange;
     const criterionText = isTextLiteralArgument(1);
@@ -1772,6 +1774,8 @@ function callFunction(name, args, context = {}) {
     const sparseSumRange = hasSumRange ? args[0] : null;
     const sparseConditions = [];
     for (let index = firstCriteria; index < args.length; index += 2) sparseConditions.push([args[index], criteriaArgument(index + 1)]);
+    const rangeError = argumentError(...[...(hasSumRange ? [0] : []), ...sparseConditions.map((_, index) => firstCriteria + index * 2)]);
+    if (rangeError !== null) return rangeError;
     const criteriaErrors = argumentError(...sparseConditions.flatMap((_, index) => [firstCriteria + index * 2 + 1]));
     if (criteriaErrors !== null) return criteriaErrors;
     if (sparseConditions.some(([range]) => isFormulaRange(range)) || isFormulaRange(sparseSumRange)) {

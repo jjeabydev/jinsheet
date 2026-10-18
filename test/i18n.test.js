@@ -24,6 +24,8 @@ test("Korean VS Code uses Korean UI; other display languages use English", () =>
   assert.match(translateDiagnostic("행 높이는 한 번에 10,000행 이하 또는 전체 행에 적용하세요.", "en"), /10,000 rows/);
   assert.match(translateDiagnostic("분산형 차트의 첫 번째 열에는 숫자 X 값을 선택하세요.", "en"), /numeric X values/);
   assert.match(translateDiagnostic("분산형 차트에는 숫자 X 값이 필요합니다.", "en"), /numeric X values/);
+  assert.equal(translateDiagnostic("지원하지 않는 OOXML 구성요소가 있습니다: xl/customXml/item1.xml", "en"), "This workbook contains an unsupported OOXML part (xl/customXml/item1.xml) and is read-only to protect its contents.");
+  assert.equal(translateDiagnostic("지원하지 않는 OOXML 구성요소가 있습니다: xl/customXml/item1.xml", "ko"), "지원하지 않는 OOXML 구성요소가 있습니다: xl/customXml/item1.xml");
   assert.equal(message("auto-fit-column", "en"), "Auto-fit column");
   assert.equal(message("auto-fit-column", "ko"), "열 너비 자동 맞춤");
   assert.equal(message("sort-ascending", "en"), "Sort A→Z");
@@ -57,6 +59,12 @@ test("every existing UI message is available in English and Korean", () => {
   assert.equal(message("show-menu", "en"), "Show menu");
   assert.equal(message("hide-menu", "ko"), "메뉴 접기");
   assert.equal(message("show-menu", "ko"), "메뉴 펼치기");
+  assert.equal(message("create-workbook", "en"), "Create workbook");
+  assert.equal(message("create-workbook", "ko"), "통합 문서 만들기");
+  assert.equal(message("replace-workbook", "en"), "Replace");
+  assert.equal(message("replace-workbook", "ko"), "바꾸기");
+  assert.match(message("error-custom-number-format", "en"), /scientific notation/);
+  assert.match(message("error-custom-number-format", "ko"), /지수 표기/);
   for (const name of Object.keys(ICON_SET_LENGTHS)) {
     const key = "conditional-format-icon-style-" + name;
     assert.notEqual(messagesFor("en")[key], key, name + " has no English label");

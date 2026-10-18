@@ -3,10 +3,23 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { unzipSync, zipSync } = require('../vendor/node_modules/fflate');
 const { SaxesParser } = require('../vendor/node_modules/saxes');
-const { analyze, calculateChartPreviews, formatCellValue, inspectZip, patchCell, patchCells, patchColumnWidths, patchRowHeights, patchRowHeightValues, patchPrintSettings, patchPrintArea, patchDefinedName, patchPrintTitles, patchHeaderFooter, patchPageBreaks, patchAutoFilters, patchFilterVisibility, patchHiddenRows, patchHiddenColumns, patchOutlineGroups, patchFreezePanes, patchMergedCells, patchAddTable, patchTableStyles, patchTableRanges, patchTableTotals, patchAddChart, patchChartMetadata, patchChartPlacement, patchChartSource, patchDeleteChart, patchClearConditionalFormats, patchDeleteConditionalFormatRule, patchMoveConditionalFormatRule, patchEditConditionalFormatRule, patchIconSetConditionalFormat, patchCellValueConditionalFormat, patchDuplicateValuesConditionalFormat, patchSheetName, patchAddSheet, patchDeleteSheet, patchMoveSheet, planTableExpansion, prepareTableExpansion, translateFormulaReferences, transformStructure } = require('../src/xlsx');
+const { analyze, createBlankWorkbook, calculateChartPreviews, formatCellValue, inspectZip, patchCell, patchCells, patchColumnWidths, patchRowHeights, patchRowHeightValues, patchPrintSettings, patchPrintArea, patchDefinedName, patchPrintTitles, patchHeaderFooter, patchPageBreaks, patchAutoFilters, patchFilterVisibility, patchHiddenRows, patchHiddenColumns, patchOutlineGroups, patchFreezePanes, patchMergedCells, patchAddTable, patchTableStyles, patchTableRanges, patchTableTotals, patchAddChart, patchChartMetadata, patchChartPlacement, patchChartSource, patchDeleteChart, patchClearConditionalFormats, patchDeleteConditionalFormatRule, patchMoveConditionalFormatRule, patchEditConditionalFormatRule, patchIconSetConditionalFormat, patchCellValueConditionalFormat, patchDuplicateValuesConditionalFormat, patchSheetName, patchAddSheet, patchSheetVisibility, patchDeleteSheet, patchMoveSheet, planTableExpansion, prepareTableExpansion, translateFormulaReferences, transformStructure } = require('../src/xlsx');
 const { createFormulaCalculator, evaluateFormula } = require('../src/formula');
 const { chartPrintGeometry } = require('../src/chart-print');
 const { ICON_SET_LENGTHS } = require('../src/auto-filter');
+
+test('새 빈 XLSX 통합 문서는 JinSheet에서 열고 값 저장을 시작할 수 있다', () => {
+  const bytes = createBlankWorkbook(), model = analyze(bytes);
+  assert.equal(model.writable, true, model.readOnlyReason);
+  assert.equal(model.sheets.length, 1);
+  assert.equal(model.sheets[0].name, 'Sheet1');
+  assert.equal(model.activeSheetIndex, 0);
+  assert.equal(model.sheets[0].cells.size, 0);
+  const edited = patchCell(model, 0, 'A1', 'First value');
+  const reopened = analyze(edited.bytes);
+  assert.equal(reopened.writable, true, reopened.readOnlyReason);
+  assert.equal(reopened.sheets[0].cells.get('A1').value, 'First value');
+});
 
 test('숫자 셀 비교 조건부 서식은 범위·차등 채우기를 생성하고 저장 후 다시 계산한다', () => {
   const original = analyze(fixture());
@@ -39,6 +52,7 @@ test('숫자 셀 비교 조건부 서식은 범위·차등 채우기를 생성�
   assert.deepEqual(require('../src/xlsx').conditionalStyleForCell(less.model.sheets[0], 0, 1, less.model.sheets[0].cells.get('B1'), () => 42, evaluateFormula), { fill: '#F4CCCC' }, 'between uses an inclusive normalized interval');
   for (const [operator, values, color] of [['unknown', [1]], ['between', [1]], ['equal', [Infinity]], ['equal', [1], 'red']]) assert.throws(() => patchCellValueConditionalFormat(original, 0, { top: 0, bottom: 0, left: 0, right: 0 }, operator, values, color), /숫자 조건부 서식 설정이 유효하지 않습니다/);
 });
+
 
 test('수식 안의 Excel 오류 리터럴은 값으로 전파되고 선택되지 않은 분기에는 전파되지 않는다', () => {
   for (const error of ['#NULL!', '#DIV/0!', '#VALUE!', '#REF!', '#NAME?', '#NUM!', '#N/A', '#N/A!', '#CALC!', '#CIRC!', '#SPILL!', '#GETTING_DATA']) {
@@ -1108,6 +1122,13 @@ assert.equal(evaluateFormula('NOT(FALSE)'), true);
   assert.equal(evaluateFormula('COUNTIF(A1:A3,NA())', errorCriteriaContext), '#N/A', 'an actual error used as the criterion propagates');
   assert.equal(evaluateFormula('COUNTIFS(A1:A3,"#N/A")', errorCriteriaContext), 2, 'COUNTIFS preserves error-text criterion typing');
   assert.equal(evaluateFormula('COUNTIFS(A1:A3,NA())', errorCriteriaContext), '#N/A', 'COUNTIFS propagates an actual error criterion');
+  for (const formula of [
+    'COUNTIF(NA(),">0")', 'SUMIF(NA(),">0")', 'AVERAGEIF(NA(),">0")',
+    'COUNTIFS(NA(),">0")', 'COUNTIFS(A1:A2,">0",NA(),">0")',
+    'SUMIFS(NA(),A1:A2,">0")', 'AVERAGEIFS(NA(),A1:A2,">0")',
+    'MAXIFS(NA(),A1:A2,">0")', 'MINIFS(NA(),A1:A2,">0")',
+    'SUMIFS(A1:A2,NA(),">0")', 'AVERAGEIFS(A1:A2,NA(),">0")'
+  ]) assert.equal(evaluateFormula(formula, { getCell: row => row === 0 ? 0 : 0 }), '#N/A', `${formula} propagates errors passed as range arguments`);
   const sumErrorCells = new Map([
     ['A1', { address: 'A1', row: 0, column: 0, value: '#N/A', kind: 'error' }],
     ['A2', { address: 'A2', row: 1, column: 0, value: '#N/A', kind: 'string' }],
@@ -2600,6 +2621,32 @@ test('새 워크시트는 관계·콘텐츠 형식·활성 탭을 갱신하고 �
   assert.equal(patchAddSheet(occupied).model.sheets[3].name, 'Sheet4');
 });
 
+test('시트 숨김과 해제는 표시 상태와 활성 탭을 함께 갱신한다', () => {
+  let model = analyze(fixture());
+  let workbookXml = new TextDecoder().decode(model.files['xl/workbook.xml']).replace(' state="hidden"', '');
+  model = analyze(zipSync({ ...model.files, 'xl/workbook.xml': new TextEncoder().encode(workbookXml) }));
+  model = patchAddSheet(model).model;
+  workbookXml = new TextDecoder().decode(model.files['xl/workbook.xml']).replace(/<bookViews>[\s\S]*?<\/bookViews>/, '');
+  model = analyze(zipSync({ ...model.files, 'xl/workbook.xml': new TextEncoder().encode(workbookXml) }));
+  const hidden = patchSheetVisibility(model, 0, false);
+  assert.equal(hidden.model.activeSheetIndex, 1);
+  assert.match(new TextDecoder().decode(hidden.model.files['xl/workbook.xml']), /<workbookView activeTab="1"\/>/);
+  const reopenedHidden = analyze(hidden.bytes);
+  assert.equal(reopenedHidden.sheets[0].visible, false);
+  assert.equal(reopenedHidden.activeSheetIndex, 1);
+  const shown = patchSheetVisibility(reopenedHidden, 0, true);
+  assert.equal(shown.model.activeSheetIndex, 0);
+  assert.match(new TextDecoder().decode(shown.model.files['xl/workbook.xml']), /activeTab="0"/);
+  assert.equal(analyze(shown.bytes).activeSheetIndex, 0);
+  const selfClosingViewsXml = new TextDecoder().decode(model.files['xl/workbook.xml']).replace('<sheets>', '<bookViews/><sheets>');
+  const selfClosingViews = analyze(zipSync({ ...model.files, 'xl/workbook.xml': new TextEncoder().encode(selfClosingViewsXml) }));
+  const hiddenWithoutView = patchSheetVisibility(selfClosingViews, 0, false);
+  const normalizedWorkbook = new TextDecoder().decode(hiddenWithoutView.model.files['xl/workbook.xml']);
+  assert.equal((normalizedWorkbook.match(/<bookViews>/g) || []).length, 1);
+  assert.match(normalizedWorkbook, /<bookViews><workbookView activeTab="1"\/><\/bookViews>/);
+  assert.equal(hiddenWithoutView.model.activeSheetIndex, 1);
+});
+
 test('시트 순서 변경은 정의된 이름 범위와 활성 탭을 갱신하고 시트 데이터를 보존한다', () => {
   const files = Object.fromEntries(Object.entries(unzipSync(fixture())).map(([path, bytes]) => [path, new TextDecoder().decode(bytes)]));
   files['xl/workbook.xml'] = files['xl/workbook.xml'].replace('<sheets>', '<bookViews><workbookView activeTab="0"/></bookViews><sheets>').replace('</workbook>', '<definedNames><definedName name="LocalRef" localSheetId="0">$A$1</definedName></definedNames></workbook>');
@@ -2609,6 +2656,8 @@ test('시트 순서 변경은 정의된 이름 범위와 활성 탭을 갱신하
   assert.deepEqual(moved.model.sheets.map(sheet => sheet.name), ['Hidden', 'Data']);
   const workbook = new TextDecoder().decode(moved.model.files['xl/workbook.xml']);
   assert.match(workbook, /activeTab="1"/);
+  assert.equal(original.activeSheetIndex, 0);
+  assert.equal(moved.model.activeSheetIndex, 1);
   assert.match(workbook, /localSheetId="1"/);
   assert.equal(new TextDecoder().decode(moved.model.files['xl/worksheets/sheet1.xml']), before);
   assert.equal(patchMoveSheet(moved.model, 0, 0).model, moved.model);
@@ -3665,13 +3714,22 @@ test('데이터 유효성 적용 범위와 원본 수식은 행·열 편집을 �
   assert.deepEqual(insertedRows.sheets[1].dataValidations[0].source, { sheetName: 'Data', top: 1, bottom: 1, left: 0, right: 0 });
   assert.match(insertedRows.sheets[1].xml, /<formula1>Data!\$A\$2<\/formula1>/);
 
-  const deletedColumn = transformStructure(insertedRows, { sheetIndex: 0, axis: 'column', action: 'delete', index: 0 }).model;
+  const deletedColumnResult = transformStructure(insertedRows, { sheetIndex: 0, axis: 'column', action: 'delete', index: 0 });
+  const deletedColumn = deletedColumnResult.model;
   assert.equal(deletedColumn.writable, true, deletedColumn.readOnlyReason);
   assert.deepEqual(deletedColumn.sheets[0].dataValidations[0].ranges, [{ top: 1, bottom: 3, left: 0, right: 0 }]);
   assert.deepEqual(deletedColumn.sheets[0].dataValidations[0].formulas, ['#REF!', '#REF!+2']);
   assert.deepEqual(deletedColumn.sheets[0].dataValidations[1].ranges, [{ top: 1, bottom: 1, left: 1, right: 1 }, { top: 2, bottom: 3, left: 2, right: 2 }]);
   assert.equal(deletedColumn.sheets[1].dataValidations[0].sourceFormula, '#REF!');
   assert.equal(deletedColumn.sheets[1].dataValidations[0].source, null);
+
+  const reopenedDeletion = analyze(deletedColumnResult.bytes);
+  assert.equal(reopenedDeletion.writable, true, reopenedDeletion.readOnlyReason);
+  assert.deepEqual(reopenedDeletion.sheets[0].dataValidations[0].ranges, [{ top: 1, bottom: 3, left: 0, right: 0 }]);
+  assert.deepEqual(reopenedDeletion.sheets[0].dataValidations[0].formulas, ['#REF!', '#REF!+2']);
+  assert.deepEqual(reopenedDeletion.sheets[0].dataValidations[1].ranges, [{ top: 1, bottom: 1, left: 1, right: 1 }, { top: 2, bottom: 3, left: 2, right: 2 }]);
+  assert.equal(reopenedDeletion.sheets[1].dataValidations[0].sourceFormula, '#REF!');
+  assert.equal(reopenedDeletion.sheets[1].dataValidations[0].source, null);
 
   const singleFiles = unzipSync(fixture());
   singleFiles['xl/worksheets/sheet1.xml'] = encode(new TextDecoder().decode(singleFiles['xl/worksheets/sheet1.xml']).replace('</worksheet>', '<dataValidations count="1"><dataValidation type="list" sqref="A1"><formula1>"Yes,No"</formula1></dataValidation></dataValidations></worksheet>'));
@@ -3883,6 +3941,10 @@ test('XLSX standard date/percent and common custom formats affect display only',
   assert.equal(date.styleProperties, null);
   assert.equal(formatCellValue(date, 'en'), '1/1/24');
   assert.equal(formatCellValue(date, 'ko'), '2024-01-01');
+  const localeDate = (formatCode, language) => formatCellValue({ value: '45658.5', kind: 'number', numFmtId: 167, formatCode }, language);
+  assert.equal(localeDate('[$-409]dddd, mmmm d, yyyy h:mm AM/PM', 'ko'), 'Wednesday, January 1, 2025 12:00 PM', 'an explicit English LCID overrides the Korean VS Code language');
+  assert.equal(localeDate('[$-0409]dddd, mmmm d, yyyy h:mm AM/PM', 'ko'), 'Wednesday, January 1, 2025 12:00 PM', 'four-digit English LCIDs resolve to the same locale');
+  assert.equal(localeDate('[$-412]yyyy"년" mmmm d"일"', 'en'), '2025년 1월 1일', 'an explicit Korean LCID overrides the English fallback language');
   assert.equal(formatCellValue({ value: '60', kind: 'number', numFmtId: 14 }, 'en'), '2/29/00');
   assert.equal(percent.value, '0.125');
   assert.equal(formatCellValue(percent, 'en'), '12.50%');
@@ -3894,7 +3956,63 @@ test('XLSX standard date/percent and common custom formats affect display only',
   assert.equal(formatCellValue({ value: '1234.5', kind: 'number', numFmtId: 7 }, 'en'), '$1,234.50');
   assert.equal(formatCellValue({ value: '1234.5', kind: 'number', numFmtId: 8 }, 'en'), '$1,234.50');
   assert.equal(formatCellValue({ value: '-1234.5', kind: 'number', numFmtId: 39 }, 'en'), '(1,234.50)');
-  assert.equal(formatCellValue({ value: '1234.5', kind: 'number', numFmtId: 166, formatCode: '0 \"days\"' }, 'en'), '1234.5');
+  assert.equal(formatCellValue({ value: '1234.5', kind: 'number', numFmtId: 166, formatCode: '0 \"days\"' }, 'en'), '1235 days');
+  const scientificCell = (value, formatCode) => formatCellValue({ value: String(value), kind: 'number', numFmtId: 167, formatCode }, 'en');
+  assert.equal(scientificCell(1234, '0.00E+00'), '1.23E+03');
+  assert.equal(scientificCell(1234, '#.##E+00'), '1.23E+03', 'optional integer and decimal placeholders still normalize scientific notation');
+  assert.equal(formatCellValue({ value: '1234567.8', kind: 'number', numFmtId: 167, formatCode: '#,##0.0,' }, 'en'), '1,234.6', 'a trailing scaling comma divides the value by one thousand');
+  assert.equal(formatCellValue({ value: '1234567.8', kind: 'number', numFmtId: 167, formatCode: '0.00,,' }, 'en'), '1.23', 'two trailing scaling commas divide the value by one million');
+  assert.equal(formatCellValue({ value: '-1234567.8', kind: 'number', numFmtId: 167, formatCode: '#,##0.0,;(#,##0.0,)' }, 'en'), '(1,234.6)', 'negative sections retain scaling and parentheses');
+  assert.equal(formatCellValue({ value: '1.25', kind: 'number', numFmtId: 167, formatCode: '# ?/?' }, 'en'), '1 1/4', 'fraction formats render mixed numbers');
+  assert.equal(formatCellValue({ value: '1.25', kind: 'number', numFmtId: 167, formatCode: '# ?/4' }, 'en'), '1 1/4', 'a fixed denominator keeps the requested quarter precision');
+  assert.equal(formatCellValue({ value: '0.25', kind: 'number', numFmtId: 167, formatCode: '# ?/8' }, 'en'), '2/8', 'fixed denominator fractions do not reduce the requested denominator');
+  assert.equal(formatCellValue({ value: '1.3', kind: 'number', numFmtId: 167, formatCode: '# ?/16' }, 'en'), '1 5/16', 'fixed denominators round to their nearest numerator');
+  assert.equal(formatCellValue({ value: '1.25', kind: 'number', numFmtId: 167, formatCode: '# ?/2' }, 'en'), '1', 'half ties use even numerator rounding');
+  assert.equal(formatCellValue({ value: '0.25', kind: 'number', numFmtId: 167, formatCode: '# ?/?' }, 'en'), '1/4', 'fraction formats omit a zero whole part');
+  assert.equal(formatCellValue({ value: '-1.25', kind: 'number', numFmtId: 167, formatCode: '# ?/?' }, 'en'), '-1 1/4', 'fraction formats preserve negative values');
+  assert.equal(formatCellValue({ value: '-1.25', kind: 'number', numFmtId: 167, formatCode: '# ?/?;(# ?/?)' }, 'en'), '(1 1/4)', 'negative fraction sections preserve their parentheses');
+  assert.equal(formatCellValue({ value: '1.25', kind: 'number', numFmtId: 167, formatCode: '?/?' }, 'en'), '5/4', 'fraction formats without a whole placeholder use improper fractions');
+  assert.equal(formatCellValue({ value: '3.14159', kind: 'number', numFmtId: 167, formatCode: '# ??/??' }, 'en'), '3 14/99', 'additional denominator placeholders improve fractional precision');
+  assert.equal(formatCellValue({ value: '1234.5', kind: 'number', numFmtId: 167, formatCode: '#,##0.00 "kg"' }, 'en'), '1,234.50 kg', 'a quoted unit suffix is appended without changing the cell value');
+  assert.equal(formatCellValue({ value: '1234.5', kind: 'number', numFmtId: 167, formatCode: '"Qty "0' }, 'en'), 'Qty 1235', 'a quoted prefix is preserved');
+  assert.equal(formatCellValue({ value: '-12.5', kind: 'number', numFmtId: 167, formatCode: '0.0 "kg";(0.0 "kg")' }, 'en'), '(12.5 kg)', 'a negative section formats the absolute value and keeps its literal suffix');
+  assert.equal(formatCellValue({ value: '-12.5', kind: 'number', numFmtId: 167, formatCode: '#,##0.00;\\(#,##0.00\\);"zero";@' }, 'en'), '(12.50)', 'escaped negative parentheses round-trip from LibreOffice without a minus sign');
+assert.equal(formatCellValue({ value: '-0.125', kind: 'number', numFmtId: 167, formatCode: '0.00%;(0.00%)' }, 'en'), '(12.50%)', 'negative percent sections keep percent scaling inside parentheses');
+assert.equal(formatCellValue({ value: '-0.125', kind: 'number', numFmtId: 167, formatCode: '0.00%;\\(0.00%\\)' }, 'en'), '(12.50%)', 'escaped negative percent punctuation keeps percent scaling');
+  assert.equal(formatCellValue({ value: '0', kind: 'number', numFmtId: 167, formatCode: '0.00;(0.00);"zero"' }, 'en'), 'zero', 'a dedicated zero section can contain a literal');
+  assert.equal(scientificCell(-1234, '0.00E+00;(0.00E+00)'), '(1.23E+03)');
+  assert.equal(scientificCell(0, '0.0E+00;0.0E+00;"zero"'), 'zero');
+  assert.equal(scientificCell(1234, '0.00E+00;[Red](0.00E+00);"zero";@'), '1.23E+03', 'the fourth text section does not prevent numeric scientific formatting');
+  assert.equal(scientificCell(1234, '"~"0.0E+00" units"'), '~1.2E+03 units', 'quoted literals around the exponent are preserved');
+  const scientificWorkbook = patchCells(analyze(fixture({ formatted: true })), [{ sheetIndex: 0, address: 'A1', value: '1234', kind: 'number', numberFormatId: 168, numberFormatCode: '0.00E+00' }]);
+  const scientificReopened = analyze(scientificWorkbook.bytes), scientificSavedCell = scientificReopened.sheets[0].cells.get('A1');
+  assert.equal(scientificSavedCell.value, '1234', 'scientific formatting does not replace the stored number');
+  assert.equal(scientificSavedCell.formatCode, '0.00E+00');
+  assert.equal(formatCellValue(scientificSavedCell, 'en'), '1.23E+03', 'custom scientific display survives XLSX save and reopen');
+  const scaledWorkbook = patchCells(analyze(fixture({ formatted: true })), [{ sheetIndex: 0, address: 'A1', value: '1234567.8', kind: 'number', numberFormatId: 169, numberFormatCode: '#,##0.0,' }]);
+  const scaledReopened = analyze(scaledWorkbook.bytes).sheets[0].cells.get('A1');
+  assert.equal(scaledReopened.value, '1234567.8', 'scaling display formats keep the stored value unchanged');
+  assert.equal(scaledReopened.formatCode, '#,##0.0,');
+  assert.equal(formatCellValue(scaledReopened, 'en'), '1,234.6', 'the scaling comma survives XLSX serialization and reopen');
+  const fractionWorkbook = patchCells(analyze(fixture({ formatted: true })), [{ sheetIndex: 0, address: 'A1', value: '1.25', kind: 'number', numberFormatId: 170, numberFormatCode: '# ?/?' }]);
+  const fractionReopened = analyze(fractionWorkbook.bytes).sheets[0].cells.get('A1');
+  assert.equal(fractionReopened.value, '1.25', 'fraction display formats keep the stored value unchanged');
+  assert.equal(fractionReopened.formatCode, '# ?/?');
+  assert.equal(formatCellValue(fractionReopened, 'en'), '1 1/4', 'the fraction format survives XLSX serialization and reopen');
+  const fixedFractionWorkbook = patchCells(analyze(fixture({ formatted: true })), [{ sheetIndex: 0, address: 'A1', value: '1.25', kind: 'number', numberFormatId: 172, numberFormatCode: '# ?/8' }]);
+  const fixedFractionReopened = analyze(fixedFractionWorkbook.bytes).sheets[0].cells.get('A1');
+  assert.equal(fixedFractionReopened.value, '1.25');
+  assert.equal(fixedFractionReopened.formatCode, '# ?/8');
+  assert.equal(formatCellValue(fixedFractionReopened, 'en'), '1 2/8', 'the fixed denominator survives XLSX serialization and reopen');
+  const unitWorkbook = patchCells(analyze(fixture({ formatted: true })), [{ sheetIndex: 0, address: 'A1', value: '1234.5', kind: 'number', numberFormatId: 169, numberFormatCode: '#,##0.00 "kg"' }]);
+  const unitReopened = analyze(unitWorkbook.bytes).sheets[0].cells.get('A1');
+  assert.equal(unitReopened.value, '1234.5');
+  assert.equal(formatCellValue(unitReopened, 'en'), '1,234.50 kg', 'quoted unit suffix survives XLSX save and reopen');
+  const libreOfficeStyle = '#,##0.00;\\(#,##0.00\\);"zero";@';
+  const escapedParenthesesWorkbook = patchCells(analyze(fixture({ formatted: true })), [{ sheetIndex: 0, address: 'A1', value: '-12.5', kind: 'number', numberFormatId: 171, numberFormatCode: libreOfficeStyle }]);
+  const escapedParenthesesCell = analyze(escapedParenthesesWorkbook.bytes).sheets[0].cells.get('A1');
+  assert.equal(escapedParenthesesCell.formatCode, libreOfficeStyle, 'escaped negative-section punctuation survives XLSX serialization');
+  assert.equal(formatCellValue(escapedParenthesesCell, 'en'), '(12.50)', 'escaped negative-section punctuation renders like LibreOffice');
   const customDate = model.sheets[0].cells.get('D1');
   assert.equal(customDate.numFmtId, 164);
   assert.equal(customDate.formatCode, 'yyyy-mm-dd');
@@ -4612,6 +4730,53 @@ test('알 수 없는 패키지 구성요소는 표시를 허용하되 저장을 
   assert.equal(model.sheets[0].cells.get('A1').value, 'before');
   assert.equal(model.writable, false);
   assert.match(model.readOnlyReason, /지원하지 않는 OOXML/);
+});
+
+test('서식 또는 확장 요소가 있는 공유 문자열은 읽기 전용으로 보호한다', () => {
+  const withSharedString = (item, siAttributes = '') => {
+    const files = unzipSync(fixture());
+    files['xl/sharedStrings.xml'] = new TextEncoder().encode('<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1" uniqueCount="1"><si' + (siAttributes ? ' ' + siAttributes : '') + '>' + item + '</si></sst>');
+    files['xl/_rels/workbook.xml.rels'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/_rels/workbook.xml.rels']).replace('</Relationships>', '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>'));
+    files['xl/worksheets/sheet1.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/worksheets/sheet1.xml']).replace('<c r="A1" t="inlineStr"><is><t>before</t></is></c>', '<c r="A1" t="s"><v>0</v></c>'));
+    return zipSync(files);
+  };
+
+  const plain = analyze(withSharedString('<t>before</t>'));
+  assert.equal(plain.writable, true, plain.readOnlyReason);
+  assert.equal(plain.sheets[0].cells.get('A1').value, 'before');
+  assert.equal(analyze(patchCell(plain, 0, 'A1', 'after').bytes).sheets[0].cells.get('A1').value, 'after');
+
+  const spaced = analyze(withSharedString('<t xml:space="preserve"> before </t>'));
+  assert.equal(spaced.writable, true, spaced.readOnlyReason);
+  assert.equal(spaced.sheets[0].cells.get('A1').value, ' before ');
+  const editedNeighbor = analyze(patchCell(spaced, 0, 'B1', '43').bytes);
+  assert.equal(editedNeighbor.sheets[0].cells.get('A1').value, ' before ', 'editing another cell preserves significant shared-string spaces');
+  assert.equal(editedNeighbor.writable, true, editedNeighbor.readOnlyReason);
+
+  for (const [item, siAttributes] of [
+    ['<r><rPr><b/></rPr><t>be</t></r><r><t>fore</t></r>', ''],
+    ['<t>before</t><phoneticPr fontId="0" type="noConversion"/>', ''],
+    ['<t custom="metadata">before</t>', ''],
+    ['<t>before</t>', 'custom="metadata"']
+  ]) {
+    const bytes = withSharedString(item, siAttributes), rich = analyze(bytes);
+    assert.equal(rich.sheets[0].cells.get('A1').value, 'before', 'the displayed text remains readable');
+    assert.equal(rich.writable, false);
+    assert.match(rich.readOnlyReason, /서식 또는 확장이 포함된 공유 문자열/);
+    assert.throws(() => patchCell(rich, 0, 'A1', 'changed'), /현재 저장을 지원하지 않습니다/);
+    assert.deepEqual(Buffer.from(rich.bytes), Buffer.from(bytes), 'read-only guard leaves the source package unchanged');
+  }
+});
+
+test('테두리 변의 확장 메타데이터는 테두리 서식 편집에서 보존되지 않으므로 읽기 전용으로 보호한다', () => {
+  const files = unzipSync(fixture({ formatted: true }));
+  const originalBorder = '<left style="thin"><color rgb="FFABCDEF"/></left>';
+  files['xl/styles.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/styles.xml']).replace(originalBorder, '<left style="thin"><color rgb="FFABCDEF"/><extLst><ext uri="urn:test"/></extLst></left>'));
+  const bytes = zipSync(files), model = analyze(bytes);
+  assert.equal(model.writable, false);
+  assert.match(model.readOnlyReason, /테두리 서식.*현재 저장을 지원하지 않습니다/);
+  assert.throws(() => patchCells(model, [{ sheetIndex: 0, address: 'D1', value: model.sheets[0].cells.get('D1').value, kind: 'number', border: { left: { line: 'thick', color: '#112233' } } }]), /테두리 서식/);
+  assert.deepEqual(Buffer.from(model.bytes), Buffer.from(bytes), 'the source workbook remains byte-for-byte unchanged');
 });
 
 test('구조 편집에서 참조를 갱신할 수 없는 워크시트 메타데이터는 읽기 전용으로 보호한다', () => {
@@ -6095,6 +6260,42 @@ test('행·열 구조 변경은 Excel 표의 저장된 정렬 범위를 갱신�
   const narrowedColumns = patchTableRanges(original, [{ sheetIndex: 0, tableName: 'Sales', range: { top: 0, bottom: 2, left: 0, right: 0 } }]).model;
   tableXml = new TextDecoder().decode(narrowedColumns.files['xl/tables/table1.xml']);
   assert.doesNotMatch(tableXml, /<sortState\b/);
+});
+
+test('행·열 구조 변경은 워크시트 자동 필터의 별도 정렬 상태 참조를 갱신한다', () => {
+  const files = unzipSync(fixture());
+  const sheet1 = 'xl/worksheets/sheet1.xml', sheet2 = 'xl/worksheets/sheet2.xml';
+  files[sheet1] = new TextEncoder().encode(new TextDecoder().decode(files[sheet1]).replace('</worksheet>', '<autoFilter ref="A1:C3"/><sortState ref="A1:B3"><sortCondition ref="B2:B3" descending="1"/></sortState></worksheet>'));
+  files[sheet2] = new TextEncoder().encode(new TextDecoder().decode(files[sheet2]).replace('</worksheet>', '<sortState ref="C5:D8"><sortCondition ref="D6:D8"/></sortState></worksheet>'));
+  const original = analyze(zipSync(files));
+  assert.equal(original.writable, true, original.readOnlyReason);
+
+  const inserted = transformStructure(original, { sheetIndex: 0, axis: 'row', action: 'insert', index: 1 });
+  const insertedSheet = new TextDecoder().decode(inserted.model.files[sheet1]);
+  assert.match(insertedSheet, /<sortState ref="A1:B4"><sortCondition ref="B2:B4" descending="1"\/>/);
+  assert.deepEqual(Buffer.from(inserted.model.files[sheet2]), Buffer.from(original.files[sheet2]), 'another sheet sort range is unchanged');
+  const reopened = analyze(inserted.bytes);
+  assert.equal(reopened.writable, true, reopened.readOnlyReason);
+  assert.match(reopened.sheets[0].xml, /<sortState ref="A1:B4"><sortCondition ref="B2:B4" descending="1"\/>/);
+
+  const deleted = transformStructure(inserted.model, { sheetIndex: 0, axis: 'column', action: 'delete', index: 1 });
+  assert.doesNotMatch(new TextDecoder().decode(deleted.model.files[sheet1]), /<sortState\b/);
+  assert.equal(analyze(deleted.bytes).writable, true);
+});
+
+test('지원하지 않거나 행 한도를 넘는 워크시트 정렬 상태는 구조 변경 시 보존을 위해 거부한다', () => {
+  const boundaryFiles = unzipSync(fixture()), sheetPath = 'xl/worksheets/sheet1.xml';
+  boundaryFiles[sheetPath] = new TextEncoder().encode(new TextDecoder().decode(boundaryFiles[sheetPath]).replace('</worksheet>', '<sortState ref="A1048575:B1048576"><sortCondition ref="B1048576"/></sortState></worksheet>'));
+  const boundaryBytes = zipSync(boundaryFiles), boundary = analyze(boundaryBytes);
+  assert.equal(boundary.writable, true, boundary.readOnlyReason);
+  assert.throws(() => transformStructure(boundary, { sheetIndex: 0, axis: 'row', action: 'insert', index: 1048575 }), /정렬 범위가 워크시트 한도를 벗어납니다/);
+  assert.deepEqual(Buffer.from(boundary.bytes), Buffer.from(boundaryBytes), 'a rejected boundary edit leaves the workbook unchanged');
+
+  const unsupportedFiles = unzipSync(fixture());
+  unsupportedFiles[sheetPath] = new TextEncoder().encode(new TextDecoder().decode(unsupportedFiles[sheetPath]).replace('</worksheet>', '<sortState unknownOption="1" ref="A1:B2"><sortCondition ref="B2"/></sortState></worksheet>'));
+  const unsupported = analyze(zipSync(unsupportedFiles));
+  assert.equal(unsupported.writable, true, unsupported.readOnlyReason);
+  assert.throws(() => transformStructure(unsupported, { sheetIndex: 0, axis: 'row', action: 'insert', index: 0 }), /지원하지 않는 워크시트 정렬 상태/);
 });
 
 test('자동 확장은 붙어 있는 표를 합치지 않고 겹치는 두 방향 확장을 생략한다', () => {

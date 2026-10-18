@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.7.0 / 2026-10-18
+- Add a command to create a new blank XLSX workbook, confirm before replacing an existing file, and open the workbook for editing.
+- Collapse the complete toolbar to prioritize worksheet space; add Show menu shortcuts and an outlined Find result that preserves cell formatting.
+- Extend custom number formats with scientific notation, fractions, quoted text, scaling commas, and additional date/time patterns.
+- Improve XLSX formula argument error handling and preserve workbook state across worksheet changes, edits, and save/reopen flows.
+- Open unsupported XLSX package parts read-only with a localized explanation to protect workbook contents.
+- Add regression coverage for the basic new-workbook edit, save, and reopen flow.
+
 ## 1.5.0 / 2026-10-18
 - 범위·배열의 텍스트 및 수학 함수와 산술·비교·문자열 연산을 요소별로 계산하고 동적 배열로 표시합니다. 단일 값은 각 위치에 적용하며 배열 모양이 다르면 오류를 반환합니다.
 - `CHOOSE`, `IFS`, `SWITCH`가 범위별 조건과 분기를 계산해 spill 결과를 표시합니다. 셀별 오류와 `SWITCH`의 기본 분기를 유지합니다.

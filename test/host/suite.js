@@ -5,8 +5,8 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { performance } = require('node:perf_hooks');
-const { zipSync } = require('../../vendor/node_modules/fflate');
-const { analyze, patchColumnWidths, patchOutlineGroups, patchAddChart, patchAddTable, patchAutoFilters, patchPrintArea, patchPrintSettings, patchPrintTitles, patchHeaderFooter } = require('../../src/xlsx');
+const { unzipSync, zipSync } = require('../../vendor/node_modules/fflate');
+const { analyze, createBlankWorkbook, patchColumnWidths, patchOutlineGroups, patchAddSheet, patchSheetVisibility, patchAddChart, patchAddTable, patchAutoFilters, patchPrintArea, patchPrintSettings, patchPrintTitles, patchHeaderFooter } = require('../../src/xlsx');
 const { onePagePdf } = require('../helpers/pdf-fixture');
 const { DEFAULT_PRINT_SETTINGS, renderPrintDocument } = require('../../src/printing');
 const { defaultHeaderFooter } = require('../../src/header-footer');
@@ -373,6 +373,42 @@ suite('JinSheet Extension Host', () => {
     }
   });
 
+  test('Chromium Webview explains unsupported XLSX parts, blocks editing and leaves the file unchanged', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-unsupported-xlsx-readonly-'));
+    const file = path.join(directory, 'unsupported-part.xlsx');
+    const files = unzipSync(await fs.readFile(path.join(__dirname, '..', 'fixtures', 'JinSheet-Sample.xlsx')));
+    files['xl/customXml/item1.xml'] = new TextEncoder().encode('<custom/>');
+    const original = zipSync(files);
+    await fs.writeFile(file, original);
+    let devtools;
+    try {
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      const evaluate = async expression => {
+        const response = await devtools.send('Runtime.evaluate', { expression, contextId: devtools.contextId, returnByValue: true, awaitPromise: true });
+        if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+        return response.result?.value;
+      };
+      const waitFor = async (expression, message) => {
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline && !await evaluate(expression)) await new Promise(resolve => setTimeout(resolve, 25));
+        assert.equal(await evaluate(expression), true, message);
+      };
+      await waitFor('document.querySelector("#cell-0-0")?.textContent === "상품"', 'the workbook remains viewable in read-only mode');
+      assert.equal(await evaluate('document.querySelector("#notice")?.textContent'), 'This workbook contains an unsupported OOXML part (xl/customXml/item1.xml) and is read-only to protect its contents.', 'the unsupported package part and read-only reason are shown to the user');
+      assert.equal(await evaluate('document.querySelector("#formula")?.disabled'), true, 'cell editing is disabled');
+      assert.equal(await evaluate('document.querySelector("#formatBold")?.disabled'), true, 'formatting is disabled');
+      await evaluate('document.querySelector("#cell-0-0").dispatchEvent(new KeyboardEvent("keydown",{key:"F2",bubbles:true}))');
+      assert.equal(await evaluate('document.querySelector("#cell-0-0 textarea.cell-editor") === null'), true, 'keyboard edit shortcuts cannot create an editor');
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      assert.deepEqual(await fs.readFile(file), Buffer.from(original), 'saving a read-only workbook does not rewrite its package');
+    } finally {
+      devtools?.close();
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test('activate command and open CSV in the registered Custom Editor', async () => {
     const extension = vscode.extensions.getExtension('jjeabydev.jinsheet');
     assert.ok(extension, 'JinSheet extension is registered');
@@ -395,7 +431,74 @@ suite('JinSheet Extension Host', () => {
     }
   });
 
-  test('Chromium Webview can collapse the command menu while keeping the formula and find controls visible', async () => {
+  test('new workbook command adds the XLSX extension and opens an editable blank workbook', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-new-workbook-'));
+    const output = path.join(directory, 'Personal Notes');
+    const originalDialog = vscode.window.showSaveDialog;
+    let devtools;
+    try {
+      vscode.window.showSaveDialog = async options => {
+        assert.deepEqual(options.filters, { 'Excel workbook': ['xlsx'] });
+        return vscode.Uri.file(output);
+      };
+      await vscode.commands.executeCommand('jinsheet.newWorkbook');
+      const savedFile = output + '.xlsx';
+      const model = analyze(await fs.readFile(savedFile));
+      assert.equal(model.writable, true, model.readOnlyReason);
+      assert.equal(model.sheets[0].name, 'Sheet1');
+      assert.equal(model.sheets[0].cells.size, 0);
+      devtools = await waitForSpreadsheetWebview();
+      const evaluate = async expression => {
+        const response = await devtools.send('Runtime.evaluate', { expression, contextId: devtools.contextId, returnByValue: true, awaitPromise: true });
+        if (response.exceptionDetails) throw new Error(response.exceptionDetails.text);
+        return response.result?.value;
+      };
+      const waitFor = async (expression, description) => {
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline && !await evaluate(expression)) await new Promise(resolve => setTimeout(resolve, 25));
+        assert.equal(await evaluate(expression), true, description);
+      };
+      assert.equal(await evaluate('document.querySelector("#cell-0-0")?.textContent'), '', 'the created workbook opens in JinSheet at an empty A1 cell');
+      await evaluate('(()=>{const input=document.querySelector("#formula");input.value="Personal notes";input.dispatchEvent(new Event("input",{bubbles:true}));input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}))})()');
+      await waitFor('document.querySelector("#cell-0-0")?.textContent==="Personal notes"&&document.querySelector("#notice")?.textContent.includes("Modified")', 'a new workbook accepts a cell edit');
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      assert.equal(analyze(await fs.readFile(savedFile)).sheets[0].cells.get('A1')?.value, 'Personal notes', 'saving the new workbook persists the edited cell');
+      devtools.close();
+      devtools = null;
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(savedFile), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview(15000, 'Personal notes');
+      const reopened = await devtools.send('Runtime.evaluate', { expression: 'document.querySelector("#cell-0-0")?.textContent', contextId: devtools.contextId, returnByValue: true });
+      assert.equal(reopened.result?.value, 'Personal notes', 'the saved new workbook reopens with its data intact');
+    } finally {
+      vscode.window.showSaveDialog = originalDialog;
+      devtools?.close();
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('cancelling new workbook creation leaves existing files untouched', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-new-workbook-cancel-'));
+    const output = path.join(directory, 'Existing');
+    const originalBytes = Buffer.from('keep this file');
+    await fs.writeFile(output + '.xlsx', originalBytes);
+    const originalDialog = vscode.window.showSaveDialog, originalWarning = vscode.window.showWarningMessage;
+    let warningCount = 0;
+    try {
+      vscode.window.showSaveDialog = async () => vscode.Uri.file(output);
+      vscode.window.showWarningMessage = async () => { warningCount++; return undefined; };
+      await vscode.commands.executeCommand('jinsheet.newWorkbook');
+      assert.equal(warningCount, 1, 'extension correction checks for an existing destination');
+      assert.deepEqual(await fs.readFile(output + '.xlsx'), originalBytes, 'declining replacement preserves the original bytes');
+    } finally {
+      vscode.window.showSaveDialog = originalDialog;
+      vscode.window.showWarningMessage = originalWarning;
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('Chromium Webview can collapse the command menu while maximizing the spreadsheet grid', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-toolbar-collapse-'));
     const file = path.join(directory, 'toolbar.csv');
     await fs.writeFile(file, 'Name,Value\nAlpha,1\n', 'utf8');
@@ -408,23 +511,228 @@ suite('JinSheet Extension Host', () => {
         if (response.exceptionDetails) throw new Error(response.exceptionDetails.text);
         return response.result?.value;
       };
-      assert.deepEqual(await evaluate(`(() => ({commandsHidden:document.querySelector('#toolbarCommands').hidden,expanded:document.querySelector('#toggleToolbar').getAttribute('aria-expanded'),label:document.querySelector('#toggleToolbar').textContent.trim()}))()`), {
-        commandsHidden: true, expanded: 'false', label: 'Show menu'
-      }, 'the first view starts with the sheet taking priority over the command menu');
+      let initialGridReady = false;
+      for (let attempt = 0; attempt < 100 && !initialGridReady; attempt++) {
+        initialGridReady = await evaluate('document.querySelector("#cell-0-0")?.textContent === "Name"');
+        if (!initialGridReady) await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      assert.equal(initialGridReady, true, 'the first CSV cell is visible before checking menu space');
+      assert.deepEqual(await evaluate(`(() => ({toolbarHidden:document.querySelector('#toolbar').hidden,expanded:document.querySelector('#toggleToolbar').getAttribute('aria-expanded'),label:document.querySelector('#toggleToolbar').textContent.trim()}))()`), {
+        toolbarHidden: true, expanded: 'false', label: 'Show menu'
+      }, 'the first view starts with the sheet taking priority over all toolbar controls');
+      assert.deepEqual(await evaluate(`(() => {const toolbar=document.querySelector('#toolbar');return {childRects:[...toolbar.querySelectorAll('*')].filter(item=>item.getClientRects().length).length,focusable:[...toolbar.querySelectorAll('button,input,select,summary')].filter(item=>!item.disabled&&item.tabIndex>=0&&item.getClientRects().length).length}})()`), {
+        childRects: 0, focusable: 0
+      }, 'collapsed menu text and icons have no visible boxes and cannot receive focus');
+      const noticeState = await evaluate(`(() => {const notice=document.querySelector('#notice');return {text:notice.textContent,display:getComputedStyle(notice).display,rects:notice.getClientRects().length}})()`);
+      assert.deepEqual(noticeState, { text: '', display: 'none', rects: 0 }, 'an empty status message does not reserve vertical space above the data');
+      let keyboardHint = '';
+      for (let attempt = 0; attempt < 40 && !keyboardHint; attempt++) {
+        keyboardHint = await evaluate(`document.querySelector('#grid').title`);
+        if (!keyboardHint) await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      assert.equal(keyboardHint, 'Edit cell: F2 · Clear selected cells: Delete/Backspace', 'keyboard guidance remains available as a grid tooltip');
+      await evaluate(`document.querySelector('#notice').textContent='Saved'`);
+      assert.equal(await evaluate(`document.querySelector('#notice').getClientRects().length>0`), true, 'status messages remain visible when present');
+      await evaluate(`document.querySelector('#notice').textContent=''`);
+      for (const width of [500, 360]) {
+        const narrowLayout = await evaluate(`(() => {const root=document.documentElement,body=document.body;root.style.width='${width}px';body.style.width='${width}px';const toolbar=document.querySelector('#toolbar'),grid=document.querySelector('#grid'),searchLabel=document.querySelector('#searchGroup label'),wasHidden=toolbar.hidden;toolbar.hidden=false;const result={toolbarWidth:toolbar.clientWidth,toolbarScrollWidth:toolbar.scrollWidth,searchLabelDisplay:getComputedStyle(searchLabel).display,gridWidth:grid.clientWidth,gridHeight:grid.clientHeight};toolbar.hidden=wasHidden;root.style.width='';body.style.width='';return result})()`);
+        assert.ok(narrowLayout.toolbarScrollWidth <= narrowLayout.toolbarWidth && narrowLayout.searchLabelDisplay === 'none' && narrowLayout.gridWidth > 0 && narrowLayout.gridHeight > 0, `narrow ${width}px editor layout keeps the toolbar within the viewport and the grid visible: ${JSON.stringify(narrowLayout)}`);
+      }
 
+      const collapsedGridRows = await evaluate('new Set([...document.querySelectorAll(".cell")].map(cell=>cell.dataset.row)).size');
       await evaluate('document.querySelector("#toggleToolbar").click()');
-      assert.deepEqual(await evaluate(`(() => ({commandsHidden:document.querySelector('#toolbarCommands').hidden,expanded:document.querySelector('#toggleToolbar').getAttribute('aria-expanded'),label:document.querySelector('#toggleToolbar').textContent.trim(),formulaVisible:document.querySelector('#formula').getClientRects().length>0,findVisible:document.querySelector('#searchGroup').getClientRects().length>0}))()`), {
-        commandsHidden: false, expanded: 'true', label: 'Hide menu', formulaVisible: true, findVisible: true
+      const resizedGridDeadline = Date.now() + 5000;
+      let expandedGridRows = collapsedGridRows;
+      while (Date.now() < resizedGridDeadline && expandedGridRows === collapsedGridRows) {
+        await new Promise(resolve => setTimeout(resolve, 25));
+        expandedGridRows = await evaluate('new Set([...document.querySelectorAll(".cell")].map(cell=>cell.dataset.row)).size');
+      }
+      assert.ok(expandedGridRows > 0 && expandedGridRows !== collapsedGridRows, `resizing the grid after expanding the menu refreshes its rendered range: ${collapsedGridRows} -> ${expandedGridRows}`);
+      assert.equal(await evaluate('document.querySelector("#cell-0-0")?.textContent'), 'Name', 'the visible grid keeps its first data cell after resizing');
+      assert.deepEqual(await evaluate(`(() => ({toolbarHidden:document.querySelector('#toolbar').hidden,expanded:document.querySelector('#toggleToolbar').getAttribute('aria-expanded'),label:document.querySelector('#toggleToolbar').textContent.trim(),formulaVisible:document.querySelector('#formula').getClientRects().length>0,findVisible:document.querySelector('#searchGroup').getClientRects().length>0}))()`), {
+        toolbarHidden: false, expanded: 'true', label: 'Hide menu', formulaVisible: true, findVisible: true
       }, 'expanding the menu keeps the formula bar and find controls available');
       assert.equal(await evaluate('getComputedStyle(document.querySelector("#toolbarCommands")).display'), 'flex', 'the menu keeps its wrapping layout while expanded');
+      const verticalSpace = await evaluate(`(() => ({toolbarMaxHeight:parseFloat(getComputedStyle(document.querySelector('#toolbar')).maxHeight),viewportHeight:innerHeight,gridHeight:document.querySelector('#grid').clientHeight}))()`);
+      assert.ok(verticalSpace.toolbarMaxHeight <= verticalSpace.viewportHeight * 0.22 + 1 && verticalSpace.gridHeight > 0, `expanded commands stay compact and leave a visible data grid: ${JSON.stringify(verticalSpace)}`);
+      assert.deepEqual(await evaluate(`(() => ({sections:[...document.querySelectorAll('#toolbarCommands > details > summary')].map(item=>item.textContent.trim()),commandsPresent:['insertRow','formatBold','sortAscending','insertChart'].every(id=>document.getElementById(id))}))()`), {
+        sections: ['Sheet', 'Tables and charts', 'Format', 'Data'], commandsPresent: true
+      }, 'the command menu groups all commands into short task-based sections');
+const gridHeightBeforeGroup = await evaluate('document.querySelector("#grid").clientHeight');
+await evaluate(`document.querySelector('#toolbarCommands details[name="toolbar-section"]:nth-of-type(3) > summary').click()`);
+      assert.deepEqual(await evaluate(`(() => ({open:[...document.querySelectorAll('#toolbarCommands details[open]')].map(item=>item.querySelector('summary').textContent.trim()),formatVisible:document.querySelector('#formatBold').closest('details').open,dataOpen:document.querySelector('#sortAscending').closest('details').open}))()`), {
+        open: ['Format'], formatVisible: true, dataOpen: false
+      }, 'opening one toolbar section leaves other command groups collapsed');
+assert.deepEqual(await evaluate(`(() => ({panelPosition:getComputedStyle(document.querySelector('#formatBold').closest('.toolbarGroupContent')).position,gridHeight:document.querySelector('#grid').clientHeight}))()`), {
+        panelPosition: 'absolute', gridHeight: gridHeightBeforeGroup
+      }, 'the open command panel overlays the worksheet without reducing its height');
+assert.equal(await evaluate(`(() => {const panel=document.querySelector('#formatBold').closest('.toolbarGroupContent'),style=getComputedStyle(panel);return parseFloat(style.maxHeight)<=Math.min(innerHeight*.4,360)+1&&style.overflowY==='auto'&&parseFloat(getComputedStyle(panel.querySelector('button')).minHeight)<=24})()`), true, 'the command panel stays short and scrollable so more worksheet data remains visible');
+assert.equal(await evaluate(`(() => {const root=document.documentElement,body=document.body;root.style.width='420px';body.style.width='420px';window.dispatchEvent(new Event('resize'));const panel=document.querySelector('#formatBold').closest('.toolbarGroupContent').getBoundingClientRect(),toolbar=document.querySelector('#toolbar').getBoundingClientRect();const fits=panel.left>=toolbar.left&&panel.right<=toolbar.right;root.style.width='';body.style.width='';window.dispatchEvent(new Event('resize'));return fits})()`), true, 'the command panel stays within a narrow editor');
+await evaluate(`document.querySelector('#toggleToolbar').click()`);
+assert.equal(await evaluate(`document.querySelector('#toolbar').hidden&&document.querySelector('#toolbarCommands details[open]')===null`), true, 'hiding the full menu closes its active command group');
+assert.deepEqual(await evaluate(`(() => {const toolbar=document.querySelector('#toolbar'),targets=[toolbar,...toolbar.querySelectorAll('*')];return {display:getComputedStyle(toolbar).display,visibility:getComputedStyle(toolbar).visibility,rendered:targets.filter(node=>node.getClientRects().length>0).map(node=>node.id||node.tagName).slice(0,8),pointerEvents:getComputedStyle(toolbar).pointerEvents,opacity:getComputedStyle(toolbar).opacity,inert:toolbar.inert}})()`), {display:'none',visibility:'hidden',rendered:[],pointerEvents:'none',opacity:'0',inert:true}, 'hidden menu text, icons, and command controls have no rendered boxes or pointer targets');
+await evaluate(`document.querySelector('#toggleToolbar').click();document.querySelector('#toolbarCommands details[name="toolbar-section"]:nth-of-type(3) > summary').click()`);
+assert.equal(await evaluate(`!document.querySelector('#toolbar').hidden&&document.querySelector('#toolbarCommands details[open]')!==null`), true, 'the menu reopens without a stale hidden group');
+await evaluate(`document.querySelector('#toolbarCommands details[name="toolbar-section"]:nth-of-type(3) > summary').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))`);
+assert.equal(await evaluate(`document.querySelector('#toolbarCommands details[open]')===null`), true, 'Escape closes the active command panel');
+await evaluate(`document.querySelector('#toolbarCommands details[name="toolbar-section"]:nth-of-type(3) > summary').click();document.body.click()`);
+assert.equal(await evaluate(`document.querySelector('#toolbarCommands details[open]')===null`), true, 'clicking outside closes the active command panel');
 
       await evaluate('document.querySelector("#toggleToolbar").click()');
-      assert.deepEqual(await evaluate(`(() => ({commandsHidden:document.querySelector('#toolbarCommands').hidden,expanded:document.querySelector('#toggleToolbar').getAttribute('aria-expanded'),label:document.querySelector('#toggleToolbar').textContent.trim(),formulaVisible:document.querySelector('#formula').getClientRects().length>0,findVisible:document.querySelector('#searchGroup').getClientRects().length>0}))()`), {
-        commandsHidden: true, expanded: 'false', label: 'Show menu', formulaVisible: true, findVisible: true
-      }, 'collapsing the menu leaves the formula bar and find controls available');
+      assert.deepEqual(await evaluate(`(() => ({toolbarHidden:document.querySelector('#toolbar').hidden,expanded:document.querySelector('#toggleToolbar').getAttribute('aria-expanded'),label:document.querySelector('#toggleToolbar').textContent.trim(),formulaVisible:document.querySelector('#formula').getClientRects().length>0,findVisible:document.querySelector('#searchGroup').getClientRects().length>0}))()`), {
+        toolbarHidden: true, expanded: 'false', label: 'Show menu', formulaVisible: false, findVisible: false
+      }, 'collapsing the menu hides controls to maximize the data grid');
 
+      await evaluate('document.dispatchEvent(new KeyboardEvent("keydown",{key:"f",ctrlKey:true,bubbles:true}))');
+      assert.equal(await evaluate('!document.querySelector("#toolbar").hidden && document.activeElement?.id==="search"'), true, 'Ctrl/Cmd+F reveals the toolbar and focuses search');
       await evaluate('document.querySelector("#toggleToolbar").click()');
-      assert.equal(await evaluate('!document.querySelector("#toolbarCommands").hidden && document.querySelector("#toggleToolbar").getAttribute("aria-expanded")==="true"'), true, 'the menu can be expanded again');
+      await evaluate('document.dispatchEvent(new KeyboardEvent("keydown",{key:"g",ctrlKey:true,bubbles:true}))');
+      assert.equal(await evaluate('!document.querySelector("#toolbar").hidden && document.activeElement?.id==="address"'), true, 'Ctrl/Cmd+G reveals the toolbar and focuses the name box');
+    } finally {
+      devtools?.close();
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('dragging visible sheet tabs uses workbook indexes around hidden sheets and survives reopen', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-sheet-reorder-hidden-'));
+    const file = path.join(directory, 'sheet-reorder-hidden.xlsx');
+    let devtools;
+    try {
+      let model = analyze(await fs.readFile(path.join(__dirname, '..', 'fixtures', 'JinSheet-Sample.xlsx')));
+      model = patchAddSheet(model).model;
+      model = patchAddSheet(model).model;
+      const workbookXml = new TextDecoder().decode(model.files['xl/workbook.xml']).replace(/activeTab="\d+"/, 'activeTab="0"');
+      const workbookFiles = { ...model.files, 'xl/workbook.xml': new TextEncoder().encode(workbookXml.replace('name="Sheet2" sheetId="2"', 'name="Sheet2" sheetId="2" state="visible"')) };
+      model = analyze(zipSync(workbookFiles, { level: 0 }));
+      const hidden = patchSheetVisibility(model, 1, false);
+      await fs.writeFile(file, hidden.bytes);
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      const evaluate = async expression => {
+        const response = await devtools.send('Runtime.evaluate', { expression, contextId: devtools.contextId, returnByValue: true, awaitPromise: true });
+        if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+        return response.result?.value;
+      };
+      const waitFor = async (expression, message) => {
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline && !await evaluate(expression)) await new Promise(resolve => setTimeout(resolve, 25));
+        assert.equal(await evaluate(expression), true, message + ': ' + JSON.stringify(await evaluate(`({tabs:[...document.querySelectorAll('#sheets [role=\"tab\"]')].map(tab=>[tab.textContent.trim(),tab.getAttribute('aria-selected')]),notice:document.querySelector('#notice')?.textContent})`)));
+      };
+      await waitFor(`JSON.stringify([...document.querySelectorAll('#sheets [role="tab"]')].map(tab=>Number(tab.dataset.sheetIndex)))==='[0,2]'`, 'only visible workbook sheets appear as tabs with their real indexes');
+      await evaluate(`(() => {const source=document.querySelector('#sheets [data-sheet-index="2"]'),target=document.querySelector('#sheets [data-sheet-index="0"]'),transfer=new DataTransfer();source.dispatchEvent(new DragEvent('dragstart',{bubbles:true,dataTransfer:transfer}));target.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:transfer}));target.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:transfer}))})()`);
+      await waitFor(`JSON.stringify([...document.querySelectorAll('#sheets [role="tab"]')].map(tab=>[Number(tab.dataset.sheetIndex),tab.textContent.trim(),tab.getAttribute('aria-selected')]))==='[[0,"Sheet3","false"],[1,"재고","true"]]'`, 'dragging the third workbook sheet before the first moves that sheet, not the hidden middle sheet');
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      let saved = analyze(await fs.readFile(file));
+      assert.deepEqual(saved.sheets.map(sheet => sheet.name), ['Sheet3', '재고', 'Sheet2']);
+      assert.deepEqual(saved.sheets.map(sheet => sheet.visible), [true, true, false]);
+      assert.equal(saved.activeSheetIndex, 1, 'the workbook keeps the previously active sheet at its new index');
+      devtools.close(); devtools = null;
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      await waitFor(`JSON.stringify([...document.querySelectorAll('#sheets [role="tab"]')].map(tab=>[tab.textContent.trim(),tab.getAttribute('aria-selected')]))==='[["Sheet3","false"],["재고","true"]]'`, 'the visible tab order remains correct after reopening');
+      saved = analyze(await fs.readFile(file));
+      assert.deepEqual(saved.sheets.map(sheet => sheet.name), ['Sheet3', '재고', 'Sheet2']);
+      assert.deepEqual(saved.sheets.map(sheet => sheet.visible), [true, true, false]);
+      assert.equal(saved.activeSheetIndex, 1);
+    } finally {
+      devtools?.close();
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('hiding and unhiding worksheets saves the matching active tab and restores it after reopening', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-sheet-visibility-active-'));
+    const file = path.join(directory, 'sheet-visibility-active.xlsx');
+    let devtools;
+    try {
+      let model = analyze(await fs.readFile(path.join(__dirname, '..', 'fixtures', 'JinSheet-Sample.xlsx')));
+      model = patchAddSheet(model).model;
+      const workbookXml = new TextDecoder().decode(model.files['xl/workbook.xml']).replace(/activeTab="\d+"/, 'activeTab="0"');
+      await fs.writeFile(file, zipSync({ ...model.files, 'xl/workbook.xml': new TextEncoder().encode(workbookXml) }, { level: 0 }));
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      const evaluate = async expression => {
+        const response = await devtools.send('Runtime.evaluate', { expression, contextId: devtools.contextId, returnByValue: true, awaitPromise: true });
+        if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+        return response.result?.value;
+      };
+      const waitFor = async expression => {
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline && !await evaluate(expression)) await new Promise(resolve => setTimeout(resolve, 25));
+        assert.equal(await evaluate(expression), true, JSON.stringify(await evaluate(`({tabs:[...document.querySelectorAll('#sheets [role="tab"]')].map(tab=>[tab.textContent.trim(),tab.getAttribute('aria-selected')]),notice:document.querySelector('#notice')?.textContent})`)));
+      };
+      await waitFor(`document.querySelector('#sheets [data-sheet-index="0"]')?.getAttribute('aria-selected')==='true'`);
+      await evaluate(`document.querySelector('#sheetActions > summary').click();document.querySelector('#hideSheet').click()`);
+      await waitFor(`document.querySelector('#sheets [data-sheet-index="1"]')?.getAttribute('aria-selected')==='true'&&!document.querySelector('#sheets [data-sheet-index="0"]')`);
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      let saved = analyze(await fs.readFile(file));
+      assert.deepEqual(saved.sheets.map(sheet => sheet.visible), [false, true], 'hiding a sheet is saved before undo');
+      assert.equal(saved.activeSheetIndex, 1);
+      await vscode.commands.executeCommand('jinsheet.undo');
+      await waitFor(`document.querySelector('#sheets [data-sheet-index="0"]')?.getAttribute('aria-selected')==='true'&&document.querySelector('#sheets [data-sheet-index="1"]')?.getAttribute('aria-selected')==='false'`);
+      assert.equal(await evaluate(`Boolean(document.querySelector('#sheets [data-sheet-index="0"]'))`), true, 'undo restores the hidden sheet tab');
+      await vscode.commands.executeCommand('jinsheet.redo');
+      await waitFor(`document.querySelector('#sheets [data-sheet-index="1"]')?.getAttribute('aria-selected')==='true'&&!document.querySelector('#sheets [data-sheet-index="0"]')`);
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      const historyState = analyze(await fs.readFile(file));
+      assert.deepEqual(historyState.sheets.map(sheet => sheet.visible), [false, true], 'redo hides the same sheet and saves the matching visibility');
+      assert.equal(historyState.activeSheetIndex, 1);
+      devtools.close(); devtools = null;
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      await waitFor(`document.querySelector('#sheets [data-sheet-index="1"]')?.getAttribute('aria-selected')==='true'`);
+      await evaluate(`document.querySelector('#sheetActions > summary').click();const select=document.querySelector('#unhideSheet');select.value='0';select.dispatchEvent(new Event('change',{bubbles:true}))`);
+      await waitFor(`document.querySelector('#sheets [data-sheet-index="0"]')?.getAttribute('aria-selected')==='true'`);
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      saved = analyze(await fs.readFile(file));
+      assert.equal(saved.activeSheetIndex, 0);
+      assert.deepEqual(saved.sheets.map(sheet => sheet.visible), [true, true]);
+      devtools.close(); devtools = null;
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      await waitFor(`document.querySelector('#sheets [data-sheet-index="0"]')?.getAttribute('aria-selected')==='true'`);
+    } finally {
+      devtools?.close();
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('XLSX sheet management actions stay inside one compact menu beside the tabs', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-sheet-actions-'));
+    const file = path.join(directory, 'sheet-actions.xlsx');
+    let devtools;
+    try {
+      await fs.copyFile(path.join(__dirname, '..', 'fixtures', 'JinSheet-Sample.xlsx'), file);
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      const evaluate = async expression => {
+        const response = await devtools.send('Runtime.evaluate', { expression, contextId: devtools.contextId, returnByValue: true, awaitPromise: true });
+        if (response.exceptionDetails) throw new Error(response.exceptionDetails.text);
+        return response.result?.value;
+      };
+      assert.deepEqual(await evaluate(`(() => ({menuPresent:Boolean(document.querySelector('#sheetActions')),menuClosed:!document.querySelector('#sheetActions').open,summaryLabel:document.querySelector('#sheetActions > summary').getAttribute('aria-label'),actionsSeparatedFromTabs:!document.querySelector('#sheets').contains(document.querySelector('#sheetActions')),gridVisible:document.querySelector('#grid').clientHeight>0}))()`), {
+        menuPresent: true, menuClosed: true, summaryLabel: 'Sheet actions', actionsSeparatedFromTabs: true, gridVisible: true
+      }, 'sheet management does not leave four persistent controls beside the sheet tabs');
+      await evaluate(`document.querySelector('#sheetActions > summary').click()`);
+      assert.deepEqual(await evaluate(`(() => ({opened:document.querySelector('#sheetActions').open,actions:[...document.querySelectorAll('#sheetActionPanel button')].map(button=>button.getAttribute('aria-label')),hasUnhide:Boolean(document.querySelector('#sheetActionPanel select'))}))()`), {
+        opened: true, actions: ['Hide sheet', 'Add worksheet', 'Delete active worksheet'], hasUnhide: false
+      }, 'the menu exposes sheet actions on demand with accessible labels');
+      await evaluate(`document.querySelector('#addSheet').click()`);
+      let sheetState;
+      for (let attempt = 0; attempt < 40; attempt++) {
+        sheetState = await evaluate(`(() => ({menuCount:document.querySelectorAll('#sheetActions').length,tabCount:document.querySelectorAll('#sheets [role=tab]').length}))()`);
+        if (sheetState.tabCount === 2) break;
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      assert.deepEqual(sheetState, { menuCount: 1, tabCount: 2 }, 'adding a sheet rerenders tabs without duplicating the sheet actions menu');
+      await vscode.commands.executeCommand('workbench.action.files.save');
     } finally {
       devtools?.close();
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
@@ -2674,8 +2982,9 @@ suite('JinSheet Extension Host', () => {
       await vscode.commands.executeCommand('jinsheet.undo');
       await wait('document.querySelector("#cell-0-0")?.textContent==="Product"&&' + height + '===' + initialHeight);
       await vscode.commands.executeCommand('jinsheet.redo'); await wait(height + '===' + contentHeight);
-      const previousWidth = await evaluate('document.querySelector("#cell-0-0").getBoundingClientRect().width');
-      await evaluate(`for(let i=0;i<6;i++)document.querySelector('.colhead[data-column="0"] .col-resize-handle').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowLeft',bubbles:true}))`);
+      await wait('Boolean(document.querySelector(\'.colhead[data-column="0"] .col-resize-handle\'))');
+      const previousWidth = await evaluate('Number(document.querySelector(\'.colhead[data-column="0"] .col-resize-handle\').getAttribute("aria-valuenow"))');
+      await evaluate(`(() => {const handle=document.querySelector('.colhead[data-column="0"] .col-resize-handle');if(!handle)throw new Error('Column resize handle is not rendered');handle.focus();for(let i=0;i<6;i++)handle.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowLeft',bubbles:true}))})()`);
       await wait('document.querySelector("#cell-0-0")?.getBoundingClientRect().width<' + previousWidth);
       await wait(height + '>' + contentHeight);
       for (let i = 0; i < 6; i++) await vscode.commands.executeCommand('jinsheet.undo');
@@ -3589,6 +3898,82 @@ suite('JinSheet Extension Host', () => {
     } finally { devtools?.close(); await vscode.commands.executeCommand('workbench.action.closeAllEditors'); await fs.rm(directory, { recursive: true, force: true }); }
   });
 
+  test('Chromium Webview confirms data loss before merging and preserves the decision through save, undo, redo and reopen', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-merge-confirm-host-'));
+    const file = path.join(directory, 'merge-confirm.xlsx');
+    const original = await fs.readFile(path.join(__dirname, '..', 'fixtures', 'JinSheet-Sample.xlsx'));
+    await fs.writeFile(file, original);
+    const originalWarning = vscode.window.showWarningMessage, prompts = [];
+    let acceptWarning = false, devtools;
+    vscode.window.showWarningMessage = async (text, _options, ...actions) => {
+      prompts.push({ text, actions });
+      return acceptWarning ? actions[0] : undefined;
+    };
+    try {
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      const evaluate = async expression => {
+        const response = await devtools.send('Runtime.evaluate', { expression, contextId: devtools.contextId, returnByValue: true, awaitPromise: true });
+        if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+        return response.result?.value;
+      };
+      const waitFor = async (expression, message) => {
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline && !await evaluate(expression)) await new Promise(resolve => setTimeout(resolve, 25));
+        assert.equal(await evaluate(expression), true, message);
+      };
+      await waitFor('document.querySelector("#cell-0-0")?.textContent === "상품" && document.querySelector("#cell-0-1")?.textContent === "수량"', 'the two populated header cells are rendered');
+      await evaluate('(()=>{const input=document.querySelector("#address");input.value="A1:B1";input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}))})()');
+      await waitFor('document.querySelectorAll(".cell.in-range").length === 2', 'the merge range selects both cells');
+      const mergeState = await evaluate('({disabled:document.querySelector("#mergeCells").disabled,address:document.querySelector("#address").value,selected:[...document.querySelectorAll(".cell.selected")].map(cell=>cell.id),range:[...document.querySelectorAll(".cell.in-range")].map(cell=>cell.id),notice:document.querySelector("#notice")?.textContent})');
+      assert.equal(mergeState.disabled, false, 'the merge button is enabled for the populated two-cell range: ' + JSON.stringify(mergeState));
+      await evaluate('document.querySelector("#mergeCells").click()');
+      const cancelDeadline = Date.now() + 5000;
+      while (Date.now() < cancelDeadline && prompts.length < 1) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(prompts.length, 1, 'merging populated cells requires confirmation: ' + JSON.stringify({ mergeState, merged: await evaluate('document.querySelector("#cell-0-1") === null'), notice: await evaluate('document.querySelector("#notice")?.textContent') }));
+      assert.match(prompts[0].text, /수식|값|삭제|keeps|clears|discard|cleared|deleted/i);
+      assert.equal(prompts[0].actions.length, 1, 'the modal offers one explicit destructive confirmation action');
+      assert.equal((await analyze(await fs.readFile(file))).sheets[0].mergedCells.length, 0, 'cancelling leaves the file unchanged');
+      assert.equal(await evaluate('document.querySelector("#cell-0-1")?.textContent'), '수량', 'cancelling keeps the second cell value visible');
+
+      acceptWarning = true;
+      await evaluate('document.querySelector("#mergeCells").click()');
+      const confirmDeadline = Date.now() + 5000;
+      while (Date.now() < confirmDeadline && prompts.length < 2) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(prompts.length, 2, 'the user must explicitly confirm the data loss');
+      await waitFor('document.querySelector("#cell-0-0")?.textContent === "상품" && !document.querySelector("#cell-0-1")', 'confirmation merges the cells and removes the covered cell');
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      let saved = analyze(await fs.readFile(file));
+      assert.equal(saved.sheets[0].mergedCells[0].ref, 'A1:B1');
+      assert.equal(saved.sheets[0].cells.get('A1').value, '상품');
+      assert.equal(saved.sheets[0].cells.get('B1').value, '');
+
+      await vscode.commands.executeCommand('jinsheet.undo');
+      await waitFor('document.querySelector("#cell-0-1")?.textContent === "수량"', 'undo restores the discarded value and removes the merge');
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      saved = analyze(await fs.readFile(file));
+      assert.equal(saved.sheets[0].mergedCells.length, 0);
+      assert.equal(saved.sheets[0].cells.get('B1').value, '수량');
+
+      await vscode.commands.executeCommand('jinsheet.redo');
+      await waitFor('!document.querySelector("#cell-0-1")', 'redo reapplies the merge and its confirmed value removal');
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      devtools.close(); devtools = null;
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      await waitFor('document.querySelector("#cell-0-0")?.textContent === "상품" && !document.querySelector("#cell-0-1")', 'the saved merged range survives reopening');
+      saved = analyze(await fs.readFile(file));
+      assert.equal(saved.sheets[0].mergedCells[0].ref, 'A1:B1');
+      assert.equal(saved.sheets[0].cells.get('B1').value, '');
+    } finally {
+      vscode.window.showWarningMessage = originalWarning;
+      devtools?.close();
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test('Chromium Webview displays merged cells as one spanning cell and preserves them after editing', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-merged-cells-host-'));
     const file = path.join(directory, 'merged-cells.xlsx'), encode = text => new TextEncoder().encode(text);
@@ -4098,16 +4483,27 @@ suite('JinSheet Extension Host', () => {
         return response.result?.value;
       };
       const original = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      const targetCellDeadline = Date.now() + 5000;
+      while (Date.now() < targetCellDeadline && !await evaluate('Boolean(document.querySelector("#cell-1-2"))')) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(await evaluate('Boolean(document.querySelector("#cell-1-2"))'), true, 'the target cell is rendered before selecting it');
+      await evaluate(`document.querySelector('#cell-0-0').dispatchEvent(new KeyboardEvent('keydown',{key:'=',altKey:true,bubbles:true}))`);
+      const autoSumDeadline = Date.now() + 3000;
+      while (Date.now() < autoSumDeadline && !await evaluate('document.querySelector("#notice")?.textContent.includes("No contiguous numbers were found")')) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(await evaluate('document.querySelector("#notice")?.textContent.includes("No contiguous numbers were found")'), true, 'unavailable AutoSum displays its localized guidance');
+      await evaluate(`(() => {document.querySelector('#customNumberFormat').value='0.0.0';document.querySelector('#applyCustomNumberFormat').click()})()`);
+      const invalidFormatDeadline = Date.now() + 3000;
+      while (Date.now() < invalidFormatDeadline && !await evaluate('document.querySelector("#notice")?.textContent.includes("custom number format is not supported")')) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(await evaluate('document.querySelector("#notice")?.textContent.includes("custom number format is not supported")'), true, 'an unsupported custom format shows its localized validation error instead of a message-handler exception');
       const point = await evaluate(`(() => {const r=document.querySelector('#cell-1-2').getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);
       await devtools.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x + devtools.frameOffset.x, y: point.y + devtools.frameOffset.y, button: 'left', buttons: 1, clickCount: 1 });
       await devtools.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x + devtools.frameOffset.x, y: point.y + devtools.frameOffset.y, button: 'left', buttons: 0, clickCount: 1 });
-      await evaluate(`(() => {document.querySelector('#customNumberFormat').value='#,##0.000';document.querySelector('#applyCustomNumberFormat').click()})()`);
+      await evaluate(`(() => {document.querySelector('#customNumberFormat').value='#,##0.000 "kg"';document.querySelector('#applyCustomNumberFormat').click()})()`);
       const deadline = Date.now() + 3000;
-      while (Date.now() < deadline && await evaluate('document.querySelector("#cell-1-2")?.textContent') !== '1,500.000') await new Promise(resolve => setTimeout(resolve, 25));
-      assert.equal(await evaluate('document.querySelector("#cell-1-2")?.textContent'), '1,500.000');
+      while (Date.now() < deadline && await evaluate('document.querySelector("#cell-1-2")?.textContent') !== '1,500.000 kg') await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(await evaluate('document.querySelector("#cell-1-2")?.textContent'), '1,500.000 kg');
       await vscode.commands.executeCommand('workbench.action.files.save');
       let saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
-      assert.equal(saved.formatCode, '#,##0.000');
+      assert.equal(saved.formatCode, '#,##0.000 "kg"');
       assert.ok(saved.numFmtId >= 164);
       assert.deepEqual(saved.styleProperties.borders, original.styleProperties.borders);
       await vscode.commands.executeCommand('jinsheet.undo');
@@ -4117,7 +4513,44 @@ suite('JinSheet Extension Host', () => {
       await vscode.commands.executeCommand('jinsheet.redo');
       await vscode.commands.executeCommand('workbench.action.files.save');
       saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
-      assert.equal(saved.formatCode, '#,##0.000');
+      assert.equal(saved.formatCode, '#,##0.000 "kg"');
+      await evaluate(`(() => {document.querySelector('#customNumberFormat').value='0.00E+00';document.querySelector('#applyCustomNumberFormat').click()})()`);
+      const scientificDeadline = Date.now() + 3000;
+      while (Date.now() < scientificDeadline && await evaluate('document.querySelector("#cell-1-2")?.textContent') !== '1.50E+03') await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(await evaluate('document.querySelector("#cell-1-2")?.textContent'), '1.50E+03', 'the custom-format editor accepts supported scientific notation');
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      assert.equal(saved.formatCode, '0.00E+00', 'the custom scientific format survives save and reopen parsing');
+      await evaluate(`(() => {document.querySelector('#customNumberFormat').value='#,##0.00;(#,##0.00);"zero";@';document.querySelector('#applyCustomNumberFormat').click()})()`);
+      const fourSectionDeadline = Date.now() + 3000;
+      while (Date.now() < fourSectionDeadline && await evaluate('document.querySelector("#cell-1-2")?.textContent') !== '1,500.00') await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(await evaluate('document.querySelector("#cell-1-2")?.textContent'), '1,500.00', 'the editor accepts the optional fourth text section without changing numeric display');
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      assert.equal(saved.formatCode, '#,##0.00;(#,##0.00);"zero";@', 'the four-section format survives save');
+      await evaluate(`(() => {document.querySelector('#customNumberFormat').value='#,##0.0,';document.querySelector('#applyCustomNumberFormat').click()})()`);
+      const scalingDeadline = Date.now() + 3000;
+      while (Date.now() < scalingDeadline && await evaluate('document.querySelector("#cell-1-2")?.textContent') !== '1.5') await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(await evaluate('document.querySelector("#cell-1-2")?.textContent'), '1.5', 'a scaling comma displays one thousandth of the cell value');
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      assert.equal(saved.value, '1500', 'scaling formatting keeps the original cell value');
+      assert.equal(saved.formatCode, '#,##0.0,', 'the scaling format survives XLSX save and reopen');
+      await evaluate(`(() => {document.querySelector('#customNumberFormat').value='# ?/?';document.querySelector('#applyCustomNumberFormat').click()})()`);
+      const fractionFormatDeadline = Date.now() + 3000;
+      while (Date.now() < fractionFormatDeadline && await evaluate('document.querySelector("#cell-1-2")?.textContent') !== '1500') await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(await evaluate('document.querySelector("#cell-1-2")?.textContent'), '1500', 'the custom-format editor accepts a mixed-fraction format');
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      assert.equal(saved.value, '1500', 'fraction formatting keeps the original cell value');
+      assert.equal(saved.formatCode, '# ?/?', 'the fraction format survives XLSX save and reopen');
+      await evaluate(`(() => {document.querySelector('#customNumberFormat').value='# ?/8';document.querySelector('#applyCustomNumberFormat').click()})()`);
+      const fixedFractionFormatDeadline = Date.now() + 3000;
+      while (Date.now() < fixedFractionFormatDeadline && await evaluate('document.querySelector("#cell-1-2")?.textContent') !== '1500') await new Promise(resolve => setTimeout(resolve, 25));
+assert.equal(await evaluate('document.querySelector("#cell-1-2")?.textContent'), '1500', 'the custom-format editor accepts a fixed-denominator fraction format');
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      assert.equal(saved.formatCode, '# ?/8', 'the fixed denominator survives XLSX save and reopen');
     } finally {
       devtools?.close();
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
@@ -4256,6 +4689,7 @@ suite('JinSheet Extension Host', () => {
         if (!result) assert.fail(message + ': ' + JSON.stringify(await evaluate('({notice:document.querySelector("#notice")?.textContent,panelHidden:document.querySelector("#sortPanel")?.hidden,selectionCount:document.querySelectorAll(".cell.in-range").length,address:document.querySelector("#address")?.value,addressInvalid:document.querySelector("#address")?.getAttribute("aria-invalid"),goToStatus:document.querySelector("#goToStatus")?.textContent,first:document.querySelector("#cell-0-0")?.textContent})')));
       };
       await waitFor('Boolean(document.querySelector("#cell-1-0"))', 'the CSV grid is ready');
+      await evaluate('document.querySelector("#toggleToolbar").click()');
       await evaluate(`(() => {const input=document.getElementById('address');input.focus();input.value='A1:J2000';return true})()`);
       await devtools.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
       await devtools.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
@@ -4479,6 +4913,7 @@ suite('JinSheet Extension Host', () => {
         assert.fail(message + ': ' + JSON.stringify(await evaluate('({notice:document.querySelector("#notice")?.textContent,address:document.querySelector("#address")?.value,goToStatus:document.querySelector("#goToStatus")?.textContent,sortPanelHidden:document.querySelector("#sortPanel")?.hidden,firstCell:document.querySelector("#cell-0-0")?.textContent})')));
       };
       await waitFor('document.querySelector("#cell-0-0")?.textContent === "20000"', 'the 100,000-cell XLSX grid renders its original first value');
+      await evaluate('document.querySelector("#toggleToolbar").click()');
       await evaluate(`(()=>{const input=document.querySelector('#address');input.focus();input.value='A1:E20000'})()`);
       await devtools.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
       await devtools.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
@@ -4546,6 +4981,7 @@ suite('JinSheet Extension Host', () => {
         if (!await evaluate(expression)) assert.fail(message + ': ' + JSON.stringify(await evaluate('({status:document.querySelector("#removeDuplicatesStatus")?.textContent,notice:document.querySelector("#notice")?.textContent,panelHidden:document.querySelector("#removeDuplicatesPanel")?.hidden,selected:document.querySelector(".cell.selected")?.id,range:[...document.querySelectorAll(".cell.in-range")].map(cell=>cell.id),address:document.querySelector("#address")?.value,columns:[...document.querySelectorAll("#removeDuplicatesColumns input")].map(input=>({value:input.value,checked:input.checked})),warnings:'+JSON.stringify(prompts)+'})')));
       };
       await waitFor('Boolean(document.querySelector("#cell-4-1"))', 'the selected data and duplicate records are rendered');
+      await evaluate('document.querySelector("#toggleToolbar").click()');
       const first = await evaluate('(()=>{const r=document.querySelector("#cell-0-0").getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()');
       const last = await evaluate('(()=>{const r=document.querySelector("#cell-4-1").getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()');
       const mouse = (type, point) => devtools.send('Input.dispatchMouseEvent', { type, x: point.x + devtools.frameOffset.x, y: point.y + devtools.frameOffset.y, button: type === 'mouseMoved' ? 'none' : 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount: 1 });
@@ -4631,6 +5067,22 @@ suite('JinSheet Extension Host', () => {
       });
       await waitFor('Boolean(document.querySelector("#cell-1-0"))', 'CSV cells rendered in the Chromium Webview');
 
+      const resizePoint = await evaluate(`(() => { const r=document.querySelector('#cell-1-0').getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2}; })()`);
+      await dispatchMouse({type:'mousePressed',...resizePoint,button:'left',buttons:1,clickCount:2});
+      await dispatchMouse({type:'mouseReleased',...resizePoint,button:'left',buttons:0,clickCount:2});
+      await waitFor('Boolean(document.querySelector("#cell-1-0 textarea.cell-editor"))', 'double-click opened the editor before resizing');
+      await evaluate(`(() => { const input=document.querySelector('#cell-1-0 textarea.cell-editor'); input.value='resize draft'; input.dispatchEvent(new Event('input',{bubbles:true})); document.querySelector('#toolbar').hidden=true; })()`);
+      await new Promise(resolve => setTimeout(resolve, 180));
+      const resizeEditState = await evaluate(`(() => { const input=document.querySelector('#cell-1-0 textarea.cell-editor'); return {value:input?.value,active:document.activeElement===input,connected:input?.isConnected}; })()`);
+      assert.deepEqual(resizeEditState, {value:'resize draft',active:true,connected:true}, 'resizing the grid keeps the editor focused and preserves its draft');
+      await devtools.send('Input.dispatchKeyEvent', {type:'keyDown',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+      await devtools.send('Input.dispatchKeyEvent', {type:'keyUp',key:'Escape',code:'Escape',windowsVirtualKeyCode:27});
+      await waitFor('!document.querySelector("#cell-1-0 textarea.cell-editor") && document.querySelector("#cell-1-0")?.textContent === "alpha"', 'Escape cancels the resize draft without changing the cell');
+      devtools.close(); devtools = null;
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      await waitFor('document.querySelector("#cell-1-0")?.textContent === "alpha"', 'reopened the unchanged CSV after the resize focus check');
       const cellPoint = await evaluate(`(() => { const r = document.querySelector('#cell-1-0').getBoundingClientRect(); return {x:r.left + r.width / 2, y:r.top + r.height / 2}; })()`);
       for (let clickCount = 1; clickCount <= 2; clickCount++) {
         await dispatchMouse({ type: 'mousePressed', ...cellPoint, button: 'left', buttons: 1, clickCount });
@@ -4648,7 +5100,7 @@ suite('JinSheet Extension Host', () => {
       await dispatchMouse({ type: 'mouseMoved', x: editorGeometry.endX, y: editorGeometry.y, button: 'left', buttons: 1 });
       await dispatchMouse({ type: 'mouseReleased', x: editorGeometry.endX, y: editorGeometry.y, button: 'left', buttons: 0, clickCount: 1 });
       const selection = await evaluate(`(() => { const editor = document.querySelector('#cell-1-0 textarea.cell-editor'); return {text:editor.value.slice(editor.selectionStart, editor.selectionEnd), value:editor.value, active:document.activeElement === editor, connected:editor.isConnected}; })()`);
-      assert.ok(selection.text.length > 0 && selection.value === 'alpha' && selection.active && selection.connected, 'mouse dragging selects editor text without replacing or blurring its textarea');
+      assert.ok(selection.text.length > 0 && selection.value === 'alpha' && selection.active && selection.connected, 'mouse dragging selects editor text without replacing or blurring its textarea: ' + JSON.stringify(selection));
       await devtools.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
       await devtools.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
 

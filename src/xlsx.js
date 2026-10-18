@@ -460,13 +460,17 @@ function tableForFilter(sheet, filter) {
 
 function readFilterColor(dxf, cellColor, colorContext) {
   if (cellColor) {
+    if (children(dxf, 'fill').length > 1) fail('색상 필터 차등 채우기가 중복되었습니다.');
     const pattern = child(child(dxf, 'fill') || { children: [] }, 'patternFill');
+    if (children(child(dxf, 'fill') || { children: [] }, 'patternFill').length > 1 || children(pattern || { children: [] }, 'fgColor').length > 1 || children(pattern || { children: [] }, 'bgColor').length > 1) fail('색상 필터 채우기 요소가 중복되었습니다.');
     if (pattern?.attributes.patternType === 'none' && pattern.children.every(item => ['fgColor', 'bgColor'].includes(item.name))) return null;
     const foreground = child(pattern || { children: [] }, 'fgColor');
     if (!pattern || pattern.attributes.patternType !== 'solid' || pattern.children.some(item => !['fgColor', 'bgColor'].includes(item.name)) || !foreground || !styleColor(foreground, colorContext)) fail('색상 필터의 단색 정의를 해석할 수 없습니다.');
     return styleColor(foreground, colorContext).toUpperCase();
   }
-  const font = child(dxf, 'font'), color = child(font || { children: [] }, 'color');
+  if (children(dxf, 'font').length > 1) fail('글자색 필터 차등 글꼴이 중복되었습니다.');
+  const font = child(dxf, 'font'), colors = children(font || { children: [] }, 'color'), color = colors[0];
+  if (colors.length > 1) fail('글자색 필터 색상 요소가 중복되었습니다.');
   if (color && Object.keys(color.attributes).length === 1 && ['1', 'true'].includes(color.attributes.auto)) return null;
   if (!color || !styleColor(color, colorContext)) fail('글자색 필터의 색상 정의를 해석할 수 없습니다.');
   return styleColor(color, colorContext).toUpperCase();
@@ -882,10 +886,12 @@ function readCellStyleProperties(xf, fonts, fills, borders, colorContext) {
 
 function readDifferentialStyle(dxf, colorContext) {
   if (children(dxf, 'numFmt').length || dxf.children.some(item => !['font', 'fill', 'border', 'alignment'].includes(item.name))) throw new Error('지원하지 않는 차등 서식 구성요소입니다.');
+  if (['font', 'fill', 'border', 'alignment'].some(tag => children(dxf, tag).length > 1)) throw new Error('중복된 차등 서식 요소가 있어 안전한 저장을 지원하지 않습니다.');
   const properties = {};
   const font = child(dxf, 'font');
   if (font) {
     if (font.children.some(item => !['b', 'i', 'u', 'strike', 'color'].includes(item.name))) throw new Error('지원하지 않는 조건부 글꼴 서식입니다.');
+    if (['b', 'i', 'u', 'strike', 'color'].some(tag => children(font, tag).length > 1)) throw new Error('중복된 조건부 글꼴 요소가 있어 안전한 저장을 지원하지 않습니다.');
     for (const [tag, property] of [['b', 'bold'], ['i', 'italic'], ['u', 'underline'], ['strike', 'strike']]) {
       const element = child(font, tag);
       if (element && Object.keys(element.attributes).some(attribute => attribute !== 'val')) throw new Error('조건부 글꼴 속성이 지원되지 않습니다.');
@@ -897,7 +903,7 @@ function readDifferentialStyle(dxf, colorContext) {
     if (color) properties.color = color;
   }
   const fill = child(dxf, 'fill'), pattern = fill && child(fill, 'patternFill');
-  if (fill && (!pattern || !['solid', undefined].includes(pattern.attributes.patternType) || Object.keys(pattern.attributes).some(attribute => attribute !== 'patternType') || pattern.children.some(item => !['fgColor', 'bgColor'].includes(item.name)) || children(pattern, 'fgColor').length > 1 || children(pattern, 'bgColor').length > 1 || !child(pattern, 'fgColor') && !(pattern.attributes.patternType === undefined && child(pattern, 'bgColor')))) throw new Error('조건부 채우기 서식은 단색 채우기만 지원합니다.');
+  if (fill && (children(fill, 'patternFill').length !== 1 || !pattern || !['solid', undefined].includes(pattern.attributes.patternType) || Object.keys(pattern.attributes).some(attribute => attribute !== 'patternType') || pattern.children.some(item => !['fgColor', 'bgColor'].includes(item.name)) || children(pattern, 'fgColor').length > 1 || children(pattern, 'bgColor').length > 1 || !child(pattern, 'fgColor') && !(pattern.attributes.patternType === undefined && child(pattern, 'bgColor')))) throw new Error('조건부 채우기 서식은 단색 채우기만 지원합니다.');
   if (pattern) {
     const colorNode = child(pattern, 'fgColor') || child(pattern, 'bgColor');
     if (!colorNode || !styleColor(colorNode, colorContext)) throw new Error('조건부 채우기 색상 정의를 해석할 수 없습니다.');
@@ -1090,40 +1096,217 @@ function formatExcelDate(serial, format, language, date1904 = false) {
     return item.code;
   }).join('');
 }
+function dateLanguageForFormat(format, fallback) {
+  const match = /\[\$-([0-9a-f]{3,4})\]/i.exec(format);
+  if (!match) return fallback === 'ko' ? 'ko' : 'en';
+  const languageId = match[1].toLowerCase().padStart(4, '0');
+  if (languageId === '0409') return 'en';
+  if (languageId === '0412') return 'ko';
+  return fallback === 'ko' ? 'ko' : 'en';
+}
+function formatExcelElapsed(serial, format) {
+  const match = /^\[(h+|m+|s+)\](?::(m{1,2}))?(?::(s{1,2}))?(?:\.([0#]{1,9}))?$/i.exec(format);
+  if (!match || serial < 0) return null;
+  const unit = match[1][0].toLowerCase(), minuteFormat = match[2], secondFormat = match[3], decimals = match[4] || '';
+  if (unit === 'h' && (secondFormat && !minuteFormat || decimals && !secondFormat) || unit === 'm' && (minuteFormat || !secondFormat) || unit === 's' && (minuteFormat || secondFormat)) return null;
+  const scale = 10 ** decimals.length, scaledTotal = serial * 86400 * scale;
+  if (!Number.isFinite(scaledTotal) || scaledTotal > Number.MAX_SAFE_INTEGER) return null;
+  const totalSeconds = Math.round(scaledTotal) / scale;
+  const pad = (value, width) => String(value).padStart(width, '0');
+  let remainder = totalSeconds, output = '';
+  if (unit === 'h') {
+    const hours = Math.floor(remainder / 3600);
+    remainder -= hours * 3600;
+    output += pad(hours, match[1].length);
+    if (minuteFormat) {
+      const minutes = Math.floor(remainder / 60);
+      remainder -= minutes * 60;
+      output += ':' + pad(minutes, minuteFormat.length);
+    }
+    if (secondFormat) {
+      const seconds = Math.floor(remainder);
+      const fraction = remainder - seconds;
+      output += ':' + pad(seconds, secondFormat.length);
+      if (decimals) output += '.' + String(Math.round(fraction * scale)).padStart(decimals.length, '0');
+    }
+  } else if (unit === 'm') {
+    const minutes = Math.floor(remainder / 60);
+    remainder -= minutes * 60;
+    const seconds = Math.floor(remainder), fraction = remainder - seconds;
+    output = pad(minutes, match[1].length) + ':' + pad(seconds, secondFormat.length);
+    if (decimals) output += '.' + String(Math.round(fraction * scale)).padStart(decimals.length, '0');
+  } else {
+    const seconds = Math.floor(remainder), fraction = remainder - seconds;
+    output = pad(seconds, match[1].length);
+    if (decimals) output += '.' + String(Math.round(fraction * scale)).padStart(decimals.length, '0');
+  }
+  return output;
+}
+function splitExcelFormatSections(format) {
+  const sections = []; let start = 0, quoted = false;
+  for (let index = 0; index < format.length; index++) {
+    if (format[index] === '\\') { index++; continue; }
+    if (format[index] === '"') { quoted = !quoted; continue; }
+    if (format[index] === ';' && !quoted) { sections.push(format.slice(start, index)); start = index + 1; }
+  }
+  if (quoted) return null;
+  sections.push(format.slice(start));
+  return sections.length <= 4 ? sections : null;
+}
+function decodeExcelFormatLiteral(format) {
+  let output = '', quoted = false;
+  for (let index = 0; index < format.length; index++) {
+    const character = format[index];
+    if (character === '"') {
+      if (quoted && format[index + 1] === '"') { output += '"'; index++; }
+      else quoted = !quoted;
+    } else if (character === '\\') {
+      if (index + 1 >= format.length) return null;
+      output += format[++index];
+    } else if (character === '_' || character === '*') {
+      if (index + 1 >= format.length) return null;
+      if (character === '_') output += ' ';
+      index++;
+    } else if (quoted || /[ $€£¥₩()%+,\-]/.test(character)) output += character;
+    else return null;
+  }
+  return quoted ? null : output;
+}
+function findExcelNumericPattern(format) {
+  let quoted = false;
+  for (let index = 0; index < format.length; index++) {
+    const character = format[index];
+    if (character === '\\') { index++; continue; }
+    if (character === '"') { quoted = !quoted; continue; }
+    if (quoted || !/[0#]/.test(character)) continue;
+    let end = index + 1;
+    while (end < format.length && /[0#,.]/.test(format[end])) end++;
+    return { start: index, end };
+  }
+  return null;
+}
+function formatExcelScientific(value, format) {
+  const sections = splitExcelFormatSections(format);
+  if (!sections) return null;
+  const selectedIndex = value < 0 && sections.length > 1 ? 1 : value === 0 && sections.length > 2 ? 2 : 0;
+  const selected = sections[selectedIndex];
+  const match = /^(.*?)([0#](?:\.([0#]{1,100}))?)([Ee])([+-])(0{1,3})(.*?)$/.exec(selected);
+  if (!match) return sections.length > 2 && selectedIndex === 2 ? decodeExcelFormatLiteral(selected) : null;
+  const prefix = decodeExcelFormatLiteral(match[1]), suffix = decodeExcelFormatLiteral(match[7]);
+  if (prefix === null || suffix === null) return null;
+  const decimals = match[3] || '', minimumFractionDigits = (decimals.match(/0/g) || []).length;
+  const magnitude = value < 0 && selectedIndex === 1 ? Math.abs(value) : Math.abs(value);
+  let mantissa, exponentText;
+  try { [mantissa, exponentText] = magnitude.toExponential(decimals.length).split('e'); }
+  catch { return null; }
+  let [integer, fraction = ''] = mantissa.split('.');
+  while (fraction.length > minimumFractionDigits && fraction.endsWith('0')) fraction = fraction.slice(0, -1);
+  const exponent = Number(exponentText), exponentSign = exponent < 0 ? '-' : match[5] === '+' ? '+' : '';
+  const sign = value < 0 && selectedIndex !== 1 ? '-' : '';
+  return sign + prefix + integer + (fraction ? '.' + fraction : '') + match[4] + exponentSign + String(Math.abs(exponent)).padStart(match[6].length, '0') + suffix;
+}
+function nearestFraction(value, maximumDenominator) {
+  let numerator = 0, denominator = 1, bestError = Math.abs(value);
+  for (let candidate = 1; candidate <= maximumDenominator; candidate++) {
+    const candidateNumerator = Math.round(value * candidate), error = Math.abs(value - candidateNumerator / candidate);
+    if (error < bestError) {
+      numerator = candidateNumerator; denominator = candidate; bestError = error;
+      if (error === 0) break;
+    }
+  }
+  return { numerator, denominator };
+}
+function roundFractionNumerator(value) {
+  const lower = Math.floor(value), remainder = value - lower;
+  if (Math.abs(remainder - 0.5) < 1e-12) return lower % 2 === 0 ? lower : lower + 1;
+  return Math.round(value);
+}
+function formatExcelFraction(value, format) {
+  const sections = splitExcelFormatSections(format);
+  if (!sections) return null;
+  const selectedIndex = value < 0 && sections.length > 1 ? 1 : value === 0 && sections.length > 2 ? 2 : 0;
+  const selected = sections[selectedIndex];
+  const match = /^(.*?)(# )?(\?{1,3})\/(\?{1,3}|[1-9]\d{0,2})(.*?)$/.exec(selected);
+  if (!match) return null;
+  const prefix = decodeExcelFormatLiteral(match[1]), suffix = decodeExcelFormatLiteral(match[5]);
+  if (prefix === null || suffix === null) return null;
+  const absolute = Math.abs(value), hasWhole = Boolean(match[2]), whole = hasWhole ? Math.floor(absolute) : 0;
+  const fixedDenominator = /^\d+$/.test(match[4]);
+  const maximumDenominator = fixedDenominator ? Number(match[4]) : 10 ** match[4].length - 1;
+  const fractionValue = hasWhole ? absolute - whole : absolute;
+  const fraction = fixedDenominator
+    ? { numerator: roundFractionNumerator(fractionValue * maximumDenominator), denominator: maximumDenominator }
+    : nearestFraction(fractionValue, maximumDenominator);
+  let wholeValue = whole, numerator = fraction.numerator, denominator = fraction.denominator;
+  if (hasWhole && numerator >= denominator) { wholeValue++; numerator = 0; }
+  if (numerator && !fixedDenominator) {
+    let left = numerator, right = denominator;
+    while (right) [left, right] = [right, left % right];
+    numerator /= left; denominator /= left;
+  }
+  const sign = value < 0 && selectedIndex === 0 ? '-' : '';
+  const wholeText = wholeValue ? String(wholeValue) + (numerator && hasWhole ? ' ' : '') : '';
+  const fractionText = numerator ? numerator + '/' + (fixedDenominator ? match[4] : denominator) : '';
+  return sign + prefix + (wholeText || fractionText ? wholeText + fractionText : '0') + suffix;
+}
 function formatExcelNumber(value, numFmtId, formatCode, language, date1904 = false) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return String(value);
   const format = formatCode || BUILTIN_NUMBER_FORMATS[numFmtId];
   if (!format || /^General$/i.test(format)) return String(value);
+  const elapsed = formatExcelElapsed(numeric, format);
+  if (elapsed !== null) return elapsed;
   const dateSyntax = format.replace(/"[^"]*"|\[[^\]]*\]|\\.|_.|\*./g, '');
   if (DATE_FORMAT_IDS.has(numFmtId) || /(?:y{2,4}|d{1,4}|AM\/PM|h{1,2}:[mhs]|m{1,2}:s{1,2})/i.test(dateSyntax)) {
     const dateCode = language === 'ko' && [14, 15, 16, 17, 22].includes(numFmtId)
       ? ({ 14: 'yyyy-mm-dd', 15: 'yyyy-mm-dd', 16: 'm-d', 17: 'yyyy-mm', 22: 'yyyy-mm-dd h:mm' }[numFmtId])
       : format;
-    return formatExcelDate(numeric, dateCode, language, date1904) ?? String(value);
+    return formatExcelDate(numeric, dateCode, dateLanguageForFormat(format, language), date1904) ?? String(value);
   }
+  const scientific = formatExcelScientific(numeric, format);
+  if (scientific !== null) return scientific;
+  const fraction = formatExcelFraction(numeric, format);
+  if (fraction !== null) return fraction;
   if (/[Ee][+-]?0/.test(format) || /[?]/.test(format)) return String(value);
-  const sections = format.split(';');
-  const selected = numeric < 0 && sections[1] ? sections[1] : sections[0];
+  const sections = splitExcelFormatSections(format) || format.split(';');
+  const selectedIndex = numeric < 0 && sections.length > 1 ? 1 : numeric === 0 && sections.length > 2 ? 2 : 0;
+  const selected = sections[selectedIndex];
+  const negativePattern = numeric < 0 && sections[1] ? findExcelNumericPattern(sections[1]) : null;
+  const negativePrefix = negativePattern ? decodeExcelFormatLiteral(sections[1].slice(0, negativePattern.start)) : null;
+  const negativeSuffix = negativePattern ? decodeExcelFormatLiteral(sections[1].slice(negativePattern.end)) : null;
+  const negativeParentheses = negativePrefix !== null && negativeSuffix !== null && negativePrefix.trimEnd().endsWith('(') && negativeSuffix.trimEnd().endsWith(')');
   const hasCurrency = numFmtId >= 5 && numFmtId <= 8 || /[$€£¥₩]|USD/.test(selected);
   const unquoted = selected.replace(/"[^"]*"|\\./g, '');
   const percent = unquoted.includes('%');
   const literals = [...selected.matchAll(/"([^"]*)"/g)].map(match => match[1]);
-  if (literals.some(literal => /[^ $€£¥₩]/.test(literal))) return String(value);
+  let literalPrefix = '', literalSuffix = '', displayValue = numeric;
+  if (negativeParentheses) displayValue = Math.abs(numeric);
+  if (literals.some(literal => /[^ $€£¥₩]/.test(literal))) {
+    if (hasCurrency || percent) return String(value);
+    const pattern = findExcelNumericPattern(selected);
+    if (!pattern) return decodeExcelFormatLiteral(selected) ?? String(value);
+    literalPrefix = decodeExcelFormatLiteral(selected.slice(0, pattern.start));
+    literalSuffix = decodeExcelFormatLiteral(selected.slice(pattern.end));
+    if (literalPrefix === null || literalSuffix === null) return String(value);
+    if (numeric < 0 && selectedIndex === 1) displayValue = Math.abs(numeric);
+  }
   const cleaned = selected.replace(/"[^"]*"|\[[^\]]*\]|\\.|_.|\*./g, '').replace(/[%$€£¥₩]/g, '').replace(/USD/g, '');
-  const numericPattern = cleaned.replace(/[()]/g, '');
+  const numericPattern = cleaned.replace(/[()]/g, '').trim();
   if (!/[0#]/.test(numericPattern) || !/^[#0,.+\-]*$/.test(numericPattern)) return String(value);
+  const scaleCommas = /,+$/.exec(numericPattern)?.[0].length || 0;
   const decimal = /\.([0#]+)/.exec(numericPattern)?.[1] || '';
   const minimumFractionDigits = (decimal.match(/0/g) || []).length;
   const maximumFractionDigits = Math.min(20, decimal.length);
   const options = { useGrouping: /#,##0/.test(numericPattern), minimumFractionDigits, maximumFractionDigits };
+  const scaledValue = displayValue / (1000 ** scaleCommas);
   const currencySymbol = literals.join('') || /[$€£¥₩]/.exec(selected)?.[0];
   const currency = ({ '$': 'USD', '€': 'EUR', '£': 'GBP', '¥': 'JPY', '₩': 'KRW' })[currencySymbol] || 'USD';
   if (hasCurrency) { options.style = 'currency'; options.currency = currency; }
   else if (percent) options.style = 'percent';
-  let displayed = new Intl.NumberFormat(language === 'ko' ? 'ko-KR' : 'en-US', options).format(numeric);
-  if (numeric < 0 && sections[1] && /^\s*\([^)]*\)\s*$/.test(sections[1].replace(/\[[^\]]*\]/g, ''))) displayed = '(' + new Intl.NumberFormat(language === 'ko' ? 'ko-KR' : 'en-US', { ...options, style: hasCurrency ? 'currency' : 'decimal' }).format(Math.abs(numeric)) + ')';
-  return displayed;
+  let displayed = new Intl.NumberFormat(language === 'ko' ? 'ko-KR' : 'en-US', options).format(scaledValue);
+  const literalParentheses = literalPrefix.trimEnd().endsWith('(') && literalSuffix.trimEnd().endsWith(')');
+  if (negativeParentheses && !literalParentheses) displayed = '(' + new Intl.NumberFormat(language === 'ko' ? 'ko-KR' : 'en-US', { ...options, style: hasCurrency ? 'currency' : percent ? 'percent' : 'decimal' }).format(Math.abs(scaledValue)) + ')';
+  return literalPrefix + displayed + literalSuffix;
 }
 function formatCellValue(cell, language = 'en') {
   if (!cell || cell.kind !== 'number') return cell?.value ?? '';
@@ -1205,6 +1388,20 @@ function safeUnzip(input) {
   return { bytes, records, files };
 }
 
+function createBlankWorkbook() {
+  const files = {
+    '[Content_Types].xml': '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
+    '_rels/.rels': '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+    'xl/workbook.xml': '<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>',
+    'xl/_rels/workbook.xml.rels': '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+    'xl/worksheets/sheet1.xml': '<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>'
+  };
+  const bytes = zipSync(Object.fromEntries(Object.entries(files).map(([name, value]) => [name, new TextEncoder().encode(value)])));
+  const model = analyze(bytes);
+  if (!model.writable || model.sheets.length !== 1 || model.activeSheetIndex !== 0 || !model.sheets[0].visible) fail('새 통합 문서를 만들고 확인할 수 없습니다.');
+  return bytes;
+}
+
 function analyze(input, extension = '.xlsx') {
   const { bytes, records, files } = safeUnzip(input);
   const unsupported = [];
@@ -1248,7 +1445,10 @@ function analyze(input, extension = '.xlsx') {
   if (files['xl/sharedStrings.xml']) {
     known.add('xl/sharedStrings.xml');
     const shared = parseXml(files['xl/sharedStrings.xml'], 'xl/sharedStrings.xml').root;
-    for (const si of children(shared, 'si')) sharedStrings.push(textContent(si));
+    for (const si of children(shared, 'si')) {
+      if (Object.keys(si.attributes).length || si.children.length !== 1 || si.children[0].name !== 't' || si.children[0].children.length || Object.keys(si.children[0].attributes).some(attribute => attribute !== 'xml:space')) markUnsupported('서식 또는 확장이 포함된 공유 문자열은 현재 저장을 지원하지 않습니다.');
+      sharedStrings.push(textContent(si));
+    }
   }
   const relationshipType = suffix => [...workbookMap].find(([, rel]) => rel.Type.endsWith(`/${suffix}`))?.[1].path;
   const stylesPath = relationshipType('styles');
@@ -1261,7 +1461,37 @@ function analyze(input, extension = '.xlsx') {
   if (stylesPath && files[stylesPath]) {
     known.add(stylesPath);
     const styleRoot = parsedStyles;
-    const customFormats = new Map(children(child(styleRoot, 'numFmts') || { children: [] }, 'numFmt').map(item => [Number(item.attributes.numFmtId), item.attributes.formatCode || '']));
+    for (const section of ['numFmts', 'fonts', 'fills', 'borders', 'cellStyleXfs', 'cellXfs', 'cellStyles', 'dxfs', 'colors']) {
+      if (children(styleRoot, section).length > 1) markUnsupported(`스타일 ${section} 컨테이너가 중복되어 안전한 저장을 지원하지 않습니다.`);
+    }
+    const supportedBorderColorAttributes = new Set(['rgb', 'indexed', 'theme', 'tint', 'auto']);
+    for (const border of children(child(styleRoot, 'borders') || { children: [] }, 'border')) for (const sideName of ['left', 'right', 'top', 'bottom']) {
+      const sides = children(border, sideName);
+      if (sides.length > 1) markUnsupported('중복된 테두리 변이 있어 안전한 저장을 지원하지 않습니다.');
+      for (const side of sides) {
+        const colors = children(side, 'color');
+        if (Object.keys(side.attributes).some(attribute => attribute !== 'style') || side.children.some(item => item.name !== 'color') || colors.length > 1) markUnsupported('테두리 서식 확장은 현재 저장을 지원하지 않습니다.');
+        for (const color of colors) if (Object.keys(color.attributes).some(attribute => !supportedBorderColorAttributes.has(attribute)) || color.children.length) markUnsupported('테두리 서식 확장은 현재 저장을 지원하지 않습니다.');
+      }
+    }
+    // 글꼴 서식 요소를 교체할 때 보존할 수 없는 확장 데이터가 있는 문서는 잠급니다.
+    const supportedColorAttributes = new Set(['rgb', 'indexed', 'theme', 'tint', 'auto']);
+    for (const font of children(child(styleRoot, 'fonts') || { children: [] }, 'font')) {
+      for (const tag of ['b', 'i', 'u', 'strike', 'sz', 'name', 'color']) if (children(font, tag).length > 1) markUnsupported('중복된 글꼴 서식 요소가 있어 안전한 저장을 지원하지 않습니다.');
+      for (const tag of ['b', 'i', 'u', 'strike']) for (const element of children(font, tag)) {
+        if (Object.keys(element.attributes).some(attribute => attribute !== 'val') || element.children.length) markUnsupported('글꼴 서식 확장은 현재 저장을 지원하지 않습니다.');
+      }
+      for (const element of children(font, 'sz')) if (Object.keys(element.attributes).some(attribute => attribute !== 'val') || element.children.length) markUnsupported('글꼴 서식 확장은 현재 저장을 지원하지 않습니다.');
+      for (const color of children(font, 'color')) if (Object.keys(color.attributes).some(attribute => !supportedColorAttributes.has(attribute)) || color.children.length) markUnsupported('글꼴 색상 확장은 현재 저장을 지원하지 않습니다.');
+    }
+    const numFmtContainers = children(styleRoot, 'numFmts'), numFmtContainer = numFmtContainers[0], numFmtEntries = children(numFmtContainer || { children: [] }, 'numFmt'), numFmtIds = new Set();
+    if (numFmtContainers.length > 1 || numFmtContainer && (!/^(?:0|[1-9]\d*)$/.test(numFmtContainer.attributes.count || '') || Number(numFmtContainer.attributes.count) !== numFmtEntries.length || numFmtContainer.children.some(item => item.name !== 'numFmt'))) markUnsupported('사용자 지정 숫자 형식 목록이 중복되었거나 개수가 일치하지 않습니다.');
+    for (const entry of numFmtEntries) {
+      const id = entry.attributes.numFmtId, numericId = Number(id);
+      if (!/^(?:0|[1-9]\d*)$/.test(id || '') || numericId < 164 || numericId > 65535 || typeof entry.attributes.formatCode !== 'string' || !entry.attributes.formatCode || entry.children.length || numFmtIds.has(id)) markUnsupported('사용자 지정 숫자 형식 항목을 안전하게 저장할 수 없습니다.');
+      numFmtIds.add(id);
+    }
+    const customFormats = new Map(numFmtEntries.map(item => [Number(item.attributes.numFmtId), item.attributes.formatCode || '']));
     const fonts = children(child(styleRoot, 'fonts') || { children: [] }, 'font').map(font => {
       const size = Number(child(font, 'sz')?.attributes?.val);
       return {
@@ -1294,9 +1524,29 @@ function analyze(input, extension = '.xlsx') {
       return { color: pattern?.attributes?.patternType === 'solid' ? styleColor(child(pattern, 'fgColor'), colorContext) : null };
     });
     const borders = children(child(styleRoot, 'borders') || { children: [] }, 'border');
+    const validateStyleReference = (xf, attribute, definitions, label) => {
+      const raw = xf.attributes[attribute];
+      if (raw === undefined) return;
+      const index = Number(raw);
+      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(index) || index >= definitions.length) markUnsupported(`${label} 참조가 유효하지 않습니다.`);
+    };
+    for (const xf of baseXfs) {
+      validateStyleReference(xf, 'fontId', fonts, '기본 글꼴');
+      validateStyleReference(xf, 'fillId', fills, '기본 채우기');
+      validateStyleReference(xf, 'borderId', borders, '기본 테두리');
+      const rawNumFmtId = xf.attributes.numFmtId, numFmtId = rawNumFmtId === undefined ? 0 : Number(rawNumFmtId);
+      if (rawNumFmtId !== undefined && (!/^\d+$/.test(rawNumFmtId) || !Number.isSafeInteger(numFmtId) || numFmtId > 65535 || numFmtId >= 164 && !customFormats.has(numFmtId))) markUnsupported('기본 숫자 형식 참조가 유효하지 않습니다.');
+    }
+    if (normalStyle?.attributes.xfId !== undefined) validateStyleReference({ attributes: { xfId: normalStyle.attributes.xfId } }, 'xfId', baseXfs, '기본 셀 스타일');
     const cellXfs = child(styleRoot, 'cellXfs');
     for (const xf of children(cellXfs || { children: [] }, 'xf')) {
-      const numFmtId = Number(xf.attributes.numFmtId) || 0;
+      if (children(xf, 'alignment').length > 1) markUnsupported('중복된 셀 정렬 요소가 있어 안전한 저장을 지원하지 않습니다.');
+      validateStyleReference(xf, 'fontId', fonts, '셀 글꼴');
+      validateStyleReference(xf, 'fillId', fills, '셀 채우기');
+      validateStyleReference(xf, 'borderId', borders, '셀 테두리');
+      validateStyleReference(xf, 'xfId', baseXfs, '기본 셀 스타일');
+      const rawNumFmtId = xf.attributes.numFmtId, numFmtId = rawNumFmtId === undefined ? 0 : Number(rawNumFmtId);
+      if (rawNumFmtId !== undefined && (!/^\d+$/.test(rawNumFmtId) || !Number.isSafeInteger(numFmtId) || numFmtId > 65535 || numFmtId >= 164 && !customFormats.has(numFmtId))) markUnsupported('셀 숫자 형식 참조가 유효하지 않습니다.');
       styleFormats.push({
         numFmtId,
         formatCode: customFormats.get(numFmtId) || BUILTIN_NUMBER_FORMATS[numFmtId] || null,
@@ -1445,7 +1695,9 @@ function analyze(input, extension = '.xlsx') {
         const inlineString = child(cell, 'is');
         if (inlineString && (inlineString.children.length !== 1 || inlineString.children[0].name !== 't' || inlineString.children[0].children.length)) markUnsupported('서식 또는 확장이 포함된 인라인 문자열은 현재 저장을 지원하지 않습니다.');
         const decoded = decodeCellValue(cell, sharedStrings, date1904);
-        const styleIndex = Number(cell.attributes.s) || 0, cellFormat = styleFormats[styleIndex] || { numFmtId: 0, formatCode: BUILTIN_NUMBER_FORMATS[0] };
+        const rawStyleIndex = cell.attributes.s, styleIndex = rawStyleIndex === undefined ? 0 : Number(rawStyleIndex);
+        if (rawStyleIndex !== undefined && (!/^\d+$/.test(rawStyleIndex) || !Number.isSafeInteger(styleIndex) || styleIndex >= Math.max(styleFormats.length, stylesPath ? 0 : 1))) markUnsupported(`셀 스타일 참조가 유효하지 않습니다: ${address}`);
+        const cellFormat = styleFormats[styleIndex] || { numFmtId: 0, formatCode: BUILTIN_NUMBER_FORMATS[0] };
         const item = { address, row: r - 1, column: c - 1, value: decoded.value, kind: decoded.kind, formula: formula?.text || null, formulaType: formula?.attributes?.t || null, hasFormula: Boolean(formula), cachedValue: decoded.value, style: cell.attributes.s || null, styleProperties: cellFormat.properties || null, numFmtId: cellFormat.numFmtId, formatCode: cellFormat.formatCode, ...(date1904 ? { date1904: true } : {}) };
         if (decoded.isoDate !== undefined) item.isoDate = decoded.isoDate;
         cells.set(address, item);
@@ -1500,7 +1752,10 @@ function analyze(input, extension = '.xlsx') {
   if (chartSourceRanges.some(range => range.sheetIndex < 0)) markUnsupported('차트 원본 수식이 없는 워크시트를 참조합니다.');
   const chartPaths = [...new Map(sheetEntries.flatMap((sheet, sheetIndex) => sheet.chartPaths.map(chartPath => [chartPath, { path: chartPath, sheetIndex }]))).values()];
   classifyFilterHiddenRows(sheetEntries, definedNames, date1904);
-  return { bytes, files, records, sheets: sheetEntries, normalFont, chartSourceRanges, chartPaths, hasCharts: sheetEntries.some(sheet => sheet.charts.length > 0), sharedStrings, styleFormats, colorContext, definedNames, date1904, stylesPath: stylesPath || null, writable: unsupported.length === 0, readOnlyReason: unsupported.join(' '), unsupported, formulas: anyFormula, extension };
+  const workbookViews = child(workbook, 'bookViews');
+  const requestedActiveSheet = Number((workbookViews ? child(workbookViews, 'workbookView') : null)?.attributes.activeTab ?? 0);
+  const activeSheetIndex = Number.isInteger(requestedActiveSheet) && sheetEntries[requestedActiveSheet]?.visible ? requestedActiveSheet : Math.max(0, sheetEntries.findIndex(sheet => sheet.visible));
+  return { bytes, files, records, sheets: sheetEntries, activeSheetIndex, normalFont, chartSourceRanges, chartPaths, hasCharts: sheetEntries.some(sheet => sheet.charts.length > 0), sharedStrings, styleFormats, colorContext, definedNames, date1904, stylesPath: stylesPath || null, writable: unsupported.length === 0, readOnlyReason: unsupported.join(' '), unsupported, formulas: anyFormula, extension };
 }
 
 function filterRowsForModel(model, options = {}) {
@@ -2043,10 +2298,12 @@ function prepareNumberStyles(model, formatByBase) {
     updated = xml.slice(0, start) + newOpening + body + additions.join('') + xml.slice(closeStart);
   }
   if (formatByBase.size && [...formatByBase.values()].some(item => item.formatCode)) {
-    const oldCustomIds = new Set(numFmtsMatch ? [...numFmtsMatch[0].matchAll(/<numFmt\b[^>]*\bnumFmtId="(\d+)"/g)].map(match => Number(match[1])) : []);
+    const oldCustomIds = new Set(numFmtsMatch ? [...numFmtsMatch[0].matchAll(/<numFmt\b[^>]*\/?\s*>/g)].map(match => Number(parseTagAttributes(match[0]).numFmtId)).filter(Number.isInteger) : []);
     const customXml = [...customFormats].filter(([id]) => !oldCustomIds.has(id)).map(([id, code]) => '<numFmt numFmtId="' + id + '" formatCode="' + xmlEscape(code) + '"/>').join('');
     if (numFmtsMatch) {
-      const replacement = numFmtsMatch[0].replace(/\bcount="\d+"/, 'count="' + customFormats.size + '"').replace('</numFmts>', () => customXml + '</numFmts>');
+      const counted = numFmtsMatch[0].replace(/\bcount\s*=\s*(["'])(\d+)\1/, (_all, quote) => 'count=' + quote + customFormats.size + quote);
+      if (counted === numFmtsMatch[0]) fail('사용자 지정 숫자 형식 개수를 갱신할 수 없습니다.');
+      const replacement = counted.replace('</numFmts>', () => customXml + '</numFmts>');
       updated = updated.replace(numFmtsMatch[0], () => replacement);
     } else {
       const cellStyleXfs = updated.indexOf('<cellStyleXfs');
@@ -2138,9 +2395,21 @@ function prepareFontStyles(stylesPath, sourceXml, fontByBase) {
     if (family === undefined) return font;
     const expression = /<name(?:\s+[^>]*)?(?:\s*\/\s*>|>(?:[\s\S]*?)<\/name>)/;
     const match = expression.exec(font);
-    if (family === null) return match ? font.slice(0, match.index) + font.slice(match.index + match[0].length) : font;
+    if (family === null && match) {
+      const openingEnd = match[0].indexOf('>') + 1, opening = match[0].slice(0, openingEnd), attributes = parseTagAttributes(opening);
+      delete attributes.val;
+      if (!Object.keys(attributes).length) return font.slice(0, match.index) + font.slice(match.index + match[0].length);
+      const tagName = /^<([^\s/>]+)/.exec(opening)?.[1];
+      const replacement = '<' + tagName + Object.entries(attributes).map(([name, value]) => ' ' + name + '=\"' + xmlEscape(value) + '\"').join('') + (/\/\s*>$/.test(opening) ? '/>' : '>') + match[0].slice(openingEnd);
+      return font.slice(0, match.index) + replacement + font.slice(match.index + match[0].length);
+    }
+    if (family === null) return font;
     const element = '<name val="' + xmlEscape(family) + '"/>';
-    if (match) return font.slice(0, match.index) + element + font.slice(match.index + match[0].length);
+    if (match) {
+      const openingEnd = match[0].indexOf('>') + 1;
+      const opening = setTagAttribute(match[0].slice(0, openingEnd), 'val', family);
+      return font.slice(0, match.index) + opening + match[0].slice(openingEnd) + font.slice(match.index + match[0].length);
+    }
     const selfClosingRoot = /^<font\b[^>]*\/>/.exec(font);
     if (selfClosingRoot) return selfClosingRoot[0].replace(/\s*\/\s*>$/, '>' + element + '</font>') + font.slice(selfClosingRoot[0].length);
     const insertion = /<(?:b|i|u|strike|sz|color|vertAlign|scheme)\b|<\/font>/.exec(font);
@@ -4732,7 +5001,7 @@ function transformTableFilterColumns(xml, action, columnIndex) {
   return xml.slice(0, range.start) + element.slice(0, element.indexOf('>') + 1) + updatedBody + '</autoFilter>' + xml.slice(range.end);
 }
 
-function transformTableSortStateForStructure(xml, sheetName, operation, table) {
+function transformTableSortStateForStructure(xml, sheetName, operation, table, worksheetSortState = false) {
   const stateName = /<((?:[\w.-]+:)?sortState)\b/.exec(xml)?.[1];
   if (!stateName) return xml;
   const stateRange = findElementRanges(xml, stateName).get('');
@@ -4741,7 +5010,11 @@ function transformTableSortStateForStructure(xml, sheetName, operation, table) {
   const stateAttributes = parseTagAttributes(stateOpening), patches = [];
   if (stateAttributes.ref) {
     const nextRef = transformFormulaForStructure(stateAttributes.ref, sheetName, sheetName, operation);
-    if (nextRef.includes('#REF!')) fail('행·열 변경 후 표 정렬 범위가 유효하지 않습니다.');
+    if (nextRef.includes('#REF!')) {
+      if (table && !worksheetSortState) fail('행·열 변경 후 표 정렬 범위가 유효하지 않습니다.');
+      return xml.slice(0, stateRange.start) + xml.slice(stateRange.end);
+    }
+    if (!parseRangeReference(nextRef, sheetName, LIMITS.rows * LIMITS.columns)) fail('행·열 변경 후 정렬 범위가 워크시트 한도를 벗어납니다.');
     if (nextRef !== stateAttributes.ref) patches.push({ start: 0, end: stateRange.startTagEnd - stateRange.start, replacement: setTagAttribute(stateOpening, 'ref', nextRef) });
   }
   const conditionName = /<((?:[\w.-]+:)?sortCondition)\b/.exec(stateXml)?.[1];
@@ -4751,7 +5024,7 @@ function transformTableSortStateForStructure(xml, sheetName, operation, table) {
     const opening = stateXml.slice(condition.start, condition.startTagEnd), attributes = parseTagAttributes(opening);
     if (!attributes.ref) fail('표 정렬 조건에 참조 범위가 없습니다.');
     let nextRef = transformFormulaForStructure(attributes.ref, sheetName, sheetName, operation);
-    if (operation.axis === 'row' && operation.action === 'insert') {
+    if (table && operation.axis === 'row' && operation.action === 'insert') {
       const range = parseRangeReference(attributes.ref, sheetName, LIMITS.rows * LIMITS.columns);
       const dataTop = table.range.top + (table.headerRowCount || 0), dataBottom = table.range.bottom - (table.totalsRowCount || 0);
       if (range && (operation.index === dataTop && range.top === dataTop || table.totalsRowCount && operation.index === dataBottom + 1 && range.bottom === dataBottom)) {
@@ -4764,6 +5037,7 @@ function transformTableSortStateForStructure(xml, sheetName, operation, table) {
       patches.push({ start: condition.start, end: condition.end, replacement: '' });
       continue;
     }
+    if (!parseRangeReference(nextRef, sheetName, LIMITS.rows * LIMITS.columns)) fail('행·열 변경 후 정렬 조건이 워크시트 한도를 벗어납니다.');
     retainedConditions++;
     if (nextRef !== attributes.ref) patches.push({ start: condition.start, end: condition.startTagEnd, replacement: setTagAttribute(opening, 'ref', nextRef) });
   }
@@ -4771,6 +5045,24 @@ function transformTableSortStateForStructure(xml, sheetName, operation, table) {
   let updatedState = stateXml;
   for (const patch of patches.sort((left, right) => right.start - left.start)) updatedState = updatedState.slice(0, patch.start) + patch.replacement + updatedState.slice(patch.end);
   return xml.slice(0, stateRange.start) + updatedState + xml.slice(stateRange.end);
+}
+
+function transformWorksheetSortStateForStructure(sheet, operation) {
+  const states = [...findElementRanges(sheet.xml, 'sortState').values()];
+  if (states.length > 1) fail('워크시트 정렬 상태가 중복되어 구조 변경을 안전하게 적용할 수 없습니다.');
+  const state = states[0];
+  if (!state) return [];
+  const original = sheet.xml.slice(state.start, state.end);
+  const parsed = parseXml(new TextEncoder().encode(original), sheet.path).root;
+  const allowedStateAttributes = new Set(['ref', 'caseSensitive', 'columnSort', 'customList', 'sortMethod']);
+  const allowedConditionAttributes = new Set(['ref', 'descending', 'sortBy', 'customList', 'dxfId', 'iconSet', 'iconId']);
+  if (localName(parsed) !== 'sortState' || parsed.children.length > 64 || Object.keys(parsed.attributes).some(name => !allowedStateAttributes.has(name)) || parsed.children.some(condition => localName(condition) !== 'sortCondition' || condition.children.length || condition.text.trim() || !condition.attributes.ref || Object.keys(condition.attributes).some(name => !allowedConditionAttributes.has(name)))) fail('지원하지 않는 워크시트 정렬 상태가 있어 구조 변경을 안전하게 적용할 수 없습니다.');
+  if (['caseSensitive', 'columnSort'].some(name => parsed.attributes[name] !== undefined && !['0', '1', 'true', 'false'].includes(parsed.attributes[name])) || parsed.attributes.sortMethod !== undefined && !['stroke', 'pinYin'].includes(parsed.attributes.sortMethod) || parsed.children.some(condition => condition.attributes.descending !== undefined && !['0', '1', 'true', 'false'].includes(condition.attributes.descending) || condition.attributes.sortBy !== undefined && !['cellColor', 'fontColor', 'cellIcon', 'value'].includes(condition.attributes.sortBy) || condition.attributes.dxfId !== undefined && !/^(?:0|[1-9]\d*)$/.test(condition.attributes.dxfId) || condition.attributes.iconId !== undefined && !/^(?:0|[1-9]\d*)$/.test(condition.attributes.iconId))) fail('워크시트 정렬 옵션이 유효하지 않아 구조 변경을 중단했습니다.');
+  const ranges = [parsed.attributes.ref, ...parsed.children.map(condition => condition.attributes.ref)].filter(Boolean).map(reference => parseRangeReference(reference, sheet.name, LIMITS.rows * LIMITS.columns));
+  if (ranges.some(range => !range || range.sheetName?.toLocaleLowerCase() !== sheet.name.toLocaleLowerCase())) fail('워크시트 정렬 참조가 유효하지 않아 구조 변경을 중단했습니다.');
+  const filterContext = sheet.autoFilter && { range: sheet.autoFilter, headerRowCount: 1, totalsRowCount: 0 };
+  const updated = transformTableSortStateForStructure(original, sheet.name, operation, filterContext, true);
+  return updated === original ? [] : [{ start: state.start, end: state.end, replacement: updated }];
 }
 
 function resizeTableSortState(xml, sheetName, table, nextRange) {
@@ -6153,8 +6445,34 @@ function patchSheetVisibility(model, sheetIndex, visible) {
   if (sheetTags.length !== model.sheets.length) fail('워크시트 표시 상태를 안전하게 변경할 수 없습니다.');
   const match = sheetTags[sheetIndex];
   const opening = match[0];
-  const updatedTag = replaceTagAttribute(opening, 'state', visible ? 'visible' : 'hidden');
-  const updatedXml = workbookXml.slice(0, match.index) + updatedTag + workbookXml.slice(match.index + opening.length);
+  const updatedTag = setTagAttribute(opening, 'state', visible ? 'visible' : 'hidden');
+  let updatedXml = workbookXml.slice(0, match.index) + updatedTag + workbookXml.slice(match.index + opening.length);
+  const nextVisibleIndex = model.sheets.findIndex((item, index) => index === sheetIndex ? visible : item.visible);
+  let activeTabChanged = false;
+  updatedXml = updatedXml.replace(/<workbookView\b[^>]*\/?\s*>/g, tag => {
+    const attributes = parseTagAttributes(tag), active = Number(attributes.activeTab ?? 0);
+    const next = visible ? sheetIndex : active === sheetIndex || !model.sheets[active]?.visible ? nextVisibleIndex : active;
+    if (!Number.isInteger(next) || next < 0) fail('표시된 활성 워크시트를 찾을 수 없습니다.');
+    if (next === active && attributes.activeTab !== undefined) return tag;
+    activeTabChanged ||= next !== active || attributes.activeTab === undefined;
+    return setTagAttribute(tag, 'activeTab', next);
+  });
+  if (!/<workbookView\b/.test(updatedXml)) {
+    const implicitNextActive = visible ? sheetIndex : sheetIndex === 0 ? nextVisibleIndex : 0;
+    activeTabChanged ||= implicitNextActive !== 0;
+  }
+  if (activeTabChanged && !/<workbookView\b/.test(updatedXml)) {
+    const workbookViews = findElementRanges(updatedXml, 'bookViews').get('');
+    if (workbookViews?.selfClosing) {
+      updatedXml = updatedXml.slice(0, workbookViews.start) + '<bookViews><workbookView activeTab="' + (visible ? sheetIndex : nextVisibleIndex) + '"/></bookViews>' + updatedXml.slice(workbookViews.end);
+    } else if (workbookViews) {
+      updatedXml = updatedXml.slice(0, workbookViews.closingStart) + '<workbookView activeTab="' + (visible ? sheetIndex : nextVisibleIndex) + '"/>' + updatedXml.slice(workbookViews.closingStart);
+    } else {
+      const sheetsRange = findElementRanges(updatedXml, 'sheets').get('');
+      if (!sheetsRange) fail('통합 문서 시트 목록 앞에 활성 워크시트 보기를 추가할 수 없습니다.');
+      updatedXml = updatedXml.slice(0, sheetsRange.start) + '<bookViews><workbookView activeTab="' + (visible ? sheetIndex : nextVisibleIndex) + '"/></bookViews>' + updatedXml.slice(sheetsRange.start);
+    }
+  }
   const outputFiles = { ...model.files, [workbookPath]: new TextEncoder().encode(updatedXml) };
   const bytes = zipSync(outputFiles, { level: 0 }), checked = analyze(bytes, model.extension);
   if (!checked.writable) fail('워크시트 표시 상태 변경 후 패키지 검사에서 거절되었습니다: ' + checked.readOnlyReason);
@@ -6987,6 +7305,7 @@ function transformStructure(model, operation) {
   }
   patches.push(...transformMergedCellsForStructure(sheet, operation));
   patches.push(...transformConditionalFormatsForStructure(sheet, operation));
+  patches.push(...transformWorksheetSortStateForStructure(sheet, operation));
   const hyperlinkRelationshipRemovals = new Map(), hyperlinkRelationshipPaths = new Set();
   for (const validationSheet of model.sheets) {
     const validationSheetIndex = model.sheets.indexOf(validationSheet);
@@ -7210,7 +7529,7 @@ function transformStructure(model, operation) {
 
 }
 
-module.exports = { LIMITS, TABLE_STYLE_NAMES, analyze, calculateChartPreviews, children, conditionalStyleForCell, formatCellValue, inspectZip, parseRangeReference, parseXml, patchCell, patchCells, patchColumnWidths, patchRowHeights, patchRowHeightValues, validatePrintSettings, patchPrintSettings, patchPrintArea, patchDefinedName, patchPrintTitles, validatePrintTitles, patchHeaderFooter, patchPageBreaks, tableFilterRange, patchAutoFilters, patchFilterVisibility, patchHiddenRows, patchHiddenColumns, patchOutlineGroups, patchFreezePanes, patchMergedCells, planTableHeaderEdits, patchTableColumnNames, renameStructuredColumns, planTableExpansion, prepareTableExpansion, patchCalculatedColumns, planCalculatedColumn, fillCalculatedRows, patchAddTable, patchTableStyles, patchTableRanges, patchTableTotals, totalsFunctionForCell, patchAddChart, patchChartMetadata, patchChartPlacement, patchChartSource, patchDeleteChart, patchSheetVisibility, patchSheetZoom, patchSheetName, patchAddSheet, patchDeleteSheet, patchMoveSheet, transformStructure, translateFormulaReferences, rowNumber, safeUnzip, textContent };
+module.exports = { LIMITS, TABLE_STYLE_NAMES, analyze, createBlankWorkbook, calculateChartPreviews, children, conditionalStyleForCell, formatCellValue, inspectZip, parseRangeReference, parseXml, patchCell, patchCells, patchColumnWidths, patchRowHeights, patchRowHeightValues, validatePrintSettings, patchPrintSettings, patchPrintArea, patchDefinedName, patchPrintTitles, validatePrintTitles, patchHeaderFooter, patchPageBreaks, tableFilterRange, patchAutoFilters, patchFilterVisibility, patchHiddenRows, patchHiddenColumns, patchOutlineGroups, patchFreezePanes, patchMergedCells, planTableHeaderEdits, patchTableColumnNames, renameStructuredColumns, planTableExpansion, prepareTableExpansion, patchCalculatedColumns, planCalculatedColumn, fillCalculatedRows, patchAddTable, patchTableStyles, patchTableRanges, patchTableTotals, totalsFunctionForCell, patchAddChart, patchChartMetadata, patchChartPlacement, patchChartSource, patchDeleteChart, patchSheetVisibility, patchSheetZoom, patchSheetName, patchAddSheet, patchDeleteSheet, patchMoveSheet, transformStructure, translateFormulaReferences, rowNumber, safeUnzip, textContent };
 module.exports.patchDataValidations = patchDataValidations;
 module.exports.patchDataBarConditionalFormat = patchDataBarConditionalFormat;
 module.exports.patchCellValueConditionalFormat = patchCellValueConditionalFormat;

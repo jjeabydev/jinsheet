@@ -2,7 +2,7 @@
   "name": "jinsheet",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "publisher": "jjeabydev",
   "engines": {
     "vscode": "^1.90.0"
@@ -73,6 +73,10 @@
       }
     ],
     "commands": [
+      {
+        "command": "jinsheet.newWorkbook",
+        "title": "%command.newWorkbook%"
+      },
       {
         "command": "jinsheet.open",
         "title": "%command.open%"

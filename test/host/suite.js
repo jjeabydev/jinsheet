@@ -3148,6 +3148,7 @@ suite('JinSheet Extension Host', () => {
       const act=async(row,column,script='')=>wait('(()=>{const cell=document.querySelector('+JSON.stringify('#cell-'+row+'-'+column)+');if(!cell)return false;const rect=cell.getBoundingClientRect(),event={bubbles:true,button:0,clientX:rect.left+4,clientY:rect.top+4};cell.dispatchEvent(new MouseEvent("mousedown",event));cell.dispatchEvent(new MouseEvent("mouseup",event));cell.dispatchEvent(new MouseEvent("click",event));if(!cell.classList.contains("selected")||document.querySelector("#address").value!=='+JSON.stringify(String.fromCharCode(65+column)+(row+1))+')return false;'+script+';return true})()');
       const enter=async(row,column,value)=>act(row,column,'const input=document.querySelector("#formula");input.value='+JSON.stringify(value)+';input.dispatchEvent(new Event("input",{bubbles:true}));input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}))');
       const save=async()=>{await vscode.commands.executeCommand('workbench.action.files.save');return analyze(await fs.readFile(file));};
+      const saveUntil=async predicate=>{const end=Date.now()+6000;do{const workbook=await save();if(predicate(workbook))return workbook;await new Promise(resolve=>setTimeout(resolve,25));}while(Date.now()<end);assert.fail('Table expansion save did not reach the expected state');};
       await wait('document.querySelector("#autoExpandTables")?.checked&&!document.querySelector("#autoExpandTables").disabled');
       await enter(1,2,'=B2*2');await wait('document.querySelector("#cell-3-2")?.textContent==="60"');await save();
       await enter(4,1,'7');await wait('document.querySelector("#cell-4-2")?.textContent==="14"');
@@ -3164,7 +3165,7 @@ suite('JinSheet Extension Host', () => {
       await wait('document.querySelector("#cell-6-2")?.textContent==="22"&&document.querySelector("#cell-7-2")?.textContent==="24"&&document.querySelector("#cell-7-3")?.textContent==="13"');
       saved=await save();assert.equal(saved.sheets[0].tables[0].range.bottom,7);assert.equal(saved.sheets[0].tables[0].autoFilter.bottom,7);assert.equal(saved.sheets[0].cells.get('B5').value,'7');assert.equal(saved.sheets[0].cells.get('B6').value,'9');assert.equal(saved.sheets[0].cells.get('C8').formula,'B8*2');assert.equal(saved.sheets[0].tables[0].calculatedColumns[3],'B2+1');
       await vscode.commands.executeCommand('jinsheet.undo');await wait('document.querySelector("#cell-6-1")?.textContent===""&&document.querySelector("#cell-7-2")?.textContent===""');saved=await save();assert.equal(saved.sheets[0].tables[0].range.bottom,5);
-      await vscode.commands.executeCommand('jinsheet.redo');await wait('document.querySelector("#cell-7-3")?.textContent==="13"');await save();
+      await vscode.commands.executeCommand('jinsheet.redo');await wait('document.querySelector("#cell-7-3")?.textContent==="13"');await saveUntil(workbook=>workbook.sheets[0].tables[0].range.bottom===7&&workbook.sheets[0].tables[0].range.right===3&&workbook.sheets[0].cells.get('C8')?.formula==='B8*2');
       devtools.close();devtools=null;await vscode.commands.executeCommand('workbench.action.closeAllEditors');await vscode.commands.executeCommand('vscode.openWith',vscode.Uri.file(file),'jinsheet.editor');devtools=await waitForSpreadsheetWebview();await wait('document.querySelector("#cell-7-2")?.textContent==="24"&&document.querySelector("#cell-0-3")?.textContent==="Amount2"');
     } finally {devtools?.close();await vscode.commands.executeCommand('workbench.action.closeAllEditors');await fs.rm(directory,{recursive:true,force:true});}
   });
@@ -4698,7 +4699,11 @@ suite('JinSheet Extension Host', () => {
       assert.equal(await fs.readFile(file, 'utf8'), 'name,value\nexternal,name\n', 'redo of an external clipboard paste is saved');
 
       await waitFor('Boolean(document.querySelector("#cell-1-0"))', 'starting cell is rendered for drag auto-scroll');
-      const dragStart = await evaluate(`(() => { const cell = document.querySelector('#cell-1-0').getBoundingClientRect(), grid = document.querySelector('#grid').getBoundingClientRect(); return {x:cell.left + cell.width / 2, y:cell.top + cell.height / 2, edgeX:cell.left + cell.width / 2, edgeY:grid.bottom - 2, startScroll:document.querySelector('#grid').scrollTop}; })()`);
+      const dragStartExpression = `(() => { const cell = document.querySelector('#cell-1-0'), grid = document.querySelector('#grid'); if (!cell || !grid) return null; const cellRect=cell.getBoundingClientRect(), gridRect=grid.getBoundingClientRect(); return {x:cellRect.left + cellRect.width / 2, y:cellRect.top + cellRect.height / 2, edgeX:cellRect.left + cellRect.width / 2, edgeY:gridRect.bottom - 2, startScroll:grid.scrollTop}; })()`;
+      let dragStart = await evaluate(dragStartExpression);
+      const dragStartDeadline = Date.now() + 5000;
+      while (!dragStart && Date.now() < dragStartDeadline) { await new Promise(resolve => setTimeout(resolve, 25)); dragStart = await evaluate(dragStartExpression); }
+      assert.ok(dragStart, 'the starting cell and grid remain rendered before drag auto-scroll');
       await dispatchMouse({ type: 'mousePressed', x: dragStart.x, y: dragStart.y, button: 'left', buttons: 1, clickCount: 1 });
       await dispatchMouse({ type: 'mouseMoved', x: dragStart.edgeX, y: dragStart.edgeY, button: 'left', buttons: 1 });
       await waitFor(`document.querySelector('#grid').scrollTop > ${dragStart.startScroll + 20}`, 'dragging at the grid edge scrolls the worksheet');

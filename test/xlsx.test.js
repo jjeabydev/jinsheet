@@ -72,6 +72,46 @@ test('기본 수식 계산은 연산자 우선순위·셀 참조·범위 집계�
   assert.deepEqual(evaluateFormula('B1:B2/A1:A2', operatorArrayContext), [[1.5], [1.25]], 'binary division aligns range arrays');
   assert.deepEqual(evaluateFormula('A1:A2^2', operatorArrayContext), [[4], [16]], 'binary exponentiation broadcasts a scalar exponent');
   assert.deepEqual(evaluateFormula('A1:A2>=3', operatorArrayContext), [[false], [true]], 'comparisons map range values to Boolean results');
+  const comparisonContext = {
+    getCell: (row, column) => ['1', 1, true, null, 'Alpha', false][column],
+    getCellKind: (row, column) => ['string', 'number', 'boolean', 'blank', 'string', 'boolean'][column],
+  };
+  assert.equal(evaluateFormula('A1=1', comparisonContext), false, 'text numbers remain text in comparisons against numbers');
+  assert.equal(evaluateFormula('A1>0', comparisonContext), true, 'text sorts after numbers');
+  assert.equal(evaluateFormula('0<A1', comparisonContext), true, 'mixed type ordering is symmetric');
+  assert.equal(evaluateFormula('B1=1', comparisonContext), true, 'numeric values compare numerically');
+  assert.equal(evaluateFormula('E1="alpha"', comparisonContext), true, 'text comparisons ignore letter case');
+  assert.equal(evaluateFormula('"ä"<"z"', { locale: 'en-US' }), true, 'text comparisons use English collation');
+  assert.equal(evaluateFormula('"ä"<"z"', { locale: 'sv-SE' }), false, 'text comparisons use Swedish collation');
+  assert.equal(evaluateFormula('"가"<"나"', { locale: 'ko-KR' }), true, 'text comparisons use Korean collation');
+  for (const [locale, expected] of [['en-US', true], ['sv-SE', false]]) {
+    const cells = new Map([['A1', { address: 'A1', row: 0, column: 0, value: '', kind: 'boolean', formula: '"ä"<"z"' }]]);
+    const document = {
+      locale,
+      state: { sheets: [{ name: 'Data', cells, mergedCells: [], tables: [] }] },
+      getCell: (row, column) => cells.get(String.fromCharCode(65 + column) + (row + 1)) || null
+    };
+    assert.equal(createFormulaCalculator(document).value(0, 0, 0), expected, `formula calculator carries the ${locale} document locale`);
+  }
+  assert.equal(evaluateFormula('E1<F1', comparisonContext), true, 'logical values sort after text');
+  assert.equal(evaluateFormula('F1<C1', comparisonContext), true, 'FALSE sorts before TRUE');
+  assert.equal(evaluateFormula('D1=0', comparisonContext), true, 'a blank reference compares equal to numeric zero');
+  assert.equal(evaluateFormula('D1=""', comparisonContext), true, 'a blank reference compares equal to an empty string');
+  assert.equal(evaluateFormula('"plain text"'), 'plain text', 'a formula containing only a text literal returns plain text');
+  assert.equal(evaluateFormula('"2"+1'), 3, 'arithmetic still converts numeric text literals');
+  assert.equal(evaluateFormula('"#N/A"+1'), '#VALUE!', 'error-looking text literals are not propagated as actual errors');
+  const errorTextCell = { getCell: () => '#N/A', getCellKind: () => 'string' };
+  assert.equal(evaluateFormula('A1+1', errorTextCell), '#VALUE!', 'error-looking text cells fail numeric conversion');
+  assert.equal(evaluateFormula('-A1', errorTextCell), '#VALUE!', 'unary arithmetic also treats error-looking text as text');
+  assert.equal(evaluateFormula('A1^2', errorTextCell), '#VALUE!', 'exponentiation also treats error-looking text as text');
+  assert.equal(evaluateFormula('A1&"!"', errorTextCell), '#N/A!', 'text concatenation keeps error-looking cell text');
+  assert.equal(evaluateFormula('A1="#N/A"', errorTextCell), true, 'error-looking text cells compare as text');
+  const numericTextCell = { getCell: () => '2', getCellKind: () => 'string' };
+  assert.equal(evaluateFormula('A1+1', numericTextCell), 3, 'arithmetic converts numeric text from a cell reference');
+  const actualErrorCell = { getCell: () => '#N/A', getCellKind: () => 'error' };
+  assert.equal(evaluateFormula('A1+1', actualErrorCell).value, '#N/A', 'actual error cells still propagate');
+  assert.equal(evaluateFormula('-A1', actualErrorCell).value, '#N/A', 'actual error cells propagate through unary arithmetic');
+  assert.equal(evaluateFormula('A1&"!"', actualErrorCell).value, '#N/A', 'actual error cells propagate through concatenation');
   assert.deepEqual(evaluateFormula('A1:A2&"x"', operatorArrayContext), [['2x'], ['4x']], 'string concatenation broadcasts a scalar');
   assert.deepEqual(evaluateFormula('-A1:A2', operatorArrayContext), [[-2], [-4]], 'unary negation maps over a range');
   assert.deepEqual(evaluateFormula('A1:A2%', operatorArrayContext), [[0.02], [0.04]], 'percent operators map over a range');
@@ -1392,6 +1432,25 @@ test('수식 참조와 범위는 오류 모양 문자열 셀과 실제 오류 �
   assert.equal(calculator.value(0, 9, 2), true, 'ISTEXT recognizes an error-looking string cell');
   assert.equal(calculator.value(0, 10, 2), 'fallback', 'IFNA handles a typed error cell');
   assert.equal(calculator.value(0, 11, 2), '#N/A', 'IFNA preserves an error-looking string cell');
+});
+
+test('XLSX 저장·재열기 뒤에도 오류 모양 문자열과 실제 오류의 산술 결과를 구분한다', () => {
+  const saved = patchCells(analyze(fixture()), [
+    { sheetIndex: 0, address: 'D1', value: '#N/A', kind: 'string' },
+    { sheetIndex: 0, address: 'E1', value: '', formula: 'D1+1', kind: 'error' },
+    { sheetIndex: 0, address: 'F1', value: '', formula: 'D1="#N/A"', kind: 'boolean' },
+    { sheetIndex: 0, address: 'G1', value: '#N/A', kind: 'error' },
+    { sheetIndex: 0, address: 'H1', value: '', formula: 'G1+1', kind: 'error' }
+  ]);
+  const reopened = analyze(saved.bytes);
+  assert.equal(reopened.writable, true, reopened.readOnlyReason);
+  const calculator = createFormulaCalculator({
+    state: { formulas: true, sheets: reopened.sheets },
+    getCell: (row, column, sheetIndex = 0) => reopened.sheets[sheetIndex]?.cells.get(String.fromCharCode(65 + column) + (row + 1)) || null
+  });
+  assert.equal(calculator.value(0, 0, 4), '#VALUE!', 'text cell arithmetic recalculates as a value error after reopen');
+  assert.equal(calculator.value(0, 0, 5), true, 'text comparison recalculates after reopen');
+  assert.equal(calculator.value(0, 0, 7), '#N/A', 'actual error arithmetic propagates after reopen');
 });
 
 test('수식이 만들어 낸 오류 모양 텍스트는 문자열 종류를 유지한다', () => {

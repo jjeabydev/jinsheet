@@ -3229,10 +3229,11 @@ suite('JinSheet Extension Host', () => {
       const act=async(row,column,script='')=>wait('(()=>{const cell=document.querySelector('+JSON.stringify('#cell-'+row+'-'+column)+');if(!cell)return false;cell.click();'+script+';return true})()');
       const enter=async(row,column,value)=>act(row,column,'const input=document.querySelector("#formula");input.value='+JSON.stringify(value)+';input.dispatchEvent(new Event("input",{bubbles:true}));input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}))');
       const save=async()=>{await vscode.commands.executeCommand('workbench.action.files.save');return analyze(await fs.readFile(file))};
+      const saveUntil=async predicate=>{const end=Date.now()+6000;do{const workbook=await save();if(predicate(workbook))return workbook;await new Promise(resolve=>setTimeout(resolve,25))}while(Date.now()<end);assert.fail('Empty table save did not reach the expected state')};
       await wait('document.querySelector("#cell-5-3")?.textContent==="0"');await act(0,1,'document.querySelector("#filterValuesButton").click()');await wait('!document.querySelector("#filterPanel").hidden');await evaluate('document.querySelector("#filterCancel").click()');
       await enter(1,1,'7');await wait('document.querySelector("#cell-1-2")?.textContent==="14"&&document.querySelector("#cell-5-3")?.textContent==="14"');let saved=await save();assert.equal(saved.sheets[0].tables[0].range.bottom,1);assert.equal(saved.sheets[0].cells.get('C2').formula,'B2*2');await vscode.commands.executeCommand('jinsheet.undo');await wait('document.querySelector("#cell-5-3")?.textContent==="0"&&document.querySelector("#cell-1-2")?.textContent===""');saved=await save();assert.equal(saved.sheets[0].tables[0].range.bottom,0);
       await act(0,2,'document.querySelector("#tableTotals").click()');await wait('document.querySelector("#cell-1-2")?.textContent==="0"');await act(0,2,'document.querySelector("#grid").dispatchEvent(new KeyboardEvent("keydown",{key:"Tab",bubbles:true}))');await wait('document.querySelector("#address").value==="A2"&&document.querySelector("#cell-2-2")?.textContent==="0"');await enter(1,1,'9');await wait('document.querySelector("#cell-1-2")?.textContent==="18"&&document.querySelector("#cell-2-2")?.textContent==="18"');saved=await save();assert.equal(saved.sheets[0].tables[0].calculatedColumns[2],'B2*2');assert.equal(saved.sheets[0].tables[0].totalsRowCount,1);assert.equal(saved.sheets[0].tables[0].range.bottom,2);
-      await act(1,1,'document.querySelector("#deleteRow").click()');await wait('document.querySelector("#cell-1-2")?.textContent==="0"');saved=await save();assert.equal(saved.sheets[0].tables[0].range.bottom,1);assert.equal(saved.sheets[0].tables[0].autoFilter.bottom,0);assert.equal(saved.sheets[0].tables[0].calculatedColumns[2],'B2*2');await vscode.commands.executeCommand('jinsheet.undo');await wait('document.querySelector("#cell-1-2")?.textContent==="18"&&document.querySelector("#cell-2-2")?.textContent==="18"');await vscode.commands.executeCommand('jinsheet.redo');await wait('document.querySelector("#cell-1-2")?.textContent==="0"');await act(0,2,'document.querySelector("#grid").dispatchEvent(new KeyboardEvent("keydown",{key:"Tab",bubbles:true}))');await wait('document.querySelector("#address").value==="A2"&&document.querySelector("#cell-2-2")?.textContent==="0"');await enter(1,1,'9');await wait('document.querySelector("#cell-1-2")?.textContent==="18"&&document.querySelector("#cell-2-2")?.textContent==="18"');const tableSaveDeadline=Date.now()+5000;do{saved=await save();if(saved.sheets[0].tables[0].range.bottom===2&&saved.sheets[0].cells.get('C2')?.formula==='B2*2')break;await new Promise(resolve=>setTimeout(resolve,25))}while(Date.now()<tableSaveDeadline);assert.equal(saved.sheets[0].tables[0].range.bottom,2);assert.equal(saved.sheets[0].cells.get('C2').formula,'B2*2');
+      await act(1,1,'document.querySelector("#deleteRow").click()');await wait('document.querySelector("#cell-1-2")?.textContent==="0"');saved=await saveUntil(workbook=>workbook.sheets[0].tables[0].range.bottom===1&&workbook.sheets[0].tables[0].autoFilter.bottom===0);assert.equal(saved.sheets[0].tables[0].calculatedColumns[2],'B2*2');await vscode.commands.executeCommand('jinsheet.undo');await wait('document.querySelector("#cell-1-2")?.textContent==="18"&&document.querySelector("#cell-2-2")?.textContent==="18"');saved=await saveUntil(workbook=>workbook.sheets[0].tables[0].range.bottom===2);await vscode.commands.executeCommand('jinsheet.redo');await wait('document.querySelector("#cell-1-2")?.textContent==="0"');saved=await saveUntil(workbook=>workbook.sheets[0].tables[0].range.bottom===1);await act(0,2,'document.querySelector("#grid").dispatchEvent(new KeyboardEvent("keydown",{key:"Tab",bubbles:true}))');await wait('document.querySelector("#address").value==="A2"&&document.querySelector("#cell-2-2")?.textContent==="0"');await enter(1,1,'9');await wait('document.querySelector("#cell-1-2")?.textContent==="18"&&document.querySelector("#cell-2-2")?.textContent==="18"');saved=await saveUntil(workbook=>workbook.sheets[0].tables[0].range.bottom===2&&workbook.sheets[0].cells.get('C2')?.formula==='B2*2');
       devtools.close();devtools=null;await vscode.commands.executeCommand('workbench.action.closeAllEditors');await vscode.commands.executeCommand('vscode.openWith',vscode.Uri.file(file),'jinsheet.editor');devtools=await waitForSpreadsheetWebview();await wait('document.querySelector("#cell-1-2")?.textContent==="18"&&document.querySelector("#cell-2-2")?.textContent==="18"');
     }finally{devtools?.close();await vscode.commands.executeCommand('workbench.action.closeAllEditors');await fs.rm(directory,{recursive:true,force:true})}
   });
@@ -3919,6 +3920,16 @@ suite('JinSheet Extension Host', () => {
         return response.result?.value;
       };
       const original = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      const saveUntil = async predicate => {
+        const deadline = Date.now() + 3000;
+        do {
+          await vscode.commands.executeCommand('workbench.action.files.save');
+          const cell = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+          if (predicate(cell)) return cell;
+          await new Promise(resolve => setTimeout(resolve, 25));
+        } while (Date.now() < deadline);
+        assert.fail('Font-color save did not reach the expected state');
+      };
       const point = await evaluate(`(() => {const r=document.querySelector('#cell-1-2').getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);
       await devtools.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x + devtools.frameOffset.x, y: point.y + devtools.frameOffset.y, button: 'left', buttons: 1, clickCount: 1 });
       await devtools.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x + devtools.frameOffset.x, y: point.y + devtools.frameOffset.y, button: 'left', buttons: 0, clickCount: 1 });
@@ -3926,8 +3937,7 @@ suite('JinSheet Extension Host', () => {
       const deadline = Date.now() + 3000;
       while (Date.now() < deadline && await evaluate('(()=>{const cell=document.querySelector("#cell-1-2");return cell?getComputedStyle(cell).color:"missing"})()') !== 'rgb(0, 85, 204)') await new Promise(resolve => setTimeout(resolve, 25));
       assert.equal(await evaluate('(()=>{const cell=document.querySelector("#cell-1-2");return cell?getComputedStyle(cell).color:"missing"})()'), 'rgb(0, 85, 204)');
-      await vscode.commands.executeCommand('workbench.action.files.save');
-      let saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      let saved = await saveUntil(cell => cell.styleProperties.color === '#0055CC');
       assert.equal(saved.styleProperties.color, '#0055CC');
       assert.equal(saved.styleProperties.fill, original.styleProperties.fill);
       assert.deepEqual(saved.styleProperties.borders, original.styleProperties.borders);
@@ -3935,17 +3945,14 @@ suite('JinSheet Extension Host', () => {
       const clearDeadline = Date.now() + 3000;
       while (Date.now() < clearDeadline && await evaluate('document.querySelector("#notice")?.textContent.includes("Modified")') !== true) await new Promise(resolve => setTimeout(resolve, 25));
       assert.equal(await evaluate('document.querySelector("#notice")?.textContent.includes("Modified")'), true, 'clearing font color marks the workbook modified');
-      await vscode.commands.executeCommand('workbench.action.files.save');
-      saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      saved = await saveUntil(cell => cell.styleProperties.color === undefined);
       assert.equal(saved.styleProperties.color, undefined);
       assert.equal(saved.styleProperties.fill, original.styleProperties.fill);
       await vscode.commands.executeCommand('jinsheet.undo');
-      await vscode.commands.executeCommand('workbench.action.files.save');
-      saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      saved = await saveUntil(cell => cell.styleProperties.color === '#0055CC');
       assert.equal(saved.styleProperties.color, '#0055CC');
       await vscode.commands.executeCommand('jinsheet.redo');
-      await vscode.commands.executeCommand('workbench.action.files.save');
-      saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      saved = await saveUntil(cell => cell.styleProperties.color === undefined);
       assert.equal(saved.styleProperties.color, undefined);
       assert.deepEqual(saved.styleProperties.borders, original.styleProperties.borders);
     } finally {

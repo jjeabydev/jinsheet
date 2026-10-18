@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.8.0 / 2026-10-18
+- Protect workbook integrity when deleting worksheets with external hyperlinks, and block deletion when internal links, charts, data validation, or conditional formatting cannot be safely updated.
+- Preserve and rewrite namespace-prefixed table formulas when editing or deleting worksheets; detect duplicate formula elements and open ambiguous workbooks read-only.
+- Update English and Korean descriptions to explain the worksheet deletion safeguards and supported chart/table behavior.
+- Add regression coverage for worksheet deletion and namespace-prefixed table formulas through save, reopen, undo, and redo.
+
 ## 1.7.0 / 2026-10-18
 - Add a command to create a new blank XLSX workbook, confirm before replacing an existing file, and open the workbook for editing.
 - Collapse the complete toolbar to prioritize worksheet space; add Show menu shortcuts and an outlined Find result that preserves cell formatting.

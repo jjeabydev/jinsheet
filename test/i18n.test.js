@@ -82,6 +82,12 @@ test("common read-only and parser diagnostics are localized without leaking Kore
   assert.equal(translateDiagnostic("선택 범위 값 지우기", "en"), "Clear selected cells");
   assert.equal(translateDiagnostic("선택 범위 값 지우기", "ko"), "선택 범위 값 지우기");
   assert.equal(translateDiagnostic("선택 범위 정렬", "en"), "Sort selected range");
+  assert.equal(translateDiagnostic("같은 이름의 시트가 이미 있습니다.", "en"), "A worksheet with this name already exists.");
+  assert.equal(translateDiagnostic("같은 이름의 시트가 이미 있습니다.", "ko"), "같은 이름의 시트가 이미 있습니다.");
+  assert.equal(translateDiagnostic(String.raw`시트 이름은 1~31자이며 \\ / ? * [ ] : 문자를 사용할 수 없습니다.`, "en"), "Sheet names must be 1–31 characters and cannot contain \\ / ? * [ ] or :.");
+  assert.equal(translateDiagnostic("차트가 있는 통합문서에서는 시트를 삭제할 수 없습니다.", "en"), "Worksheets cannot be deleted while this workbook contains charts. Remove the charts first.");
+  assert.equal(translateDiagnostic("내부 하이퍼링크가 있는 통합문서에서는 시트를 삭제할 수 없습니다.", "en"), "This worksheet cannot be deleted while the workbook contains internal links.");
+  assert.equal(translateDiagnostic("삭제할 시트를 참조하는 데이터 유효성·조건부 서식은 안전하게 갱신할 수 없습니다.", "en"), "This worksheet is referenced by data validation or conditional formatting that cannot be safely updated.");
   assert.equal(translateDiagnostic("한 번에 정렬할 수 있는 셀은 20,000개까지입니다.", "en"), "Sort up to 20,000 cells in one operation.");
   assert.equal(translateDiagnostic("한 번에 정렬할 수 있는 셀은 20,000개까지입니다.", "ko"), "한 번에 정렬할 수 있는 셀은 20,000개까지입니다.");
   assert.equal(translateDiagnostic("열 너비 변경", "en"), "Resize column");

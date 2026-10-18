@@ -1639,6 +1639,9 @@ function analyze(input, extension = '.xlsx') {
           const headerRowCount = tableRoot.attributes.headerRowCount === undefined ? 1 : Number(tableRoot.attributes.headerRowCount), totalsRowCount = tableRoot.attributes.totalsRowCount === undefined ? 0 : Number(tableRoot.attributes.totalsRowCount);
           if (tableRoot.name !== 'table' || !tableName || !range || !columnsNode || columnsNode.children.some(node => node.name !== 'tableColumn') || !/^(?:0|[1-9]\d*)$/.test(columnsNode.attributes.count || '') || Number(columnsNode.attributes.count) !== tableColumns.length || range.right - range.left + 1 !== tableColumns.length || tableColumns.some(column => !column.attributes.name) || new Set(tableColumns.map(column => column.attributes.name.toLocaleLowerCase())).size !== tableColumns.length || ![0, 1].includes(headerRowCount) || ![0, 1].includes(totalsRowCount) || headerRowCount + totalsRowCount > range.bottom - range.top + 1) markUnsupported(`표 구성이 안전하게 보존 가능한 기본 형태가 아닙니다: ${tableName || relationship.path}`);
           else {
+            for (const column of tableColumns) {
+              if (childrenByLocalName(column, 'calculatedColumnFormula').length > 1 || childrenByLocalName(column, 'totalsRowFormula').length > 1) markUnsupported(`표 수식 요소가 중복되었습니다: ${tableName}`);
+            }
             let styleInfo = null;
             if (tableStyleNodes.length > 1) markUnsupported(`표 스타일 정보가 중복되었습니다: ${tableName}`);
             else try { styleInfo = readTableStyleInfo(tableStyleNodes[0]); }
@@ -1650,7 +1653,7 @@ function analyze(input, extension = '.xlsx') {
             const legacyTotalsFilter = Boolean(tableAutoFilter && totalsRowCount && tableAutoFilter.bottom === range.bottom);
             if (tableAutoFilter && (!expected || expected.bottom < expected.top || tableAutoFilter.top !== expected.top || tableAutoFilter.bottom !== expected.bottom && !legacyTotalsFilter || tableAutoFilter.left !== expected.left || tableAutoFilter.right !== expected.right)) markUnsupported(`표 자동 필터 범위가 머리글·데이터 범위와 일치하지 않습니다: ${tableName}`);
             if (tableAutoFilter && expected) tableAutoFilter = { ...tableAutoFilter, bottom: expected.bottom };
-            tables.push({ name: tableName, ref: tableRoot.attributes.ref, range, columns: tableColumns.map(column => column.attributes.name), headerRowCount, totalsRowCount, styleInfo, calculatedColumns: tableColumns.map(column => child(column, 'calculatedColumnFormula')?.text || null), calculatedColumnUnsupported: tableColumns.map(column => { const formula = child(column, 'calculatedColumnFormula'); return Boolean(formula && (formula.children.length || ['1', 'true'].includes(formula.attributes.array))); }), totalColumns: tableColumns.map(column => ({ configured: Object.hasOwn(column.attributes, 'totalsRowFunction') || Object.hasOwn(column.attributes, 'totalsRowLabel') || Boolean(child(column, 'totalsRowFormula')), function: column.attributes.totalsRowFunction || (child(column, 'totalsRowFormula') ? 'custom' : 'none'), label: column.attributes.totalsRowLabel ?? null, formula: child(column, 'totalsRowFormula')?.text ?? null })), autoFilter: tableAutoFilter, filterRangeNeedsNormalization: legacyTotalsFilter, path: relationship.path });
+            tables.push({ name: tableName, ref: tableRoot.attributes.ref, range, columns: tableColumns.map(column => column.attributes.name), headerRowCount, totalsRowCount, styleInfo, calculatedColumns: tableColumns.map(column => childrenByLocalName(column, 'calculatedColumnFormula')[0]?.text || null), calculatedColumnUnsupported: tableColumns.map(column => { const formula = childrenByLocalName(column, 'calculatedColumnFormula')[0]; return Boolean(formula && (formula.children.length || ['1', 'true'].includes(formula.attributes.array))); }), totalColumns: tableColumns.map(column => { const formula = childrenByLocalName(column, 'totalsRowFormula')[0]; return { configured: Object.hasOwn(column.attributes, 'totalsRowFunction') || Object.hasOwn(column.attributes, 'totalsRowLabel') || Boolean(formula), function: column.attributes.totalsRowFunction || (formula ? 'custom' : 'none'), label: column.attributes.totalsRowLabel ?? null, formula: formula?.text ?? null }; }), autoFilter: tableAutoFilter, filterRangeNeedsNormalization: legacyTotalsFilter, path: relationship.path });
           }
         }
         if (usedRelationships.size !== sheetRelationships.size) markUnsupported('표 외의 워크시트 관계가 있어 안전한 편집을 보장할 수 없습니다.');
@@ -1896,8 +1899,9 @@ function patchCell(model, sheetIndex, address, value) {
   return patchCells(model, [{ sheetIndex, address, value }]);
 }
 
-function findElementRanges(xml, targetName, keyAttribute, allowDuplicates = false) {
+function findElementRanges(xml, targetName, keyAttribute, allowDuplicates = false, matchLocalName = false) {
   const ranges = new Map(), stack = [];
+  const isTarget = name => matchLocalName ? name.split(':').at(-1) === targetName : name === targetName;
   let i = 0;
   while (i < xml.length) {
     const lt = xml.indexOf('<', i);
@@ -1931,11 +1935,11 @@ function findElementRanges(xml, targetName, keyAttribute, allowDuplicates = fals
     if (closing) {
       const entry = stack.pop();
       if (!entry || entry.name !== name) fail('XML 요소 중첩이 유효하지 않습니다.');
-      if (name === targetName) { const key = allowDuplicates ? String(ranges.size) : entry.key; if (ranges.has(key)) fail('XML 요소 키가 중복되었습니다: ' + key); ranges.set(key, { start: entry.start, startTagEnd: entry.startTagEnd, closingStart: lt, end: end + 1, selfClosing: false }); }
+      if (isTarget(name)) { const key = allowDuplicates ? String(ranges.size) : entry.key; if (ranges.has(key)) fail('XML 요소 키가 중복되었습니다: ' + key); ranges.set(key, { start: entry.start, startTagEnd: entry.startTagEnd, closingStart: lt, end: end + 1, selfClosing: false }); }
     } else {
       const attrs = parseTagAttributes(raw);
-      const key = name === targetName ? String(keyAttribute ? (attrs[keyAttribute] ?? '') : '') : null;
-      if (name === targetName && selfClosing) { const rangeKey = allowDuplicates ? String(ranges.size) : key; if (ranges.has(rangeKey)) fail('XML 요소 키가 중복되었습니다: ' + rangeKey); ranges.set(rangeKey, { start: lt, startTagEnd: end + 1, closingStart: end + 1, end: end + 1, selfClosing: true }); }
+      const key = isTarget(name) ? String(keyAttribute ? (attrs[keyAttribute] ?? '') : '') : null;
+      if (isTarget(name) && selfClosing) { const rangeKey = allowDuplicates ? String(ranges.size) : key; if (ranges.has(rangeKey)) fail('XML 요소 키가 중복되었습니다: ' + rangeKey); ranges.set(rangeKey, { start: lt, startTagEnd: end + 1, closingStart: end + 1, end: end + 1, selfClosing: true }); }
       else if (!selfClosing) stack.push({ name, start: lt, startTagEnd: end + 1, key });
     }
     i = end + 1;
@@ -5164,10 +5168,10 @@ function moveTableTotals(model, original, moves) {
   let current = edits.size ? patchCells(model, [...edits.values()]).model : model;
   const files = { ...current.files };
   let changed = false;
-  const rewriteElements = (xml, names, ownerSheet, partName) => xml.replace(new RegExp('<(' + names.join('|') + ')(\\b[^>]*>)([\\s\\S]*?)<\\/\\1>', 'g'), (whole, name, opening) => {
+  const rewriteElements = (xml, names, ownerSheet, partName) => xml.replace(new RegExp('<((?:[\\w.-]+:)?(?:' + names.join('|') + '))(\\b[^>]*>)([\\s\\S]*?)<\\/\\1>', 'g'), (whole, name, opening) => {
     const node = parseXml(new TextEncoder().encode(whole), partName).root;
     if (node.children.length) fail('복잡한 참조 수식 구성은 합계 이동을 지원하지 않습니다.');
-    const owner = name === 'definedName' && node.attributes.localSheetId !== undefined ? current.sheets[Number(node.attributes.localSheetId)]?.name || ownerSheet : ownerSheet;
+    const owner = name.slice(name.lastIndexOf(':') + 1) === 'definedName' && node.attributes.localSheetId !== undefined ? current.sheets[Number(node.attributes.localSheetId)]?.name || ownerSheet : ownerSheet;
     const formula = remap(node.text, owner);
     return formula === node.text ? whole : '<' + name + opening + xmlEscape(formula) + '</' + name + '>';
   });
@@ -5225,7 +5229,7 @@ function replaceTotalsColumn(xml, index, totals) {
   const attribute = value => xmlEscape(value).replaceAll('\r', '&#13;').replaceAll('\n', '&#10;').replaceAll('\t', '&#9;');
   const opening = '<tableColumn' + Object.entries(attributes).map(([key, value]) => ' ' + key + '="' + attribute(value) + '"').join('');
   let body = /\/\s*>$/.test(match[0]) ? '' : match[0].slice(openingEnd, match[0].lastIndexOf('</tableColumn>'));
-  body = body.replace(/<totalsRowFormula\b[^>]*(?:\/\s*>|>[\s\S]*?<\/totalsRowFormula>)/g, '');
+  body = body.replace(/<(?:[\w.-]+:)?totalsRowFormula\b[^>]*(?:\/\s*>|>[\s\S]*?<\/(?:[\w.-]+:)?totalsRowFormula>)/g, '');
   if (totals.formula) {
     const position = body.search(/<(?:xmlColumnPr|extLst)\b/), formula = '<totalsRowFormula>' + xmlEscape(totals.formula) + '</totalsRowFormula>';
     body = position < 0 ? body + formula : body.slice(0, position) + formula + body.slice(position);
@@ -5294,7 +5298,7 @@ function patchCalculatedColumns(model, edits) {
     seen.add(sheetIndex + ':' + tableName + ':' + column);
     const xml = new TextDecoder().decode(files[table.path]), match = tableColumnMatches(xml)[index], tag = match[0], end = tag.indexOf('>') + 1;
     let body = /\/\s*>$/.test(tag) ? '' : tag.slice(end, tag.lastIndexOf('</tableColumn>'));
-    const ranges = [...findElementRanges(body, 'calculatedColumnFormula', undefined, true).values()];
+    const ranges = [...findElementRanges(body, 'calculatedColumnFormula', undefined, true, true).values()];
     if (ranges.length > 1) fail('중복된 계산 열 수식을 변경할 수 없습니다.');
     if (ranges.length) body = body.slice(0, ranges[0].start) + body.slice(ranges[0].end);
     if (formula !== null) body = '<calculatedColumnFormula>' + xmlEscape(formula) + '</calculatedColumnFormula>' + body;
@@ -5430,7 +5434,7 @@ function patchTableColumnNames(model, requests) {
     }
     files[table.path] = new TextEncoder().encode(xml);
   }
-  const rewrite = (xml, names, ownerTable = null) => xml.replace(new RegExp('<(' + names.join('|') + ')(\\b[^>]*?(?<!/)>)([\\s\\S]*?)<\\/\\1>', 'g'), (whole, tag, opening) => {
+  const rewrite = (xml, names, ownerTable = null) => xml.replace(new RegExp('<((?:[\\w.-]+:)?(?:' + names.join('|') + '))(\\b[^>]*?(?<!/)>)([\\s\\S]*?)<\\/\\1>', 'g'), (whole, tag, opening) => {
     const node = parseXml(new TextEncoder().encode(whole), 'table-rename').root;
     const formula = renameStructuredColumns(node.text, renames, ownerTable);
     return formula === node.text ? whole : '<' + tag + opening + xmlEscape(formula) + '</' + tag + '>';
@@ -5774,7 +5778,7 @@ function patchTableRanges(model, edits, options = {}) {
         const formula = String(cell.formula).toLocaleLowerCase(), inThisTable = ownerSheetIndex === sheetIndex && cell.row >= table.range.top && cell.row <= table.range.bottom && cell.column >= table.range.left && cell.column <= table.range.right;
         return formula.includes(tableName.toLocaleLowerCase() + '[') && refersToRemovedColumn(formula) || inThisTable && removed.some(name => formula.includes('[@' + name + ']'));
       }))) fail('삭제할 표 열을 참조하는 수식이 있어 표 범위를 줄일 수 없습니다.');
-      const tableFormulaTags = [...xmlOriginal.matchAll(/<(?:calculatedColumnFormula|totalsRowFormula)\b[^>]*>([\s\S]*?)<\/(?:calculatedColumnFormula|totalsRowFormula)>/g)];
+      const tableFormulaTags = [...xmlOriginal.matchAll(/<(?:[\w.-]+:)?(?:calculatedColumnFormula|totalsRowFormula)\b[^>]*>([\s\S]*?)<\/(?:[\w.-]+:)?(?:calculatedColumnFormula|totalsRowFormula)>/g)];
       if (tableFormulaTags.some(match => refersToRemovedColumn(match[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')))) fail('삭제할 표 열을 참조하는 표 수식이 있어 표 범위를 줄일 수 없습니다.');
     }
     const columnsChanged = range.left !== table.range.left || range.right !== table.range.right;
@@ -6426,7 +6430,7 @@ function deleteFormulaSheetReferences(formula, targetName) {
 
 function patchFormulaTextElements(xml, previousName, nextName) {
   const decode = value => value.replaceAll('&quot;', '"').replaceAll('&apos;', "'").replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&');
-  return xml.replace(/<((?:[\w.-]+:)?(?:f|formula|formula1|formula2|definedName))(\s[^>]*)?>([\s\S]*?)<\/\1>/g, (element, name, attributes = '', body) => {
+  return xml.replace(/<((?:[\w.-]+:)?(?:f|formula|formula1|formula2|definedName|calculatedColumnFormula|totalsRowFormula))(\s[^>]*)?>([\s\S]*?)<\/\1>/g, (element, name, attributes = '', body) => {
     const updated = renameFormulaSheetReferences(decode(body), previousName, nextName);
     return updated === decode(body) ? element : '<' + name + attributes + '>' + xmlEscape(updated) + '</' + name + '>';
   });
@@ -6563,6 +6567,11 @@ function patchSheetName(model, sheetIndex, name) {
     const original = new TextDecoder().decode(outputFiles[item.path]);
     const updated = patchFormulaTextElements(original, sheet.name, nextName);
     if (updated !== original) { outputFiles[item.path] = new TextEncoder().encode(updated); modifiedPaths.add(item.path); }
+    for (const table of item.tables || []) {
+      const originalTableXml = new TextDecoder().decode(outputFiles[table.path]);
+      const updatedTableXml = patchFormulaTextElements(originalTableXml, sheet.name, nextName);
+      if (updatedTableXml !== originalTableXml) { outputFiles[table.path] = new TextEncoder().encode(updatedTableXml); modifiedPaths.add(table.path); }
+    }
   }
   for (const chart of model.chartPaths || []) {
     const original = new TextDecoder().decode(outputFiles[chart.path]);
@@ -6646,14 +6655,15 @@ function patchDeleteSheet(model, sheetIndex) {
   const decode = value => value.replaceAll('&quot;', '"').replaceAll('&apos;', "'").replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&');
   const references = formula => deleteFormulaSheetReferences(formula, sheet.name);
   const hasReference = formula => references(formula).formula !== formula;
-  const rewriteXml = (xml, path, { rejectNonCell = false, workbook = false } = {}) => xml.replace(/<(f|formula|formula1|formula2|definedName)(\s[^>]*)?>([\s\S]*?)<\/\1>/g, (element, tag, attributes = '', body) => {
+  const rewriteXml = (xml, path, { rejectNonCell = false } = {}) => xml.replace(/<((?:[\w.-]+:)?(?:f|formula|formula1|formula2|definedName|calculatedColumnFormula|totalsRowFormula))(\s[^>]*)?>([\s\S]*?)<\/\1>/g, (element, tag, attributes = '', body) => {
     const formula = decode(body), result = references(formula);
-    if (result.unsafe || (rejectNonCell && tag !== 'f' && hasReference(formula))) fail('삭제할 시트를 참조하는 데이터 유효성·조건부 서식은 안전하게 갱신할 수 없습니다.');
-    if (workbook && tag === 'definedName' && hasReference(formula)) return '';
+    const localTag = tag.slice(tag.lastIndexOf(':') + 1);
+    if (result.unsafe) fail(['calculatedColumnFormula', 'totalsRowFormula'].includes(localTag) ? '삭제할 시트를 참조하는 표 수식을 안전하게 갱신할 수 없습니다.' : '삭제할 시트를 참조하는 데이터 유효성·조건부 서식은 안전하게 갱신할 수 없습니다.');
+    if (rejectNonCell && localTag !== 'f' && hasReference(formula)) fail('삭제할 시트를 참조하는 데이터 유효성·조건부 서식은 안전하게 갱신할 수 없습니다.');
     if (!hasReference(formula)) return element;
     return '<' + tag + attributes + '>' + xmlEscape(result.formula) + '</' + tag + '>';
   });
-  workbookXml = rewriteXml(workbookXml, 'xl/workbook.xml', { workbook: true });
+  workbookXml = rewriteXml(workbookXml, 'xl/workbook.xml');
   outputFiles['xl/workbook.xml'] = new TextEncoder().encode(workbookXml);
   modifiedPaths.add('xl/workbook.xml');
   for (const item of model.sheets) {
@@ -6662,6 +6672,14 @@ function patchDeleteSheet(model, sheetIndex) {
     if (rewritten !== new TextDecoder().decode(outputFiles[item.path])) {
       outputFiles[item.path] = new TextEncoder().encode(rewritten);
       modifiedPaths.add(item.path);
+    }
+    for (const table of item.tables || []) {
+      const originalTableXml = new TextDecoder().decode(outputFiles[table.path]);
+      const rewrittenTableXml = rewriteXml(originalTableXml, table.path);
+      if (rewrittenTableXml !== originalTableXml) {
+        outputFiles[table.path] = new TextEncoder().encode(rewrittenTableXml);
+        modifiedPaths.add(table.path);
+      }
     }
   }
   const sheetTags = [...workbookXml.matchAll(/<sheet\b[^>]*\/?\s*>/g)], selectedTag = sheetTags[sheetIndex]?.[0];
@@ -6699,11 +6717,14 @@ function patchDeleteSheet(model, sheetIndex) {
     outputFiles[contentPath] = new TextEncoder().encode(contentTypesXml);
     modifiedPaths.add(contentPath);
   }
+  const sheetRelationshipsPath = path.join(path.dirname(sheet.path), '_rels', path.basename(sheet.path) + '.rels');
+  if (Object.hasOwn(outputFiles, sheetRelationshipsPath)) {
+    delete outputFiles[sheetRelationshipsPath];
+    modifiedPaths.add(sheetRelationshipsPath);
+  }
   delete outputFiles[sheet.path];
   modifiedPaths.add(sheet.path);
   if (sheet.hasTables) {
-    delete outputFiles[sheet.tableRelationshipPath];
-    modifiedPaths.add(sheet.tableRelationshipPath);
     for (const table of sheet.tables) { delete outputFiles[table.path]; modifiedPaths.add(table.path); }
   }
   let bytes = zipSync(outputFiles, { level: 0 }), checked = analyze(bytes, model.extension);
@@ -7263,7 +7284,7 @@ function transformStructure(model, operation) {
       const otherColumnFormulas = tableColumnMatches(tableXml).filter(match => {
         const tag = match[0], columnName = parseTagAttributes(tag).name;
         const formula = tag.toLocaleLowerCase();
-        return columnName?.toLocaleLowerCase() !== removedName && /<(?:calculatedColumnFormula|totalsRowFormula)\b/.test(tag) && (formula.includes('[' + removedName + ']') || formula.includes('[@' + removedName + ']'));
+        return columnName?.toLocaleLowerCase() !== removedName && /<(?:[\w.-]+:)?(?:calculatedColumnFormula|totalsRowFormula)\b/.test(tag) && (formula.includes('[' + removedName + ']') || formula.includes('[@' + removedName + ']'));
       });
       if (otherColumnFormulas.length) fail('삭제할 표 열을 참조하는 표 수식이 있어 워크시트 열을 삭제할 수 없습니다.');
       tableRangeChanges.push({ table, range: { ...range, right: range.right - 1 }, columnChange: { action, index: columnIndex } });
@@ -7458,7 +7479,7 @@ function transformStructure(model, operation) {
   }
   for (const owner of model.sheets) for (const table of owner.tables || []) {
     const originalXml = new TextDecoder().decode(outputFiles[table.path]), replacements = [];
-    for (const name of ['calculatedColumnFormula', 'totalsRowFormula']) for (const range of findElementRanges(originalXml, name, undefined, true).values()) {
+    for (const name of ['calculatedColumnFormula', 'totalsRowFormula']) for (const range of findElementRanges(originalXml, name, undefined, true, true).values()) {
       if (range.selfClosing) continue;
       const node = parseXml(new TextEncoder().encode(originalXml.slice(range.start, range.end)), table.path).root;
       if (node.children.length) fail('복잡한 표 수식은 구조 변경을 지원하지 않습니다.');

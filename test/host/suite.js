@@ -570,7 +570,7 @@ assert.equal(await evaluate(`(() => {const panel=document.querySelector('#format
 assert.equal(await evaluate(`(() => {const root=document.documentElement,body=document.body;root.style.width='420px';body.style.width='420px';window.dispatchEvent(new Event('resize'));const panel=document.querySelector('#formatBold').closest('.toolbarGroupContent').getBoundingClientRect(),toolbar=document.querySelector('#toolbar').getBoundingClientRect();const fits=panel.left>=toolbar.left&&panel.right<=toolbar.right;root.style.width='';body.style.width='';window.dispatchEvent(new Event('resize'));return fits})()`), true, 'the command panel stays within a narrow editor');
 await evaluate(`document.querySelector('#formatBold').focus();document.querySelector('#toggleToolbar').focus();document.querySelector('#toggleToolbar').click()`);
 assert.equal(await evaluate(`document.querySelector('#toolbar').hidden&&document.querySelector('#toolbarCommands details[open]')===null`), true, 'hiding the full menu closes its active command group');
-assert.deepEqual(await evaluate(`(() => {const toolbar=document.querySelector('#toolbar'),targets=[toolbar,...toolbar.querySelectorAll('*')];return {display:getComputedStyle(toolbar).display,visibility:getComputedStyle(toolbar).visibility,rendered:targets.filter(node=>node.getClientRects().length>0).map(node=>node.id||node.tagName).slice(0,8),pointerEvents:getComputedStyle(toolbar).pointerEvents,opacity:getComputedStyle(toolbar).opacity,clipPath:getComputedStyle(toolbar).clipPath,contain:getComputedStyle(toolbar).contain,inert:toolbar.inert,focusMoved:document.activeElement.id==='toggleToolbar'}})()`), {display:'none',visibility:'hidden',rendered:[],pointerEvents:'none',opacity:'0',clipPath:'inset(100%)',contain:'strict',inert:true,focusMoved:true}, 'hidden menu text, icons, and command controls have no rendered boxes or pointer targets, and focus moves to the menu toggle');
+assert.deepEqual(await evaluate(`(() => {const toolbar=document.querySelector('#toolbar'),targets=[toolbar,...toolbar.querySelectorAll('*')];return {display:getComputedStyle(toolbar).display,visibility:getComputedStyle(toolbar).visibility,rendered:targets.filter(node=>node.getClientRects().length>0).map(node=>node.id||node.tagName).slice(0,8),pointerEvents:getComputedStyle(toolbar).pointerEvents,opacity:getComputedStyle(toolbar).opacity,clipPath:getComputedStyle(toolbar).clipPath,contain:getComputedStyle(toolbar).contain,position:getComputedStyle(toolbar).position,width:getComputedStyle(toolbar).width,height:getComputedStyle(toolbar).height,padding:getComputedStyle(toolbar).padding,border:getComputedStyle(toolbar).borderWidth,overflow:getComputedStyle(toolbar).overflow,inert:toolbar.inert,focusMoved:document.activeElement.id==='toggleToolbar'}})()`), {display:'none',visibility:'hidden',rendered:[],pointerEvents:'none',opacity:'0',clipPath:'inset(100%)',contain:'strict',position:'absolute',width:'0px',height:'0px',padding:'0px',border:'0px',overflow:'hidden',inert:true,focusMoved:true}, 'hidden menu text, icons, and command controls have no rendered boxes or pointer targets, and focus moves to the menu toggle');
 await evaluate(`document.querySelector('#toggleToolbar').click();document.querySelector('#toolbarCommands details[name="toolbar-section"]:nth-of-type(3) > summary').click()`);
 assert.equal(await evaluate(`!document.querySelector('#toolbar').hidden&&document.querySelector('#toolbarCommands details[open]')!==null`), true, 'the menu reopens without a stale hidden group');
 await evaluate(`document.querySelector('#toolbarCommands details[name="toolbar-section"]:nth-of-type(3) > summary').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))`);
@@ -644,6 +644,153 @@ assert.equal(await evaluate(`document.querySelector('#toolbarCommands details[op
     }
   });
 
+  test('a duplicate worksheet name is rejected with a localized notice and no file changes', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-sheet-duplicate-name-host-'));
+    const file = path.join(directory, 'sheet-duplicate-name.xlsx');
+    const model = patchAddSheet(analyze(createBlankWorkbook())).model;
+    await fs.writeFile(file, model.bytes);
+    let devtools;
+    try {
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      const evaluate = async expression => {
+        const response = await devtools.send('Runtime.evaluate', { expression, contextId: devtools.contextId, returnByValue: true, awaitPromise: true });
+        if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+        return response.result?.value;
+      };
+      const waitFor = async expression => {
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline && !await evaluate(expression)) await new Promise(resolve => setTimeout(resolve, 25));
+        assert.equal(await evaluate(expression), true, 'duplicate-name feedback appeared');
+      };
+      await waitFor(`document.querySelector('#sheets [data-sheet-index="1"]')?.textContent==='Sheet2'`);
+      const originalBytes = await fs.readFile(file);
+      await evaluate(`(() => {const tab=document.querySelector('#sheets [data-sheet-index="1"]');tab.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));const input=tab.querySelector('input');input.value='bad/name';input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))})()`);
+      await waitFor(`document.querySelector('#notice')?.textContent.startsWith('Sheet names must be 1–31 characters')`);
+      assert.equal(await evaluate(`document.querySelector('#sheets [data-sheet-index="1"]')?.textContent`), 'Sheet2', 'an invalid worksheet name is rejected');
+      assert.deepEqual(await fs.readFile(file), originalBytes, 'an invalid rename leaves workbook bytes unchanged');
+      await evaluate(`(() => {const tab=document.querySelector('#sheets [data-sheet-index="1"]');tab.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));const input=tab.querySelector('input');input.value='Sheet1';input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))})()`);
+      await waitFor(`document.querySelector('#notice')?.textContent==='A worksheet with this name already exists.'`);
+      assert.equal(await evaluate(`document.querySelector('#sheets [data-sheet-index="1"]')?.textContent`), 'Sheet2', 'the existing worksheet name remains visible');
+      assert.deepEqual(await fs.readFile(file), originalBytes, 'a rejected rename does not change workbook bytes');
+    } finally {
+      devtools?.close();
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('deleting a worksheet confirms first and updates formula references through save, undo and reopen', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-sheet-delete-host-'));
+    const file = path.join(directory, 'sheet-delete.xlsx');
+    let model = patchAddSheet(analyze(createBlankWorkbook())).model;
+    model = patchCells(model, [
+      { sheetIndex: 1, address: 'A1', value: '42', kind: 'number' },
+      { sheetIndex: 0, address: 'A1', value: '', formula: 'Sheet2!A1' }
+    ]).model;
+    await fs.writeFile(file, model.bytes);
+    const originalWarning = vscode.window.showWarningMessage;
+    let warningChoice, warningText;
+    vscode.window.showWarningMessage = async (text, _options, confirmText) => {
+      warningText = text;
+      return warningChoice === 'accept' ? confirmText : undefined;
+    };
+    let devtools;
+    try {
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      const evaluate = async expression => {
+        const response = await devtools.send('Runtime.evaluate', { expression, contextId: devtools.contextId, returnByValue: true, awaitPromise: true });
+        if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+        return response.result?.value;
+      };
+      const waitFor = async expression => {
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline && !await evaluate(expression)) await new Promise(resolve => setTimeout(resolve, 25));
+        assert.equal(await evaluate(expression), true, 'worksheet deletion reached the requested state');
+      };
+      await waitFor(`document.querySelector('#sheets [data-sheet-index="1"]')?.textContent==='Sheet2'`);
+      const originalBytes = await fs.readFile(file);
+      await evaluate(`document.querySelector('#deleteSheet').click()`);
+      const warningDeadline = Date.now() + 5000;
+      while (Date.now() < warningDeadline && !warningText) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.ok(warningText, 'deleting a worksheet shows a confirmation prompt');
+      assert.match(warningText, /Delete the active worksheet/);
+      assert.deepEqual(await fs.readFile(file), originalBytes, 'cancelling deletion leaves the source file unchanged');
+
+      warningChoice = 'accept';
+      await evaluate(`document.querySelector('#deleteSheet').click()`);
+      await waitFor(`document.querySelectorAll('#sheets [role="tab"]').length===1`);
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      let saved = analyze(await fs.readFile(file));
+      assert.deepEqual(saved.sheets.map(sheet => sheet.name), ['Sheet1']);
+      assert.equal(saved.sheets[0].cells.get('A1').formula, '#REF!', 'formulas referring to the deleted sheet are made visibly invalid');
+
+      await vscode.commands.executeCommand('jinsheet.undo');
+      await waitFor(`document.querySelectorAll('#sheets [role="tab"]').length===2`);
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      saved = analyze(await fs.readFile(file));
+      assert.deepEqual(saved.sheets.map(sheet => sheet.name), ['Sheet1', 'Sheet2'], 'undo restores the saved workbook structure');
+      assert.equal(saved.sheets[0].cells.get('A1').formula, 'Sheet2!A1');
+
+      await vscode.commands.executeCommand('jinsheet.redo');
+      await waitFor(`document.querySelectorAll('#sheets [role="tab"]').length===1`);
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      devtools.close(); devtools = null;
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      await waitFor(`document.querySelectorAll('#sheets [role="tab"]').length===1`);
+      saved = analyze(await fs.readFile(file));
+      assert.deepEqual(saved.sheets.map(sheet => sheet.name), ['Sheet1']);
+      assert.equal(saved.sheets[0].cells.get('A1').formula, '#REF!');
+    } finally {
+      vscode.window.showWarningMessage = originalWarning;
+      devtools?.close();
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('worksheet deletion explains chart protection in the active UI language and preserves the workbook', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-sheet-delete-chart-host-'));
+    const file = path.join(directory, 'sheet-delete-chart.xlsx');
+    let model = analyze(await fs.readFile(path.join(__dirname, '..', 'fixtures', 'JinSheet-Sample.xlsx')));
+    model = patchAddSheet(model).model;
+    model = patchAddChart(model, 0, { top: 0, bottom: 2, left: 0, right: 1 }).model;
+    await fs.writeFile(file, model.bytes);
+    const originalBytes = await fs.readFile(file), originalWarning = vscode.window.showWarningMessage;
+    vscode.window.showWarningMessage = async (_text, _options, confirmText) => confirmText;
+    let devtools;
+    try {
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      const evaluate = async expression => {
+        const response = await devtools.send('Runtime.evaluate', { expression, contextId: devtools.contextId, returnByValue: true, awaitPromise: true });
+        if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+        return response.result?.value;
+      };
+      const waitFor = async expression => {
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline && !await evaluate(expression)) await new Promise(resolve => setTimeout(resolve, 25));
+        assert.equal(await evaluate(expression), true, 'the chart protection reason is shown: ' + JSON.stringify(await evaluate(`({notice:document.querySelector('#notice')?.textContent,language:document.documentElement.lang,tab:document.querySelector('#sheets [data-sheet-index="1"]')?.textContent})`)));
+      };
+      await waitFor(`document.querySelector('#sheets [data-sheet-index="1"]')?.textContent==='Sheet2'`);
+      await evaluate(`document.querySelector('#deleteSheet').click()`);
+      const expectedNotice = (process.env.JINSHEET_HOST_LOCALE || '').toLowerCase().startsWith('ko')
+        ? '차트가 있는 통합문서에서는 시트를 삭제할 수 없습니다.'
+        : 'Worksheets cannot be deleted while this workbook contains charts. Remove the charts first.';
+      await waitFor(`document.querySelector('#notice')?.textContent===${JSON.stringify(expectedNotice)}`);
+      assert.equal(await evaluate(`document.querySelectorAll('#sheets [role="tab"]').length`), 2, 'the rejected operation leaves both worksheet tabs present');
+      assert.deepEqual(await fs.readFile(file), originalBytes, 'the rejected operation preserves workbook bytes');
+    } finally {
+      vscode.window.showWarningMessage = originalWarning;
+      devtools?.close();
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test('renaming a worksheet updates cross-sheet formulas through save, reopen and undo', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-sheet-rename-host-'));
     const file = path.join(directory, 'sheet-rename.xlsx');
@@ -651,8 +798,13 @@ assert.equal(await evaluate(`document.querySelector('#toolbarCommands details[op
     model = patchAddSheet(model).model;
     model = patchCells(model, [
       { sheetIndex: 1, address: 'A1', value: '42', kind: 'number' },
+      { sheetIndex: 1, address: 'B1', value: 'Value' },
+      { sheetIndex: 1, address: 'B2', value: '5', kind: 'number' },
       { sheetIndex: 0, address: 'A1', value: '', formula: 'Sheet2!A1' }
     ]).model;
+    model = patchAddTable(model, { sheetIndex: 1, range: { top: 0, bottom: 1, left: 1, right: 1 } }).model;
+    const table = model.sheets[1].tables[0], tableXml = new TextDecoder().decode(model.files[table.path]);
+    model = analyze(zipSync({ ...model.files, [table.path]: new TextEncoder().encode(tableXml.replace('<tableColumn id="1" name="Value"/>', '<tableColumn id="1" name="Value"><calculatedColumnFormula>Sheet2!A1</calculatedColumnFormula></tableColumn>')) }, { level: 0 }));
     await fs.writeFile(file, model.bytes);
     let devtools;
     try {
@@ -678,6 +830,7 @@ assert.equal(await evaluate(`document.querySelector('#toolbarCommands details[op
       assert.deepEqual(saved.sheets.map(sheet => sheet.name), ['Sheet1', 'Inputs Q1']);
       assert.equal(saved.sheets[0].cells.get('A1').formula, "'Inputs Q1'!A1");
       assert.equal(saved.sheets[0].cells.get('A1').cachedValue, '42');
+      assert.equal(saved.sheets[1].tables[0].calculatedColumns[0], "'Inputs Q1'!A1");
 
       await vscode.commands.executeCommand('jinsheet.undo');
       await waitFor(`document.querySelector('#sheets [data-sheet-index="1"]')?.textContent==='Sheet2'`);
@@ -688,6 +841,7 @@ assert.equal(await evaluate(`document.querySelector('#toolbarCommands details[op
       assert.deepEqual(saved.sheets.map(sheet => sheet.name), ['Sheet1', 'Sheet2']);
       assert.equal(saved.sheets[0].cells.get('A1').formula, 'Sheet2!A1');
       assert.equal(saved.sheets[0].cells.get('A1').cachedValue, '42');
+      assert.equal(saved.sheets[1].tables[0].calculatedColumns[0], 'Sheet2!A1');
 
       await vscode.commands.executeCommand('jinsheet.redo');
       await waitFor(`document.querySelector('#sheets [data-sheet-index="1"]')?.textContent==='Inputs Q1'`);
@@ -697,6 +851,7 @@ assert.equal(await evaluate(`document.querySelector('#toolbarCommands details[op
       saved = analyze(await fs.readFile(file));
       assert.deepEqual(saved.sheets.map(sheet => sheet.name), ['Sheet1', 'Inputs Q1']);
       assert.equal(saved.sheets[0].cells.get('A1').formula, "'Inputs Q1'!A1");
+      assert.equal(saved.sheets[1].tables[0].calculatedColumns[0], "'Inputs Q1'!A1");
 
       devtools.close(); devtools = null;
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
@@ -709,6 +864,7 @@ assert.equal(await evaluate(`document.querySelector('#toolbarCommands details[op
       assert.deepEqual(saved.sheets.map(sheet => sheet.name), ['Sheet1', 'Inputs Q1']);
       assert.equal(saved.sheets[0].cells.get('A1').formula, "'Inputs Q1'!A1");
       assert.equal(saved.sheets[0].cells.get('A1').cachedValue, '42');
+      assert.equal(saved.sheets[1].tables[0].calculatedColumns[0], "'Inputs Q1'!A1");
     } finally {
       devtools?.close();
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');

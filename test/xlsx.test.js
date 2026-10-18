@@ -2557,6 +2557,27 @@ test('외부 하이퍼링크가 있는 XLSX는 셀 편집 후 링크 관계를 �
   assert.equal(edited.model.sheets[0].cells.get('A1').value, 'updated');
 });
 
+test('외부 하이퍼링크만 있는 워크시트를 삭제하면 고아 관계 파트도 제거한다', () => {
+  const files = unzipSync(fixture());
+  const decode = name => new TextDecoder().decode(files[name]);
+  const encode = value => new TextEncoder().encode(value);
+  files['xl/worksheets/sheet1.xml'] = encode(decode('xl/worksheets/sheet1.xml')
+    .replace('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"')
+    .replace('</worksheet>', '<hyperlinks><hyperlink ref="A1" r:id="rIdExternal"/></hyperlinks></worksheet>'));
+  const relationshipPath = 'xl/worksheets/_rels/sheet1.xml.rels';
+  files[relationshipPath] = encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdExternal" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.test/source" TargetMode="External"/></Relationships>');
+  const original = analyze(zipSync(files));
+  assert.equal(original.writable, true, original.readOnlyReason);
+  const deleted = patchDeleteSheet(original, 0);
+  assert.equal(deleted.model.writable, true, deleted.model.readOnlyReason);
+  assert.deepEqual(deleted.model.sheets.map(sheet => sheet.name), ['Hidden']);
+  assert.equal(Object.hasOwn(deleted.model.files, relationshipPath), false);
+  const reopened = analyze(deleted.bytes);
+  assert.equal(reopened.writable, true, reopened.readOnlyReason);
+  assert.deepEqual(reopened.sheets.map(sheet => sheet.name), ['Hidden']);
+  assert.equal(Object.hasOwn(reopened.files, relationshipPath), false, 'the deleted sheet relationship part stays absent after reopening');
+});
+
 test('잘못된 하이퍼링크 관계가 있는 XLSX는 읽기 전용으로 유지한다', () => {
   const files = unzipSync(fixture());
   const decode = name => new TextDecoder().decode(files[name]);
@@ -2585,6 +2606,25 @@ test('시트 이름 변경은 통합 문서·수식·정의된 이름을 함께 
   assert.match(workbook, /definedName name="NameRef">&apos;Quarter 2&apos;!\$A\$1/);
   assert.throws(() => patchSheetName(original, 0, 'Hidden'), /이미 있습니다/);
   for (const invalid of ['', "'bad'", 'bad/name', 'x'.repeat(32)]) assert.throws(() => patchSheetName(original, 0, invalid));
+});
+
+test('시트 이름 변경은 남은 표의 계산 열·합계 수식 참조도 갱신한다', () => {
+  const files = unzipSync(fixture());
+  const decode = name => new TextDecoder().decode(files[name]);
+  const encode = value => new TextEncoder().encode(value);
+  files['xl/workbook.xml'] = encode(decode('xl/workbook.xml').replace(' state="hidden"', ''));
+  files['xl/worksheets/sheet2.xml'] = encode(decode('xl/worksheets/sheet2.xml').replace('</worksheet>', '<tableParts count="1"><tablePart r:id="rIdTable"/></tableParts></worksheet>').replace('<worksheet ', '<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '));
+  files['xl/worksheets/_rels/sheet2.xml.rels'] = encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdTable" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/></Relationships>');
+  files['xl/tables/table1.xml'] = encode('<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="HiddenTable" displayName="HiddenTable" ref="A1:A2"><tableColumns count="1"><tableColumn id="1" name="Value"><x:calculatedColumnFormula>Data!$A$1</x:calculatedColumnFormula><x:totalsRowFormula>&apos;Data&apos;!$A$1</x:totalsRowFormula></tableColumn></tableColumns></table>');
+  files['[Content_Types].xml'] = encode(decode('[Content_Types].xml').replace('</Types>', '<Override PartName="/xl/tables/table1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/></Types>'));
+  const original = analyze(zipSync(files));
+  assert.equal(original.writable, true, original.readOnlyReason);
+  assert.equal(original.sheets[1].tables[0].calculatedColumns[0], 'Data!$A$1');
+  assert.equal(original.sheets[1].tables[0].totalColumns[0].formula, "'Data'!$A$1");
+  const renamed = patchSheetName(original, 0, 'Quarter 2').model;
+  assert.equal(renamed.sheets[1].tables[0].calculatedColumns[0], "'Quarter 2'!$A$1");
+  assert.equal(renamed.sheets[1].tables[0].totalColumns[0].formula, "'Quarter 2'!$A$1");
+  assert.match(new TextDecoder().decode(renamed.files['xl/tables/table1.xml']), /<x:calculatedColumnFormula>&apos;Quarter 2&apos;!\$A\$1<\/x:calculatedColumnFormula>/);
 });
 
 test('차트가 참조하는 시트 이름을 변경하면 차트 수식과 참조 캐시를 보존한다', () => {
@@ -2762,6 +2802,60 @@ test('워크시트 삭제는 수식 참조를 #REF로 바꾸고 유효성 참조
   validationFiles['xl/worksheets/sheet2.xml'] = validationFiles['xl/worksheets/sheet2.xml'].replace('</worksheet>', '<dataValidations count="1"><dataValidation type="list" sqref="A1"><formula1>Data!$A$1:$A$3</formula1></dataValidation></dataValidations></worksheet>');
   const validationModel = analyze(zipSync(Object.fromEntries(Object.entries(validationFiles).map(([path, value]) => [path, new TextEncoder().encode(value)]))));
   assert.throws(() => patchDeleteSheet(validationModel, 0), /데이터 유효성·조건부 서식/);
+});
+
+test('워크시트 삭제는 남은 표의 계산 열·합계 수식 참조도 #REF로 바꾼다', () => {
+  const files = unzipSync(fixture());
+  const decode = name => new TextDecoder().decode(files[name]);
+  const encode = value => new TextEncoder().encode(value);
+  files['xl/workbook.xml'] = encode(decode('xl/workbook.xml').replace(' state="hidden"', ''));
+  files['xl/worksheets/sheet2.xml'] = encode(decode('xl/worksheets/sheet2.xml').replace('</worksheet>', '<tableParts count="1"><tablePart r:id="rIdTable"/></tableParts></worksheet>').replace('<worksheet ', '<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '));
+  files['xl/worksheets/_rels/sheet2.xml.rels'] = encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdTable" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/></Relationships>');
+  files['xl/tables/table1.xml'] = encode('<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="HiddenTable" displayName="HiddenTable" ref="A1:A2"><tableColumns count="1"><tableColumn id="1" name="Value"><x:calculatedColumnFormula>Data!$A$1</x:calculatedColumnFormula><x:totalsRowFormula>Data!$A$1</x:totalsRowFormula></tableColumn></tableColumns></table>');
+  files['[Content_Types].xml'] = encode(decode('[Content_Types].xml').replace('</Types>', '<Override PartName="/xl/tables/table1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/></Types>'));
+  const original = analyze(zipSync(files));
+  assert.equal(original.writable, true, original.readOnlyReason);
+  const deletion = patchDeleteSheet(original, 0);
+  const deleted = deletion.model;
+  assert.equal(deleted.sheets[0].tables[0].calculatedColumns[0], '#REF!');
+  assert.equal(deleted.sheets[0].tables[0].totalColumns[0].formula, '#REF!');
+  assert.match(new TextDecoder().decode(deleted.files['xl/tables/table1.xml']), /<x:calculatedColumnFormula>#REF!<\/x:calculatedColumnFormula>/);
+  assert.match(new TextDecoder().decode(deleted.files['xl/tables/table1.xml']), /<x:totalsRowFormula>#REF!<\/x:totalsRowFormula>/);
+  const reopened = analyze(deletion.bytes);
+  assert.equal(reopened.writable, true, reopened.readOnlyReason);
+  assert.equal(reopened.sheets[0].tables[0].calculatedColumns[0], '#REF!');
+  assert.equal(reopened.sheets[0].tables[0].totalColumns[0].formula, '#REF!');
+});
+
+test('워크시트 삭제는 참조 중인 전역 정의 이름을 #REF로 남기고 종속 수식·유효성을 보존한다', () => {
+  const files = unzipSync(fixture());
+  const decode = name => new TextDecoder().decode(files[name]);
+  const encode = value => new TextEncoder().encode(value);
+  files['xl/workbook.xml'] = encode(decode('xl/workbook.xml').replace('</sheets>', '</sheets><definedNames><definedName name="SharedRows">Data!$B$1:$B$1</definedName><definedName name="LocalKeep" localSheetId="1">Hidden!$A$1</definedName><definedName name="LocalDrop" localSheetId="0">Data!$A$1</definedName></definedNames>'));
+  files['xl/worksheets/sheet2.xml'] = encode(decode('xl/worksheets/sheet2.xml')
+    .replace('</sheetData>', '<row r="2"><c r="A2"><f>SharedRows</f><v>42</v></c></row></sheetData>')
+    .replace('</worksheet>', '<dataValidations count="1"><dataValidation type="list" sqref="B1"><formula1>SharedRows</formula1></dataValidation></dataValidations></worksheet>'));
+  const original = analyze(zipSync(files));
+  assert.equal(original.writable, true, original.readOnlyReason);
+  assert.equal(original.sheets[1].dataValidations[0].sourceName, 'SharedRows');
+  const deleted = patchDeleteSheet(original, 0);
+  assert.equal(deleted.model.definedNames[0].error, '#REF!');
+  assert.equal(deleted.model.definedNames.find(item => item.name === 'LocalKeep').localSheetId, 0);
+  assert.deepEqual(deleted.model.definedNames.find(item => item.name === 'LocalKeep').source, { sheetName: 'Hidden', top: 0, bottom: 0, left: 0, right: 0 });
+  assert.equal(deleted.model.definedNames.some(item => item.name === 'LocalDrop'), false);
+  assert.equal(deleted.model.sheets[0].cells.get('A2').formula, 'SharedRows');
+  assert.equal(deleted.model.sheets[0].cells.get('A2').cachedValue, '#REF!');
+  assert.equal(deleted.model.sheets[0].dataValidations[0].sourceName, 'SharedRows');
+  assert.equal(deleted.model.sheets[0].dataValidations[0].source, null);
+  assert.match(new TextDecoder().decode(deleted.model.files['xl/workbook.xml']), /<definedName name="SharedRows">#REF!<\/definedName>/);
+  const reopened = analyze(deleted.bytes);
+  assert.equal(reopened.writable, true, reopened.readOnlyReason);
+  assert.equal(reopened.definedNames[0].error, '#REF!');
+  assert.equal(reopened.definedNames.find(item => item.name === 'LocalKeep').localSheetId, 0);
+  assert.deepEqual(reopened.definedNames.find(item => item.name === 'LocalKeep').source, { sheetName: 'Hidden', top: 0, bottom: 0, left: 0, right: 0 });
+  assert.equal(reopened.definedNames.some(item => item.name === 'LocalDrop'), false);
+  assert.equal(reopened.sheets[0].cells.get('A2').cachedValue, '#REF!');
+  assert.equal(reopened.sheets[0].dataValidations[0].sourceName, 'SharedRows');
 });
 
 test('수식 복사는 상대 참조만 이동하고 절대 참조·문자열·표 구조화 참조를 보존한다', () => {
@@ -6186,6 +6280,22 @@ test('계산 열 계획은 절대·상대 참조와 예외를 구분하고 메�
   const removed=patchCalculatedColumns(model,[{sheetIndex:0,tableName:'Sales',column:1,formula:null}]).model;
   assert.equal(removed.sheets[0].tables[0].calculatedColumns[1],null); assert.equal(removed.sheets[0].cells.get('B2').formula,'A2*2');
   assert.deepEqual(removed.files['xl/worksheets/sheet1.xml'],model.files['xl/worksheets/sheet1.xml']);
+});
+
+test('네임스페이스 접두사가 붙은 계산 열 수식도 편집하고 참조 열 삭제를 막는다', () => {
+  const { patchCalculatedColumns } = require('../src/xlsx');
+  const files = unzipSync(nativeCalculatedFixture()), tablePath = 'xl/tables/table1.xml';
+  const tableXml = new TextDecoder().decode(files[tablePath])
+    .replace('<table ', '<table xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ')
+    .replace('<tableColumn id="1" name="Name"/>', '<tableColumn id="1" name="Name"><x:calculatedColumnFormula>[Amount]*2</x:calculatedColumnFormula></tableColumn>');
+  files[tablePath] = new TextEncoder().encode(tableXml);
+  const original = analyze(zipSync(files));
+  assert.equal(original.writable, true, original.readOnlyReason);
+  assert.equal(original.sheets[0].tables[0].calculatedColumns[0], '[Amount]*2');
+  assert.throws(() => patchTableRanges(original, [{ sheetIndex: 0, tableName: 'Sales', range: { top: 0, bottom: 2, left: 0, right: 0 } }]), /삭제할 표 열을 참조하는 표 수식/);
+  const edited = patchCalculatedColumns(original, [{ sheetIndex: 0, tableName: 'Sales', column: 0, formula: 'A2*3' }]);
+  assert.equal(edited.model.sheets[0].tables[0].calculatedColumns[0], 'A2*3');
+  assert.doesNotMatch(new TextDecoder().decode(edited.model.files[tablePath]), /<x:calculatedColumnFormula/);
 });
 
 test('첫 데이터 행 자동 채우기는 머리글 대신 인접 데이터 행 서식을 사용한다', () => {

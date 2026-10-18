@@ -2926,9 +2926,10 @@ assert.equal(await evaluate(`document.querySelector('#toolbarCommands details[op
         await devtools.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 });
         await devtools.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 });
         const focusDeadline = Date.now() + 5000;
-        const adjusted = `document.activeElement?.classList.contains("row-resize-handle")&&Number(document.activeElement.getAttribute("aria-valuenow"))===${previous + 1}`;
-        while (Date.now() < focusDeadline && !await evaluate(adjusted)) await new Promise(resolve => setTimeout(resolve, 25));
-        assert.equal(await evaluate(adjusted), true, 'arrow resize changes the row height and keeps the keyboard on its boundary');
+        const restored = 'document.activeElement!==window.__rowHandleBeforeKey&&document.activeElement.classList.contains("row-resize-handle")';
+        while (Date.now() < focusDeadline && !await evaluate(restored)) await new Promise(resolve => setTimeout(resolve, 25));
+        assert.equal(await evaluate(restored), true, 'a model refresh keeps the keyboard on the row boundary');
+        assert.equal(await evaluate('Number(document.activeElement.getAttribute("aria-valuenow"))'), previous + 1);
       }
       await vscode.commands.executeCommand('workbench.action.files.save');
     } finally {

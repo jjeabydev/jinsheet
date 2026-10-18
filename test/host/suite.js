@@ -208,7 +208,7 @@ suite('JinSheet Extension Host', () => {
       'xl/workbook.xml': '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="s1"/></sheets></workbook>',
       'xl/_rels/workbook.xml.rels': '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="s1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
       'xl/worksheets/sheet1.xml': '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
-        + '<row r="1"><c r="A1"><v>1</v></c><c r="B1"><v>2</v></c><c r="C1"><v>3</v></c><c r="D1"><f>INDEX(A1:C3,2,0)</f><v>4</v></c><c r="G1"><f>SUM(D1#)</f><v>15</v></c><c r="I1"><f>INDEX(A1:C3,0,2)</f><v>2</v></c><c r="K1"><f>SUM(I1#)</f><v>15</v></c><c r="L1"><f>TRIM(A1:A3)</f><v>1</v></c><c r="N1"><f>CHOOSE(IF(A1:A3&lt;5,1,2),"low","high")</f><v>low</v></c><c r="P1"><f>IFS(A1:A3&lt;2,"small",A1:A3&lt;5,"medium",TRUE,"large")</f><v>small</v></c><c r="R1"><f>SWITCH(A1:A3,1,"one",4,"four","other")</f><v>one</v></c></row>'
+        + '<row r="1"><c r="A1"><v>1</v></c><c r="B1"><v>2</v></c><c r="C1"><v>3</v></c><c r="D1"><f>INDEX(A1:C3,2,0)</f><v>4</v></c><c r="G1"><f>SUM(D1#)</f><v>15</v></c><c r="I1"><f>INDEX(A1:C3,0,2)</f><v>2</v></c><c r="K1"><f>SUM(I1#)</f><v>15</v></c><c r="L1"><f>TRIM(A1:A3)</f><v>1</v></c><c r="N1"><f>CHOOSE(IF(A1:A3&lt;5,1,2),"low","high")</f><v>low</v></c><c r="O1"><f>IFS(A1:A3&lt;2,"small",A1:A3&lt;5,"medium",TRUE,"large")</f><v>small</v></c><c r="P1"><f>SWITCH(A1:A3,1,"one",4,"four","other")</f><v>one</v></c></row>'
         + '<row r="2"><c r="A2"><v>4</v></c><c r="B2"><v>5</v></c><c r="C2"><v>6</v></c></row>'
         + '<row r="3"><c r="A3"><v>7</v></c><c r="B3"><v>8</v></c><c r="C3"><v>9</v></c></row>'
         + '<row r="4"><c r="B4"><f>D4:D5&amp;"!"</f><v>Excel!</v></c><c r="D4" t="inlineStr"><is><t>Excel</t></is></c><c r="F4"><f>FIND("e",D4:D5)</f><v>4</v></c><c r="H4"><f>SEARCH("e",D4:D5,2)</f><v>4</v></c><c r="J4"><f>SUBSTITUTE(D4:D5,"e","x")</f><v>Excxl</v></c><c r="L4"><f>REPLACE(D4:D5,2,1,"Z")</f><v>EZcel</v></c></row>'
@@ -251,12 +251,12 @@ suite('JinSheet Extension Host', () => {
       await waitForCell(0, 13, 'low', 'CHOOSE renders the first array branch');
       await waitForCell(1, 13, 'low', 'CHOOSE broadcasts its scalar branch over a range');
       await waitForCell(2, 13, 'high', 'CHOOSE spills the alternate array branch');
-      await waitForCell(0, 15, 'small', 'IFS renders the first matching range condition');
-      await waitForCell(1, 15, 'medium', 'IFS evaluates the next condition for each array item');
-      await waitForCell(2, 15, 'large', 'IFS spills the fallback condition');
-      await waitForCell(0, 17, 'one', 'SWITCH renders the first matching expression');
-      await waitForCell(1, 17, 'four', 'SWITCH selects a different branch per array item');
-      await waitForCell(2, 17, 'other', 'SWITCH broadcasts its default branch');
+      await waitForCell(0, 14, 'small', 'IFS renders the first matching range condition');
+      await waitForCell(1, 14, 'medium', 'IFS evaluates the next condition for each array item');
+      await waitForCell(2, 14, 'large', 'IFS spills the fallback condition');
+      await waitForCell(0, 15, 'one', 'SWITCH renders the first matching expression');
+      await waitForCell(1, 15, 'four', 'SWITCH selects a different branch per array item');
+      await waitForCell(2, 15, 'other', 'SWITCH broadcasts its default branch');
       await waitForCell(3, 5, 4, 'FIND returns the first range result');
       await waitForCell(4, 5, 5, 'FIND spills the Unicode-aware second range result');
       await waitForCell(3, 7, 4, 'SEARCH applies the scalar start position to the first range value');
@@ -302,8 +302,8 @@ suite('JinSheet Extension Host', () => {
       await waitForCell(0, 6, 51, 'the formula using the row spill recalculates');
       await waitForCell(1, 11, '40', 'editing the source recalculates the TRIM spill');
       await waitForCell(1, 13, 'high', 'editing the source recalculates CHOOSE array branches');
-      await waitForCell(1, 15, 'large', 'editing the source recalculates IFS array conditions');
-      await waitForCell(1, 17, 'other', 'editing the source recalculates SWITCH array matching');
+      await waitForCell(1, 14, 'large', 'editing the source recalculates IFS array conditions');
+      await waitForCell(1, 15, 'other', 'editing the source recalculates SWITCH array matching');
       await vscode.commands.executeCommand('workbench.action.files.save');
       const saved = analyze(await fs.readFile(file));
       assert.equal(saved.sheets[0].cells.get('A2').value, '40');

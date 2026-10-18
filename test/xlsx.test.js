@@ -978,6 +978,7 @@ assert.equal(evaluateFormula('VARPA(-1E308,1E308)'), '#NUM!');
   assert.deepEqual(evaluateFormula('CHOOSE(A1:A3,"first","second")', branchArrayContext), [['first'], ['second'], ['#VALUE!']], 'CHOOSE maps index ranges and keeps invalid indexes at their corresponding positions');
   assert.deepEqual(evaluateFormula('IFS(A1:A3<2,"small",A1:A3<9,"medium",TRUE,"large")', branchArrayContext), [['small'], ['medium'], ['large']], 'IFS evaluates conditions independently for each array element');
   assert.deepEqual(evaluateFormula('SWITCH(B1:B3,"a",10,"b",20,0)', branchArrayContext), [[10], [20], [0]], 'SWITCH compares each expression value and broadcasts scalar choices');
+  assert.deepEqual(evaluateFormula('SWITCH(A1:A3,1,"one",2,"two","other")', branchArrayContext), [['one'], ['two'], ['other']], 'SWITCH compares numeric array expressions with numeric choices');
   assert.equal(evaluateFormula('CHOOSE(A1:A2,B1:B1)', branchArrayContext), '#VALUE!', 'branch functions reject mismatched array shapes');
   const branchErrorContext = { ...branchArrayContext, getCell: (row, column) => row === 1 ? '#N/A' : row + 1, getCellKind: (row, column) => row === 1 ? 'error' : 'number' };
   const chooseErrors = evaluateFormula('CHOOSE(A1:A3,"first","second","third")', branchErrorContext);

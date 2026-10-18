@@ -10,6 +10,8 @@ The interface follows VS Code's display language: Korean when the language code 
 
 ## Features
 
+- The command toolbar starts collapsed to give the sheet more room. Expand it to access the commands; the cell address, formula bar, Find, and Replace controls stay visible.
+
 - Insert or remove manual page breaks above the active row or left of the active column, reset stored breaks, and choose down-then-across or across-then-down printing order. Header markers show break positions without changing cell formatting.
 
 - Save XLSX left/center/right headers and footers, first-page and odd/even variants, dynamic page counts, file/sheet names and a custom first page number. Browser export keeps them in the page margins.
@@ -195,6 +197,10 @@ Additional supported text, value, and date formulas include `EXACT`, `PROPER`, `
 Use the spill reference operator, such as `A1#`, to refer to the full result of a dynamic array formula. The referenced range can feed functions or spill again from another formula cell.
 
 ## 한국어
+
+### 도구 모음 접기
+
+데이터를 넓게 볼 수 있도록 처음에는 명령 도구를 접어 둡니다. 더 많은 기능이 필요하면 시트 탭 옆의 **메뉴 펼치기**를 누르세요. 셀 주소, 값·수식 입력줄, 찾기와 바꾸기는 계속 사용할 수 있습니다. 영어 UI에서는 **Show menu**로 표시됩니다. 펼친 메뉴를 다시 접으려면 **메뉴 접기**를 누르세요.
 
 ### 선택 범위로 표 만들기
 

@@ -72,6 +72,46 @@ test('기본 수식 계산은 연산자 우선순위·셀 참조·범위 집계�
   assert.deepEqual(evaluateFormula('B1:B2/A1:A2', operatorArrayContext), [[1.5], [1.25]], 'binary division aligns range arrays');
   assert.deepEqual(evaluateFormula('A1:A2^2', operatorArrayContext), [[4], [16]], 'binary exponentiation broadcasts a scalar exponent');
   assert.deepEqual(evaluateFormula('A1:A2>=3', operatorArrayContext), [[false], [true]], 'comparisons map range values to Boolean results');
+  const comparisonContext = {
+    getCell: (row, column) => ['1', 1, true, null, 'Alpha', false][column],
+    getCellKind: (row, column) => ['string', 'number', 'boolean', 'blank', 'string', 'boolean'][column],
+  };
+  assert.equal(evaluateFormula('A1=1', comparisonContext), false, 'text numbers remain text in comparisons against numbers');
+  assert.equal(evaluateFormula('A1>0', comparisonContext), true, 'text sorts after numbers');
+  assert.equal(evaluateFormula('0<A1', comparisonContext), true, 'mixed type ordering is symmetric');
+  assert.equal(evaluateFormula('B1=1', comparisonContext), true, 'numeric values compare numerically');
+  assert.equal(evaluateFormula('E1="alpha"', comparisonContext), true, 'text comparisons ignore letter case');
+  assert.equal(evaluateFormula('"ä"<"z"', { locale: 'en-US' }), true, 'text comparisons use English collation');
+  assert.equal(evaluateFormula('"ä"<"z"', { locale: 'sv-SE' }), false, 'text comparisons use Swedish collation');
+  assert.equal(evaluateFormula('"가"<"나"', { locale: 'ko-KR' }), true, 'text comparisons use Korean collation');
+  for (const [locale, expected] of [['en-US', true], ['sv-SE', false]]) {
+    const cells = new Map([['A1', { address: 'A1', row: 0, column: 0, value: '', kind: 'boolean', formula: '"ä"<"z"' }]]);
+    const document = {
+      locale,
+      state: { sheets: [{ name: 'Data', cells, mergedCells: [], tables: [] }] },
+      getCell: (row, column) => cells.get(String.fromCharCode(65 + column) + (row + 1)) || null
+    };
+    assert.equal(createFormulaCalculator(document).value(0, 0, 0), expected, `formula calculator carries the ${locale} document locale`);
+  }
+  assert.equal(evaluateFormula('E1<F1', comparisonContext), true, 'logical values sort after text');
+  assert.equal(evaluateFormula('F1<C1', comparisonContext), true, 'FALSE sorts before TRUE');
+  assert.equal(evaluateFormula('D1=0', comparisonContext), true, 'a blank reference compares equal to numeric zero');
+  assert.equal(evaluateFormula('D1=""', comparisonContext), true, 'a blank reference compares equal to an empty string');
+  assert.equal(evaluateFormula('"plain text"'), 'plain text', 'a formula containing only a text literal returns plain text');
+  assert.equal(evaluateFormula('"2"+1'), 3, 'arithmetic still converts numeric text literals');
+  assert.equal(evaluateFormula('"#N/A"+1'), '#VALUE!', 'error-looking text literals are not propagated as actual errors');
+  const errorTextCell = { getCell: () => '#N/A', getCellKind: () => 'string' };
+  assert.equal(evaluateFormula('A1+1', errorTextCell), '#VALUE!', 'error-looking text cells fail numeric conversion');
+  assert.equal(evaluateFormula('-A1', errorTextCell), '#VALUE!', 'unary arithmetic also treats error-looking text as text');
+  assert.equal(evaluateFormula('A1^2', errorTextCell), '#VALUE!', 'exponentiation also treats error-looking text as text');
+  assert.equal(evaluateFormula('A1&"!"', errorTextCell), '#N/A!', 'text concatenation keeps error-looking cell text');
+  assert.equal(evaluateFormula('A1="#N/A"', errorTextCell), true, 'error-looking text cells compare as text');
+  const numericTextCell = { getCell: () => '2', getCellKind: () => 'string' };
+  assert.equal(evaluateFormula('A1+1', numericTextCell), 3, 'arithmetic converts numeric text from a cell reference');
+  const actualErrorCell = { getCell: () => '#N/A', getCellKind: () => 'error' };
+  assert.equal(evaluateFormula('A1+1', actualErrorCell).value, '#N/A', 'actual error cells still propagate');
+  assert.equal(evaluateFormula('-A1', actualErrorCell).value, '#N/A', 'actual error cells propagate through unary arithmetic');
+  assert.equal(evaluateFormula('A1&"!"', actualErrorCell).value, '#N/A', 'actual error cells propagate through concatenation');
   assert.deepEqual(evaluateFormula('A1:A2&"x"', operatorArrayContext), [['2x'], ['4x']], 'string concatenation broadcasts a scalar');
   assert.deepEqual(evaluateFormula('-A1:A2', operatorArrayContext), [[-2], [-4]], 'unary negation maps over a range');
   assert.deepEqual(evaluateFormula('A1:A2%', operatorArrayContext), [[0.02], [0.04]], 'percent operators map over a range');
@@ -1392,6 +1432,25 @@ test('수식 참조와 범위는 오류 모양 문자열 셀과 실제 오류 �
   assert.equal(calculator.value(0, 9, 2), true, 'ISTEXT recognizes an error-looking string cell');
   assert.equal(calculator.value(0, 10, 2), 'fallback', 'IFNA handles a typed error cell');
   assert.equal(calculator.value(0, 11, 2), '#N/A', 'IFNA preserves an error-looking string cell');
+});
+
+test('XLSX 저장·재열기 뒤에도 오류 모양 문자열과 실제 오류의 산술 결과를 구분한다', () => {
+  const saved = patchCells(analyze(fixture()), [
+    { sheetIndex: 0, address: 'D1', value: '#N/A', kind: 'string' },
+    { sheetIndex: 0, address: 'E1', value: '', formula: 'D1+1', kind: 'error' },
+    { sheetIndex: 0, address: 'F1', value: '', formula: 'D1="#N/A"', kind: 'boolean' },
+    { sheetIndex: 0, address: 'G1', value: '#N/A', kind: 'error' },
+    { sheetIndex: 0, address: 'H1', value: '', formula: 'G1+1', kind: 'error' }
+  ]);
+  const reopened = analyze(saved.bytes);
+  assert.equal(reopened.writable, true, reopened.readOnlyReason);
+  const calculator = createFormulaCalculator({
+    state: { formulas: true, sheets: reopened.sheets },
+    getCell: (row, column, sheetIndex = 0) => reopened.sheets[sheetIndex]?.cells.get(String.fromCharCode(65 + column) + (row + 1)) || null
+  });
+  assert.equal(calculator.value(0, 0, 4), '#VALUE!', 'text cell arithmetic recalculates as a value error after reopen');
+  assert.equal(calculator.value(0, 0, 5), true, 'text comparison recalculates after reopen');
+  assert.equal(calculator.value(0, 0, 7), '#N/A', 'actual error arithmetic propagates after reopen');
 });
 
 test('수식이 만들어 낸 오류 모양 텍스트는 문자열 종류를 유지한다', () => {
@@ -4095,6 +4154,39 @@ test('XLSX 행·열 삽입과 삭제는 차트 원본 수식·캐시와 셀 기�
   }
 });
 
+test('차트가 다른 워크시트의 셀을 원본으로 삼으면 원본 시트의 행 변경을 따라 저장·재열기한다', () => {
+  const files = unzipSync(fixtureWithCachedChart()), decode = name => new TextDecoder().decode(files[name]), encode = text => new TextEncoder().encode(text);
+  files['xl/worksheets/sheet1.xml'] = encode(decode('xl/worksheets/sheet1.xml').replace('<drawing r:id="rId3"/>', ''));
+  files['xl/worksheets/sheet2.xml'] = encode(decode('xl/worksheets/sheet2.xml')
+    .replace('<worksheet ', '<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ')
+    .replace('</worksheet>', '<drawing r:id="rId1"/></worksheet>'));
+  delete files['xl/worksheets/_rels/sheet1.xml.rels'];
+  files['xl/worksheets/_rels/sheet2.xml.rels'] = encode('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>');
+  const source = analyze(zipSync(files));
+  assert.equal(source.writable, true, source.readOnlyReason);
+  assert.equal(source.sheets[0].charts.length, 0);
+  assert.equal(source.sheets[1].charts.length, 1);
+  assert.deepEqual(source.chartSourceRanges.map(range => range.sheetIndex), [0, 0, 0]);
+  const populated = patchCells(source, [
+    { sheetIndex: 0, address: 'A2', value: 'Jan', kind: 'string' },
+    { sheetIndex: 0, address: 'A3', value: 'Feb', kind: 'string' },
+    { sheetIndex: 0, address: 'B2', value: '4', kind: 'number' },
+    { sheetIndex: 0, address: 'B3', value: '6', kind: 'number' }
+  ]).model;
+  const inserted = transformStructure(populated, { sheetIndex: 0, axis: 'row', action: 'insert', index: 2 });
+  assert.equal(inserted.model.writable, true, inserted.model.readOnlyReason);
+  const chartXml = new TextDecoder().decode(inserted.model.files['xl/charts/chart1.xml']);
+  assert.match(chartXml, /Data!\$A\$2:\$A\$4/);
+  assert.match(chartXml, /Data!\$B\$2:\$B\$4/);
+  assert.deepEqual(inserted.model.sheets[1].charts[0].series[0].categories, ['Jan', '', 'Feb']);
+  assert.deepEqual(inserted.model.sheets[1].charts[0].series[0].values, [4, null, 6]);
+  const reopened = analyze(inserted.bytes);
+  assert.equal(reopened.writable, true, reopened.readOnlyReason);
+  assert.equal(reopened.sheets[1].charts.length, 1);
+  assert.deepEqual(reopened.sheets[1].charts[0].series[0].categories, ['Jan', '', 'Feb']);
+  assert.deepEqual(reopened.sheets[1].charts[0].series[0].values, [4, null, 6]);
+});
+
 test('차트가 공유한 그리기 파일은 구조 변경한 워크시트에만 분리한다', () => {
   const files = unzipSync(fixtureWithPositionedChart()), drawingPath = 'xl/drawings/drawing1.xml';
   files['xl/worksheets/sheet2.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/worksheets/sheet2.xml']).replace('<worksheet ', '<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ').replace('</worksheet>', '<drawing r:id="rId1"/></worksheet>'));
@@ -4887,9 +4979,23 @@ test('LibreOffice Calc가 저장한 복합 XLSX의 표·유효성·조건부 서
 test('LibreOffice 복합 XLSX는 필터된 행에 행 삽입 후 되돌려도 연결된 기능을 보존한다', () => {
   const fs = require('node:fs');
   const path = require('node:path');
-  const source = analyze(fs.readFileSync(path.join(__dirname, 'fixtures', 'LibreOffice-Mixed-Features-Roundtrip.xlsx')));
+  const mixedFiles = unzipSync(fs.readFileSync(path.join(__dirname, 'fixtures', 'LibreOffice-Mixed-Features-Roundtrip.xlsx')));
+  const workbookXml = new TextDecoder().decode(mixedFiles['xl/workbook.xml']);
+  mixedFiles['xl/workbook.xml'] = new TextEncoder().encode(workbookXml.replace('</workbook>', '<definedNames><definedName name="MixedSales">\'재고\'!$B$2:$B$3</definedName></definedNames></workbook>'));
+  const worksheetXml = new TextDecoder().decode(mixedFiles['xl/worksheets/sheet1.xml']);
+  const withDefinedNameFormulas = worksheetXml
+    .replace(/(<row r="2"[^>]*>[\s\S]*?)(<\/row>)/, '$1<c r="D2"><f>SUM(MixedSales)</f><v>19</v></c>$2')
+    .replace(/(<row r="4"[^>]*>[\s\S]*?)(<\/row>)/, '$1<c r="D4"><f>SUM(MixedSales)</f><v>19</v></c>$2');
+  const withNamedValidation = withDefinedNameFormulas
+    .replace(/<dataValidations count="(\d+)">/, (_element, count) => `<dataValidations count="${Number(count) + 1}">`)
+    .replace('</dataValidations>', '<dataValidation type="list" sqref="C1"><formula1>MixedSales</formula1></dataValidation></dataValidations>');
+  mixedFiles['xl/worksheets/sheet1.xml'] = new TextEncoder().encode(withNamedValidation);
+  const source = analyze(zipSync(mixedFiles));
   assert.equal(source.writable, true, source.readOnlyReason);
   const originalSheet = source.sheets[0];
+  assert.deepEqual(source.definedNames[0].source, { sheetName: '재고', top: 1, bottom: 2, left: 1, right: 1 });
+  assert.deepEqual(source.sheets[0].dataValidations[1].source, { sheetName: '재고', top: 1, bottom: 2, left: 1, right: 1 });
+  assert.equal(source.sheets[0].dataValidations[1].sourceName, 'MixedSales');
 
   const inserted = transformStructure(source, { sheetIndex: 0, axis: 'row', action: 'insert', index: 1 }).model;
   assert.equal(inserted.writable, true, inserted.readOnlyReason);
@@ -4899,22 +5005,63 @@ test('LibreOffice 복합 XLSX는 필터된 행에 행 삽입 후 되돌려도 �
   assert.deepEqual(inserted.sheets[0].conditionalFormats[0].ranges, [{ top: 2, bottom: 3, left: 1, right: 2 }]);
   assert.deepEqual(inserted.sheets[0].dataValidations[0].ranges, [{ top: 2, bottom: 3, left: 1, right: 1 }]);
   assert.deepEqual(inserted.sheets[0].charts[0].series[0].values, [12, 7]);
+  assert.deepEqual(inserted.definedNames[0].source, { sheetName: '재고', top: 2, bottom: 3, left: 1, right: 1 });
+  assert.deepEqual(inserted.sheets[0].dataValidations[1].source, { sheetName: '재고', top: 2, bottom: 3, left: 1, right: 1 });
+  assert.equal(inserted.sheets[0].dataValidations[1].sourceName, 'MixedSales', 'validation formulas retain their defined-name reference when the source range moves');
+  assert.match(inserted.sheets[0].xml, /<formula1>=?MixedSales<\/formula1>/, 'saved list validation still points through the defined name');
+  assert.equal(inserted.sheets[0].cells.get('D3').formula, 'SUM(MixedSales)');
   const calculator = createFormulaCalculator({ state: inserted, getCell: (row, column, sheetIndex = 0) => inserted.sheets[sheetIndex]?.cells.get(String.fromCharCode(65 + column) + (row + 1)) || null });
+  assert.equal(calculator.value(0, 2, 3), 19, 'a formula using the moved defined name still calculates after insertion');
+  assert.equal(calculator.value(0, 4, 3), 19, 'a later formula is shifted with the rest of the workbook');
   const preview = calculateChartPreviews(inserted, 0, calculator, (row, column, sheetIndex = 0) => inserted.sheets[sheetIndex]?.cells.get(String.fromCharCode(65 + column) + (row + 1)) || null, []);
   assert.deepEqual(preview[0].series[0].categories, ['사과', '']);
   assert.deepEqual(preview[0].series[0].values, [12, null], 'the filtered chart point stays hidden after its source rows shift');
   assert.deepEqual(inserted.sheets[0].mergedCells.map(({ top, bottom, left, right }) => ({ top, bottom, left, right })), [{ top: 0, bottom: 0, left: 4, right: 5 }]);
   assert.deepEqual(inserted.sheets[0].freezePane, { rows: 1, columns: 1 });
 
-  const restored = analyze(transformStructure(inserted, { sheetIndex: 0, axis: 'row', action: 'delete', index: 1 }).bytes);
+  const reopenedInserted = analyze(inserted.bytes);
+  assert.equal(reopenedInserted.writable, true, reopenedInserted.readOnlyReason);
+  assert.deepEqual(reopenedInserted.definedNames[0].source, { sheetName: '재고', top: 2, bottom: 3, left: 1, right: 1 });
+  assert.equal(reopenedInserted.sheets[0].dataValidations[1].sourceName, 'MixedSales');
+  assert.equal(reopenedInserted.sheets[0].cells.get('D3').formula, 'SUM(MixedSales)');
+  const restored = analyze(transformStructure(reopenedInserted, { sheetIndex: 0, axis: 'row', action: 'delete', index: 1 }).bytes);
   assert.equal(restored.writable, true, restored.readOnlyReason);
   assert.deepEqual(restored.sheets[0].tables[0].range, originalSheet.tables[0].range);
   assert.deepEqual(restored.sheets[0].nativeHiddenRows, originalSheet.nativeHiddenRows);
   assert.equal(restored.sheets[0].cells.get('D1').formula, originalSheet.cells.get('D1').formula);
   assert.deepEqual(restored.sheets[0].conditionalFormats[0].ranges, originalSheet.conditionalFormats[0].ranges);
   assert.deepEqual(restored.sheets[0].dataValidations[0].ranges, originalSheet.dataValidations[0].ranges);
+  assert.deepEqual(restored.definedNames[0].source, { sheetName: '재고', top: 1, bottom: 2, left: 1, right: 1 });
+  assert.equal(restored.sheets[0].dataValidations[1].sourceName, 'MixedSales');
+  assert.equal(restored.sheets[0].cells.get('D2').formula, 'SUM(MixedSales)');
+  const restoredCalculator = createFormulaCalculator({ state: restored, getCell: (row, column, sheetIndex = 0) => restored.sheets[sheetIndex]?.cells.get(String.fromCharCode(65 + column) + (row + 1)) || null });
+  assert.equal(restoredCalculator.value(0, 1, 3), 19, 'the formula and its defined name survive saving, reopening and restoring the row');
+  assert.equal(restoredCalculator.value(0, 3, 3), 19);
   assert.deepEqual(restored.sheets[0].mergedCells.map(({ top, bottom, left, right }) => ({ top, bottom, left, right })), [{ top: 0, bottom: 0, left: 4, right: 5 }]);
   assert.deepEqual(restored.sheets[0].freezePane, originalSheet.freezePane);
+
+  const deletedSourceRow = transformStructure(source, { sheetIndex: 0, axis: 'row', action: 'delete', index: 1 });
+  assert.equal(deletedSourceRow.model.writable, true, deletedSourceRow.model.readOnlyReason);
+  assert.deepEqual(deletedSourceRow.model.definedNames[0].source, { sheetName: '재고', top: 1, bottom: 1, left: 1, right: 1 });
+  assert.deepEqual(deletedSourceRow.model.sheets[0].dataValidations[1].source, { sheetName: '재고', top: 1, bottom: 1, left: 1, right: 1 });
+  assert.equal(deletedSourceRow.model.sheets[0].dataValidations[1].sourceName, 'MixedSales', 'the surviving validation keeps the name after its referenced row is removed');
+  assert.equal(deletedSourceRow.model.sheets[0].cells.get('D3').formula, 'SUM(MixedSales)');
+  assert.deepEqual(deletedSourceRow.model.sheets[0].dataValidations[0].ranges, [{ top: 1, bottom: 1, left: 1, right: 1 }]);
+  assert.deepEqual(deletedSourceRow.model.sheets[0].charts[0].series[0].categories, ['배']);
+  assert.deepEqual(deletedSourceRow.model.sheets[0].charts[0].series[0].values, [7]);
+  const afterDeleteCalculator = createFormulaCalculator({ state: deletedSourceRow.model, getCell: (row, column, sheetIndex = 0) => deletedSourceRow.model.sheets[sheetIndex]?.cells.get(String.fromCharCode(65 + column) + (row + 1)) || null });
+  assert.equal(afterDeleteCalculator.value(0, 2, 3), 7, 'a retained formula recalculates against the shortened name range');
+  assert.match(deletedSourceRow.model.sheets[0].xml, /<formula1>=?MixedSales<\/formula1>/, 'the saved validation still points to the shortened range through its defined name');
+  const reopenedAfterDelete = analyze(deletedSourceRow.bytes);
+  assert.equal(reopenedAfterDelete.writable, true, reopenedAfterDelete.readOnlyReason);
+  assert.deepEqual(reopenedAfterDelete.definedNames[0].source, { sheetName: '재고', top: 1, bottom: 1, left: 1, right: 1 });
+  assert.equal(reopenedAfterDelete.sheets[0].dataValidations[1].sourceName, 'MixedSales');
+  assert.deepEqual(reopenedAfterDelete.sheets[0].dataValidations[1].source, { sheetName: '재고', top: 1, bottom: 1, left: 1, right: 1 });
+  assert.equal(reopenedAfterDelete.sheets[0].cells.get('D3').formula, 'SUM(MixedSales)');
+  const reopenedAfterDeleteCalculator = createFormulaCalculator({ state: reopenedAfterDelete, getCell: (row, column, sheetIndex = 0) => reopenedAfterDelete.sheets[sheetIndex]?.cells.get(String.fromCharCode(65 + column) + (row + 1)) || null });
+  assert.equal(reopenedAfterDeleteCalculator.value(0, 2, 3), 7, 'the saved formula recalculates against the shortened defined name after reopening');
+  assert.throws(() => transformStructure(deletedSourceRow.model, { sheetIndex: 0, axis: 'row', action: 'delete', index: 1 }), /차트 원본 셀을 모두 삭제하면 차트를 보존할 수 없습니다/);
+  assert.equal(deletedSourceRow.model.sheets[0].cells.get('D3').formula, 'SUM(MixedSales)', 'a rejected deletion leaves the prior workbook model intact');
 });
 
 test('LibreOffice 복합 XLSX는 표 안에 열 삽입·삭제 후 필터·수식·차트 구조를 보존한다', () => {
@@ -5339,6 +5486,70 @@ test('정의된 이름 참조는 행·열 구조 변경에 따라 이동하고 �
     getCell: (row, column, sheetIndex = 0) => deleted.sheets[sheetIndex]?.cells.get(String.fromCharCode(65 + column) + (row + 1)) || null
   });
   assert.equal(calculator.value(1, 1, 1), '#REF!');
+});
+
+test('정의된 이름의 전체 원본 열 삭제는 목록 유효성을 #REF로 보존하고 XLSX를 다시 연다', () => {
+  const files = unzipSync(fixture()), encode = value => new TextEncoder().encode(value), decode = name => new TextDecoder().decode(files[name]);
+  files['xl/workbook.xml'] = encode(decode('xl/workbook.xml').replace('</sheets>', '</sheets><definedNames><definedName name="ListRows">Data!$B$1:$B$1</definedName></definedNames>'));
+  files['xl/worksheets/sheet2.xml'] = encode(decode('xl/worksheets/sheet2.xml').replace('</worksheet>', '<dataValidations count="1"><dataValidation type="list" sqref="A1"><formula1>ListRows</formula1></dataValidation></dataValidations></worksheet>'));
+  const original = analyze(zipSync(files));
+  assert.equal(original.writable, true, original.readOnlyReason);
+  assert.equal(original.sheets[1].dataValidations[0].sourceName, 'ListRows');
+
+  const deleted = transformStructure(original, { sheetIndex: 0, axis: 'column', action: 'delete', index: 1 });
+  assert.equal(deleted.model.writable, true, deleted.model.readOnlyReason);
+  assert.equal(deleted.model.definedNames[0].error, '#REF!');
+  assert.equal(deleted.model.sheets[1].dataValidations[0].sourceName, null);
+  assert.equal(deleted.model.sheets[1].dataValidations[0].sourceFormula, '#REF!');
+  assert.match(deleted.model.sheets[1].xml, /<formula1>#REF!<\/formula1>/);
+
+  const reopened = analyze(deleted.bytes);
+  assert.equal(reopened.writable, true, reopened.readOnlyReason);
+  assert.equal(reopened.definedNames[0].error, '#REF!');
+  assert.equal(reopened.sheets[1].dataValidations[0].sourceName, null);
+  assert.equal(reopened.sheets[1].dataValidations[0].sourceFormula, '#REF!');
+});
+
+test('중복 이름의 목록 유효성은 시트 로컬 이름을 우선하고 실제 원본이 삭제된 경우만 #REF가 된다', () => {
+  const makeWorkbook = ({ globalReference, localReference }) => {
+    const files = unzipSync(fixture()), encode = value => new TextEncoder().encode(value), decode = name => new TextDecoder().decode(files[name]);
+    files['xl/workbook.xml'] = encode(decode('xl/workbook.xml').replace('</sheets>', `</sheets><definedNames><definedName name="Choice">${globalReference}</definedName><definedName name="Choice" localSheetId="1">${localReference}</definedName></definedNames>`));
+    files['xl/worksheets/sheet1.xml'] = encode(decode('xl/worksheets/sheet1.xml').replace('</worksheet>', '<dataValidations count="1"><dataValidation type="list" sqref="A1"><formula1>Choice</formula1></dataValidation></dataValidations></worksheet>'));
+    files['xl/worksheets/sheet2.xml'] = encode(decode('xl/worksheets/sheet2.xml').replace('</worksheet>', '<dataValidations count="1"><dataValidation type="list" sqref="B1"><formula1>Choice</formula1></dataValidation></dataValidations></worksheet>'));
+    return analyze(zipSync(files));
+  };
+
+  const globalDeleted = makeWorkbook({ globalReference: 'Data!$B$1', localReference: 'Hidden!$A$1' });
+  assert.equal(globalDeleted.writable, true, globalDeleted.readOnlyReason);
+  const first = analyze(transformStructure(globalDeleted, { sheetIndex: 0, axis: 'column', action: 'delete', index: 1 }).bytes);
+  assert.equal(first.writable, true, first.readOnlyReason);
+  assert.equal(first.sheets[0].dataValidations[0].sourceFormula, '#REF!', 'the unshadowed workbook name is updated when its source is deleted');
+  assert.equal(first.sheets[1].dataValidations[0].sourceName, 'Choice', 'the local name takes precedence over the deleted workbook name');
+  assert.deepEqual(first.sheets[1].dataValidations[0].source, { sheetName: 'Hidden', top: 0, bottom: 0, left: 0, right: 0 });
+
+  const localDeleted = makeWorkbook({ globalReference: 'Data!$A$1', localReference: 'Data!$B$1' });
+  assert.equal(localDeleted.writable, true, localDeleted.readOnlyReason);
+  const second = analyze(transformStructure(localDeleted, { sheetIndex: 0, axis: 'column', action: 'delete', index: 1 }).bytes);
+  assert.equal(second.writable, true, second.readOnlyReason);
+  assert.equal(second.definedNames.find(item => item.localSheetId === null).source.left, 0, 'the workbook name remains valid');
+  assert.equal(second.sheets[1].dataValidations[0].sourceFormula, '#REF!', 'the shadowing local name becomes #REF and remains the selected definition');
+});
+
+test('INDIRECT 목록 유효성은 이름 범위 전체 삭제 후 텍스트 수식을 보존한다', () => {
+  const files = unzipSync(fixture()), encode = value => new TextEncoder().encode(value), decode = name => new TextDecoder().decode(files[name]);
+  files['xl/workbook.xml'] = encode(decode('xl/workbook.xml').replace('</sheets>', '</sheets><definedNames><definedName name="ListRows">Data!$B$1:$B$1</definedName></definedNames>'));
+  files['xl/worksheets/sheet2.xml'] = encode(decode('xl/worksheets/sheet2.xml').replace('</worksheet>', '<dataValidations count="1"><dataValidation type="list" sqref="A1"><formula1>INDIRECT(&quot;ListRows&quot;)</formula1></dataValidation></dataValidations></worksheet>'));
+  const original = analyze(zipSync(files));
+  assert.equal(original.writable, true, original.readOnlyReason);
+  assert.equal(original.sheets[1].dataValidations[0].sourceFormula, 'INDIRECT("ListRows")');
+
+  const deleted = transformStructure(original, { sheetIndex: 0, axis: 'column', action: 'delete', index: 1 });
+  assert.equal(deleted.model.writable, true, deleted.model.readOnlyReason);
+  assert.equal(deleted.model.definedNames[0].error, '#REF!');
+  assert.equal(deleted.model.sheets[1].dataValidations[0].sourceFormula, 'INDIRECT("ListRows")');
+  const reopened = analyze(deleted.bytes);
+  assert.equal(reopened.writable, true, reopened.readOnlyReason);
+  assert.equal(reopened.sheets[1].dataValidations[0].sourceFormula, 'INDIRECT("ListRows")');
 });
 
 test('Excel의 전체 행·열 인쇄 영역은 범위로 읽고 이름 변경·구조 변경 후에도 보존한다', () => {

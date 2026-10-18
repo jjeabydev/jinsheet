@@ -113,7 +113,8 @@ function plainFormulaValue(value) { return value?.[FORMULA_TYPED_TEXT] || value?
 function failValue() { return '#VALUE!'; }
 function numeric(value) {
   if (value?.[FORMULA_TYPED_TEXT]) return isErrorText(value.value) ? '#VALUE!' : numeric(value.value);
-  if (value?.[FORMULA_TEXT_LITERAL] || value?.[FORMULA_REFERENCE_VALUE]) value = value.value;
+  if (value?.[FORMULA_TEXT_LITERAL]) return isErrorText(value.value) ? '#VALUE!' : numeric(value.value);
+  if (value?.[FORMULA_REFERENCE_VALUE]) return numeric(value.value);
   if (isError(value)) return value;
   if (value === null || value === undefined || value === '') return 0;
   if (typeof value === 'number') return Number.isFinite(value) ? value : '#NUM!';
@@ -3544,6 +3545,7 @@ function evaluateFormula(formula, context = {}) {
     const tokens = tokenize(formula);
     let position = 0;
     let captureFunctionArguments = 0;
+    let textCollator = null;
     const peek = () => tokens[position];
     const take = type => { if (peek().type !== type) throw new Error('#VALUE!'); return tokens[position++]; };
     const precedence = { '=': 1, '<>': 1, '<': 1, '>': 1, '<=': 1, '>=': 1, '&': 2, '+': 3, '-': 3, '*': 4, '/': 4, '^': 5 };
@@ -3551,8 +3553,8 @@ function evaluateFormula(formula, context = {}) {
       const token = peek();
       if (token.type === 'value') {
         position++;
-        if (captureFunctionArguments && typeof token.value === 'string') return { [FORMULA_TEXT_LITERAL]: true, value: token.value };
-        return typeof token.value === 'string' ? formulaTextResult(token.value, context.preserveFormulaText) : token.value;
+        if (typeof token.value === 'string') return { [FORMULA_TEXT_LITERAL]: true, value: token.value };
+        return token.value;
       }
       if (token.type === 'error') { position++; return token.value; }
       if (token.type === 'structuredReference') {
@@ -3784,20 +3786,38 @@ function evaluateFormula(formula, context = {}) {
         return Array.from({ length: height }, (_, row) => Array.from({ length: width }, (_, column) => binary(operator,
           leftMatrix ? leftMatrix[row][column] : left, rightMatrix ? rightMatrix[row][column] : right)));
       }
-      if (isError(left)) return left;
-      if (isError(right)) return right;
+      if (isError(left) && !left?.[FORMULA_TEXT_LITERAL]) return left;
+      if (isError(right) && !right?.[FORMULA_TEXT_LITERAL]) return right;
       if (operator === '&') {
         left = plainFormulaValue(left?.[FORMULA_TEXT_LITERAL] || left?.[FORMULA_REFERENCE_VALUE] ? left.value : left);
         right = plainFormulaValue(right?.[FORMULA_TEXT_LITERAL] || right?.[FORMULA_REFERENCE_VALUE] ? right.value : right);
         return formulaTextResult(String(left ?? '') + String(right ?? ''), context.preserveFormulaText);
       }
-      left = plainFormulaValue(left?.[FORMULA_TEXT_LITERAL] || left?.[FORMULA_REFERENCE_VALUE] ? left.value : left);
-      right = plainFormulaValue(right?.[FORMULA_TEXT_LITERAL] || right?.[FORMULA_REFERENCE_VALUE] ? right.value : right);
       if (['=', '<>', '<', '>', '<=', '>='].includes(operator)) {
-        const a = typeof left === 'string' && typeof right === 'string' ? left.toLocaleLowerCase() : (typeof left === 'string' && typeof right === 'number' ? numeric(left) : left);
-        const b = typeof left === 'string' && typeof right === 'string' ? right.toLocaleLowerCase() : (typeof right === 'string' && typeof left === 'number' ? numeric(right) : right);
-        if (isError(a) || isError(b)) return isError(a) ? a : b;
-        return operator === '=' ? a === b : operator === '<>' ? a !== b : operator === '<' ? a < b : operator === '>' ? a > b : operator === '<=' ? a <= b : a >= b;
+        const comparable = value => {
+          if (value?.[FORMULA_TEXT_LITERAL]) return value.value;
+          if (value?.[FORMULA_REFERENCE_VALUE]) value = value.value;
+          return value?.[FORMULA_TYPED_TEXT] || value?.[FORMULA_TYPED_ERROR] ? value.value : value;
+        };
+        left = comparable(left);
+        right = comparable(right);
+        const blankEquals = (left === null || left === undefined) && (right === '' || right === 0)
+          || (right === null || right === undefined) && (left === '' || left === 0);
+        let order = 0;
+        if (blankEquals || left === null && right === null || left === undefined && right === undefined) order = 0;
+        else {
+          const a = left === null || left === undefined ? 0 : left;
+          const b = right === null || right === undefined ? 0 : right;
+          const typeRank = value => typeof value === 'number' ? 0 : typeof value === 'string' ? 1 : typeof value === 'boolean' ? 2 : 3;
+          const aRank = typeRank(a), bRank = typeRank(b);
+          if (aRank !== bRank) order = aRank < bRank ? -1 : 1;
+          else if (typeof a === 'string') {
+            textCollator ||= new Intl.Collator(context.locale || 'en', { sensitivity: 'base' });
+            order = textCollator.compare(a, b);
+          }
+          else order = a < b ? -1 : a > b ? 1 : 0;
+        }
+        return operator === '=' ? order === 0 : operator === '<>' ? order !== 0 : operator === '<' ? order < 0 : operator === '>' ? order > 0 : operator === '<=' ? order <= 0 : order >= 0;
       }
       const a = numeric(left), b = numeric(right);
       if (typeof a === 'string' || typeof b === 'string') return typeof a === 'string' ? a : b;
@@ -3819,7 +3839,7 @@ function evaluateFormula(formula, context = {}) {
       return left;
     }
     const result = expression(0);
-    return peek().type === 'eof' ? (isFormulaRange(result) || Array.isArray(result) && !context.allowArrayResult ? '#VALUE!' : result === null ? 0 : result) : '#VALUE!';
+    return peek().type === 'eof' ? (isFormulaRange(result) || Array.isArray(result) && !context.allowArrayResult ? '#VALUE!' : result?.[FORMULA_TEXT_LITERAL] ? formulaTextResult(result.value, context.preserveFormulaText) : result === null ? 0 : result) : '#VALUE!';
   } catch (error) {
     return /^#/.test(error?.message || '') ? error.message : failValue();
   }

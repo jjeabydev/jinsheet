@@ -734,7 +734,7 @@ function readDataValidations(node, definedNames = [], sheetIndex = 0, date1904 =
     const needsSecond = !list && ['between', 'notBetween'].includes(operator);
     if (!firstFormula || firstFormula.length > 255 || (needsSecond ? !secondFormula || secondFormula.length > 255 : secondFormula !== undefined) || entry.children.some(item => !['formula1', 'formula2'].includes(item.name)) || children(entry, 'formula1').length !== 1 || children(entry, 'formula2').length !== (needsSecond ? 1 : 0)) throw new Error('데이터 유효성 비교값 구성이 유효하지 않습니다.');
     const formula = firstFormula;
-    let values = null, source = null, sourceFormula = null;
+    let values = null, source = null, sourceFormula = null, sourceName = null;
     if (list && formula[0] === '"' && formula.at(-1) === '"') {
       values = [];
       const raw = formula.slice(1, -1);
@@ -755,7 +755,7 @@ function readDataValidations(node, definedNames = [], sheetIndex = 0, date1904 =
       if (!source) {
         const name = /^=?([A-Z_\\][A-Z0-9_.]*)$/i.exec(formula)?.[1];
         const resolved = name && (definedNames.find(item => item.localSheetId === sheetIndex && item.name.toLocaleLowerCase() === name.toLocaleLowerCase()) || definedNames.find(item => item.localSheetId === null && item.name.toLocaleLowerCase() === name.toLocaleLowerCase()));
-        if (resolved) source = resolved.source;
+        if (resolved) { source = resolved.source; sourceName = formula.startsWith('=') ? formula.slice(1) : formula; }
         else {
           const indirect = /^=?INDIRECT\((.+)\)$/i.exec(formula);
           if (!indirect) throw new Error('셀 범위 또는 지원되는 이름 정의 이외의 데이터 유효성 목록 원본은 지원되지 않습니다.');
@@ -794,7 +794,7 @@ function readDataValidations(node, definedNames = [], sheetIndex = 0, date1904 =
       return { top, bottom, left, right };
     });
     if (!ranges.length || ranges.length > 64) throw new Error('데이터 유효성 적용 범위 개수가 제한을 벗어났습니다.');
-    return { type, operator, ranges, values, formulas: formulaLimits || null, source, sourceFormula, errorStyle: entry.attributes.errorStyle || 'stop', allowBlank: onOff(entry.attributes.allowBlank) === true, showDropDown: onOff(entry.attributes.showDropDown) === true, showInputMessage: onOff(entry.attributes.showInputMessage) !== false, showErrorMessage: onOff(entry.attributes.showErrorMessage) !== false, errorTitle: entry.attributes.errorTitle || '', error: entry.attributes.error || '', promptTitle: entry.attributes.promptTitle || '', prompt: entry.attributes.prompt || '' };
+    return { type, operator, ranges, values, formulas: formulaLimits || null, source, sourceFormula, sourceName, errorStyle: entry.attributes.errorStyle || 'stop', allowBlank: onOff(entry.attributes.allowBlank) === true, showDropDown: onOff(entry.attributes.showDropDown) === true, showInputMessage: onOff(entry.attributes.showInputMessage) !== false, showErrorMessage: onOff(entry.attributes.showErrorMessage) !== false, errorTitle: entry.attributes.errorTitle || '', error: entry.attributes.error || '', promptTitle: entry.attributes.promptTitle || '', prompt: entry.attributes.prompt || '' };
   });
 }
 function isoDateSerial(raw, date1904) {
@@ -3020,6 +3020,7 @@ function dataValidationReference(range) {
 function dataValidationFormula(rule, index) {
   if (rule.type === 'list') {
     if (Array.isArray(rule.values)) return '"' + rule.values.map(value => String(value).replaceAll('"', '""')).join(',') + '"';
+    if (typeof rule.sourceName === 'string' && rule.sourceName) return '=' + rule.sourceName.replace(/^=/, '');
     if (rule.source) {
       const source = rule.source, reference = dataValidationReference(source);
       const sheetName = source.sheetName;
@@ -6560,6 +6561,7 @@ function transformDefinedNamesForStructure(xml, model, targetSheet, operation) {
     definition
   ]));
   let changed = false;
+  const invalidNames = new Set();
   const updatedXml = xml.replace(/<definedName\b[^>]*>[\s\S]*?<\/definedName>/g, element => {
     const openingEnd = element.indexOf('>') + 1, opening = element.slice(0, openingEnd), attributes = parseTagAttributes(opening);
     const localSheetId = attributes.localSheetId === undefined ? null : Number(attributes.localSheetId);
@@ -6571,12 +6573,13 @@ function transformDefinedNamesForStructure(xml, model, targetSheet, operation) {
     const updated = transformFormulaForStructure(formula, formulaSheet, targetSheet, operation);
     if (updated === formula) return element;
     changed = true;
+    if (updated === '#REF!') invalidNames.add(attributes.name.toLocaleLowerCase() + ':' + (localSheetId === null ? '*' : localSheetId));
     return opening + xmlEscape(updated) + '</definedName>';
   });
-  return { xml: updatedXml, changed };
+  return { xml: updatedXml, changed, invalidNames };
 }
 
-function transformDataValidationsForStructure(sheet, targetSheet, operation) {
+function transformDataValidationsForStructure(sheet, targetSheet, operation, invalidNames = new Set(), sheetIndex = -1, definedNames = []) {
   const container = findElementRanges(sheet.xml, 'dataValidations').get('');
   if (!container || container.selfClosing) return [];
   const entries = [...findElementRanges(sheet.xml, 'dataValidation', undefined, true).values()]
@@ -6604,7 +6607,13 @@ function transformDataValidationsForStructure(sheet, targetSheet, operation) {
       if (!formulaRange || formulaRange.selfClosing) continue;
       const formulaElement = element.slice(formulaRange.start, formulaRange.end);
       const formula = parseXml(new TextEncoder().encode(formulaElement), sheet.path).root.text.trim();
-      const updated = transformFormulaForStructure(formula, sheet.name, targetSheet, operation);
+      let updated = transformFormulaForStructure(formula, sheet.name, targetSheet, operation);
+      const namedReference = /^=?([A-Z_\\][A-Z0-9_.]*)$/i.exec(formula)?.[1];
+      if (namedReference) {
+        const definition = definedNames.find(item => item.localSheetId === sheetIndex && item.name.toLocaleLowerCase() === namedReference.toLocaleLowerCase())
+          || definedNames.find(item => item.localSheetId === null && item.name.toLocaleLowerCase() === namedReference.toLocaleLowerCase());
+        if (definition && invalidNames.has(definition.name.toLocaleLowerCase() + ':' + (definition.localSheetId === null ? '*' : definition.localSheetId))) updated = '#REF!';
+      }
       if (updated !== formula) patches.push({
         start: range.start + formulaRange.startTagEnd,
         end: range.start + formulaRange.closingStart,
@@ -6980,7 +6989,8 @@ function transformStructure(model, operation) {
   patches.push(...transformConditionalFormatsForStructure(sheet, operation));
   const hyperlinkRelationshipRemovals = new Map(), hyperlinkRelationshipPaths = new Set();
   for (const validationSheet of model.sheets) {
-    const validationPatches = transformDataValidationsForStructure(validationSheet, sheet.name, operation);
+    const validationSheetIndex = model.sheets.indexOf(validationSheet);
+    const validationPatches = transformDataValidationsForStructure(validationSheet, sheet.name, operation, definedNameTransform.invalidNames, validationSheetIndex, model.definedNames || []);
     if (validationPatches.length) patchesFor(validationSheet).push(...validationPatches);
     const hyperlinkChanges = transformHyperlinksForStructure({ sheets: [validationSheet] }, sheet.name, operation);
     const hyperlinkPatches = hyperlinkChanges.patchesBySheet.get(validationSheet.path) || [];

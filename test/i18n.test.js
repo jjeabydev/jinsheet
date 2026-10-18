@@ -53,6 +53,10 @@ test("Korean VS Code uses Korean UI; other display languages use English", () =>
 
 test("every existing UI message is available in English and Korean", () => {
   assert.deepEqual(Object.keys(messagesFor("ko")).sort(), Object.keys(messagesFor("en")).sort());
+  assert.equal(message("hide-menu", "en"), "Hide menu");
+  assert.equal(message("show-menu", "en"), "Show menu");
+  assert.equal(message("hide-menu", "ko"), "메뉴 접기");
+  assert.equal(message("show-menu", "ko"), "메뉴 펼치기");
   for (const name of Object.keys(ICON_SET_LENGTHS)) {
     const key = "conditional-format-icon-style-" + name;
     assert.notEqual(messagesFor("en")[key], key, name + " has no English label");

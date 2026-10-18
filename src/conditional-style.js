@@ -11,7 +11,7 @@ function iconThreshold(stop, statistics, range, getCellValue, evaluateFormula) {
     return statistics.sorted[lower] + (statistics.sorted[Math.min(lower + 1, statistics.sorted.length - 1)] - statistics.sorted[lower]) * fraction;
   }
   if (stop.type === 'formula' && evaluateFormula) {
-    const result = evaluateFormula(stop.formula, { date1904: Boolean(getCellValue.date1904), now: getCellValue.now, getCell: (row, column, sheetName) => sheetName ? '#REF!' : getCellValue(row, column) });
+    const result = evaluateFormula(stop.formula, { locale: getCellValue.locale, date1904: Boolean(getCellValue.date1904), now: getCellValue.now, getCell: (row, column, sheetName) => sheetName ? '#REF!' : getCellValue(row, column) });
     return typeof result === 'number' && Number.isFinite(result) ? result : null;
   }
   return null;
@@ -134,7 +134,7 @@ function conditionalStyleForCell(sheet, row, column, cell, getCellValue = () => 
     } else if (rule.type === 'expression') {
       for (const range of matchingRanges) {
         const formula = translateFormulaReferences(rule.formula, row - range.top, column - range.left);
-        const value = evaluateFormula(formula, { date1904: Boolean(cell?.date1904), now: getCellValue.now, getCell: (cellRow, cellColumn, sheetName) => sheetName ? '#REF!' : getCellValue(cellRow, cellColumn) });
+        const value = evaluateFormula(formula, { locale: getCellValue.locale, date1904: Boolean(cell?.date1904), now: getCellValue.now, getCell: (cellRow, cellColumn, sheetName) => sheetName ? '#REF!' : getCellValue(cellRow, cellColumn) });
         if (value === true || typeof value === 'number' && value !== 0) { matches = true; break; }
       }
     } else if (cell?.kind === 'number' && number !== null) {
@@ -165,6 +165,7 @@ function createConditionalValueReader(document,calculator,sheetIndex){
   const conditionalStatisticsCache = new Map();
   const conditionalCellValue = (row, column) => calculator.value(sheetIndex, row, column);
   conditionalCellValue.now=calculator.now;
+  conditionalCellValue.locale=document.locale || 'en-US';
   conditionalCellValue.date1904=Boolean(document.state?.date1904);
   conditionalCellValue.rangeValues = bounds => {
     const key = [bounds.top, bounds.bottom, bounds.left, bounds.right].join(':');

@@ -372,6 +372,23 @@ test('데이터 유효성 규칙은 목록과 숫자·날짜·시간 조건을 �
   document.dispose();
 });
 
+test('날짜 데이터 유효성 입력은 VS Code UI 언어와 분리해 시스템 로캘 순서로 해석한다', () => {
+  const validations = '<dataValidations count="1"><dataValidation type="date" operator="between" sqref="A1"><formula1>DATE(2024,3,1)</formula1><formula2>DATE(2024,3,31)</formula2></dataValidation></dataValidations>';
+  for (const [locale, value, accepted] of [['en-GB', '2/3/2024', true], ['en-US', '2/3/2024', false], ['en-US', '2024년 3월 2일', true]]) {
+    const bytes = minimalXlsx('', '', validations), document = new JinSheetDocument(uri(`/tmp/date-validation-locale-${locale}.xlsx`), 'xlsx', analyze(bytes), bytes, true, '');
+    document.locale = locale;
+    if (accepted) {
+      document.applyCellEdit(0, 0, value);
+      assert.equal(document.getCell(0, 0).value, value, `${locale} accepts ${value}`);
+      assert.equal(document.dirty, true);
+    } else {
+      assert.throws(() => document.applyCellEdit(0, 0, value), /유효성/);
+      assert.equal(document.dirty, false, `${locale} rejects the date interpreted outside the validation range`);
+    }
+    document.dispose();
+  }
+});
+
 test('데이터 유효성 설정은 겹친 규칙 범위만 교체하고 저장·실행 취소·다시 실행을 지원한다', () => {
   const original = '<dataValidations count="1"><dataValidation type="list" sqref="A1:C3"><formula1>"old,legacy"</formula1></dataValidation></dataValidations>';
   const bytes = minimalXlsx('', '', original), document = new JinSheetDocument(uri('/tmp/data-validation-overlap.xlsx'), 'xlsx', analyze(bytes), bytes, true, '');
@@ -3075,11 +3092,11 @@ test('XLSX 내부 수식 복사·붙여넣기는 상대 참조를 옮기고 저�
   const formulas = buildClipboardFormulaMatrix(payload, 'xlsx', 0, 3, [[payload.cells[0][0].value]]);
   document.applyCellEdits(buildPasteEdits([[payload.cells[0][0].value]], 0, 3, undefined, styles, formulas));
   assert.equal(document.getCell(0, 3).formula, 'C1+1');
-  assert.equal(document.getCell(0, 3).value, '', 'formula results without a current calculation are not copied from the source cache');
+  assert.equal(document.getCell(0, 3).value, '', 'the unsaved formula draft has no calculated cache yet');
   await document.save();
   let saved = analyze(await fs.readFile(file));
   assert.equal(saved.sheets[0].cells.get('D1').formula, 'C1+1');
-  assert.equal(saved.sheets[0].cells.get('D1').cachedValue, '');
+  assert.equal(saved.sheets[0].cells.get('D1').cachedValue, '1');
   operation.undo();
   await document.save();
   saved = analyze(await fs.readFile(file));
@@ -3177,6 +3194,9 @@ test('ISO 날짜 TSV 붙여넣기는 날짜 serial과 표시 서식을 저장·u
   assert.deepEqual(parseClipboardDate('2024. 2. 29.', 'ko'), { serial: 45351, numFmtId: 14 });
   assert.deepEqual(parseClipboardDate('2024년 2월 29일', 'ko'), { serial: 45351, numFmtId: 14 });
   assert.deepEqual(parseClipboardDate('2/29/2024', 'en'), { serial: 45351, numFmtId: 14 });
+  assert.deepEqual(parseClipboardDate('2024년 2월 29일', 'en-US'), { serial: 45351, numFmtId: 14 }, 'Korean date text is accepted independently of the UI language');
+  assert.deepEqual(parseClipboardDate('2/3/2024', 'en-US'), { serial: 45325, numFmtId: 14 }, 'US system dates use month/day order');
+  assert.deepEqual(parseClipboardDate('2/3/2024', 'en-GB'), { serial: 45353, numFmtId: 14 }, 'British system dates use day/month order');
   const timedDate = parseClipboardDate('2024-02-29 12:30', 'en');
   assert.ok(Math.abs(timedDate.serial - (45351 + 12.5 / 24)) < 1e-10);
   assert.equal(timedDate.numFmtId, 22);
@@ -3710,12 +3730,21 @@ test('찾기 결과는 행 우선 페이지로 100개씩 순환한다', () => {
   }).join('');
   const bytes = minimalXlsx('', `<row r="1">${cells}</row>`);
   const workbook = new JinSheetDocument(uri('/tmp/search-pages.xlsx'), 'xlsx', analyze(bytes), bytes, true, '');
+  let cellReads = 0;
+  const readCell = workbook.getCell.bind(workbook);
+  workbook.getCell = (...args) => { cellReads++; return readCell(...args); };
   const sorted = findMatches(workbook, 'same', 0);
   assert.equal(sorted.total, 101);
   assert.equal(sorted.matches[0].address, 'A1', 'page order is independent of the source XML Map insertion order');
   assert.equal(sorted.matches.at(-1).address, 'CV1');
+  const readsAfterFirstPage = cellReads;
   const next = findMatches(workbook, 'same', 0, 'sheet', sorted.matches.at(-1));
   assert.deepEqual(next.matches.map(match => match.address), ['CW1']);
+  assert.equal(cellReads, readsAfterFirstPage, 'next result pages reuse the document search snapshot');
+  workbook.applyCellEdit(0, 0, 'changed');
+  const updated = findMatches(workbook, 'same', 0);
+  assert.equal(updated.total, 100, 'a document edit invalidates cached search results');
+  assert.ok(cellReads > readsAfterFirstPage, 'the changed document is scanned to build a fresh result snapshot');
   workbook.dispose();
 });
 
@@ -6639,7 +6668,7 @@ test('날짜가 바뀌면 안전한 시점에만 동적 필터를 갱신하고 �
 });
 
 test('수정 없는 상대 날짜 문서의 저장·다른 이름 저장·백업은 새 기준값을 내보내고 읽기 전용은 보존한다', async t => {
-  const {updateAutoFilterDynamicColumn}=require('../src/extension'),directory=await fs.mkdtemp(path.join(os.tmpdir(),'jinsheet-dynamic-export-'));t.after(()=>fs.rm(directory,{recursive:true,force:true}));const bytes=dateFilterXlsx(),file=path.join(directory,'source.xlsx');await fs.writeFile(file,bytes);const document=new JinSheetDocument(uri(file),'xlsx',analyze(bytes),bytes,true,'');document.now=new Date(2024,1,29);document.applyAutoFilter(0,updateAutoFilterDynamicColumn(document,0,1,{type:'today'},autoFilterRange(document,0,0,1)));await document.save();const revision=document.savedRevision;await document.save();assert.equal(document.savedRevision,revision);const original=await fs.readFile(file);document.now=new Date(2024,2,1);const backup=await document.backup({destination:uri(path.join(directory,'backup.xlsx'))});assert.equal(analyze(await fs.readFile(backup.id)).sheets[0].tables[0].autoFilter.columns[0].dynamic.value,45352);assert.equal((await fs.readFile(file)).equals(original),true);await backup.delete();assert.equal(document.dirty,false);
+  const {updateAutoFilterDynamicColumn}=require('../src/extension'),directory=await fs.mkdtemp(path.join(os.tmpdir(),'jinsheet-dynamic-export-'));t.after(()=>fs.rm(directory,{recursive:true,force:true}));const bytes=dateFilterXlsx(),file=path.join(directory,'source.xlsx');await fs.writeFile(file,bytes);const document=new JinSheetDocument(uri(file),'xlsx',analyze(bytes),bytes,true,'');document.now=new Date(2024,1,29);document.applyAutoFilter(0,updateAutoFilterDynamicColumn(document,0,1,{type:'today'},autoFilterRange(document,0,0,1)));await document.save();const revision=document.savedRevision;await new Promise(resolve=>setTimeout(resolve,2100));await document.save();assert.equal(document.savedRevision,revision);const original=await fs.readFile(file);document.now=new Date(2024,2,1);const backup=await document.backup({destination:uri(path.join(directory,'backup.xlsx'))});assert.equal(analyze(await fs.readFile(backup.id)).sheets[0].tables[0].autoFilter.columns[0].dynamic.value,45352);assert.equal((await fs.readFile(file)).equals(original),true);await backup.delete();assert.equal(document.dirty,false);
   const copy=path.join(directory,'copy.xlsx');await document.saveAs(uri(copy));assert.equal(analyze(await fs.readFile(copy)).sheets[0].tables[0].autoFilter.columns[0].dynamic.value,45352);assert.equal((await fs.readFile(file)).equals(original),true);document.dispose();
   const readonly=new JinSheetDocument(uri(file),'xlsx',analyze(original),original,false,'readonly');readonly.now=new Date(2024,2,1);assert.equal(readonly.hasRelativeDateFilters(),false);const preserved=path.join(directory,'readonly.xlsx');await readonly.saveAs(uri(preserved));assert.equal((await fs.readFile(preserved)).equals(original),true);readonly.dispose();
 });

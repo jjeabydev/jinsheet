@@ -218,13 +218,17 @@ function readChartPreview(bytes, partName, defaultSheetName, resolveReference) {
   const [chartNode] = chartNodes;
   const chartKind = localName(chartNode);
   const type = chartKind === 'barChart' ? 'bar' : chartKind === 'lineChart' ? 'line' : chartKind === 'areaChart' ? 'area' : chartKind === 'scatterChart' ? 'scatter' : chartKind === 'doughnutChart' ? 'doughnut' : 'pie';
+  const chartElement = firstDescendant(root, ['chart']);
+  const plotVisOnly = childrenByLocalName(chartElement || { children: [] }, 'plotVisOnly')[0];
+  const plotVisibleOnly = !plotVisOnly || !['0', 'false', 'off'].includes(String(plotVisOnly.attributes.val ?? '1').toLocaleLowerCase());
+  const resolveSeriesReference = resolveReference ? reference => resolveReference(reference, { plotVisibleOnly }) : undefined;
   const direction = type === 'bar' ? childrenByLocalName(chartNode, 'barDir')[0]?.attributes.val === 'bar' ? 'horizontal' : 'vertical' : 'vertical';
   const seriesNodes = childrenByLocalName(chartNode, 'ser');
   if (!seriesNodes.length || seriesNodes.length > 32) return null;
   const series = [];
   for (const [index, item] of seriesNodes.entries()) {
-    const categories = chartReferenceValues(childrenByLocalName(item, type === 'scatter' ? 'xVal' : 'cat')[0], resolveReference);
-    const values = chartReferenceValues(childrenByLocalName(item, type === 'scatter' ? 'yVal' : 'val')[0], resolveReference);
+    const categories = chartReferenceValues(childrenByLocalName(item, type === 'scatter' ? 'xVal' : 'cat')[0], resolveSeriesReference);
+    const values = chartReferenceValues(childrenByLocalName(item, type === 'scatter' ? 'yVal' : 'val')[0], resolveSeriesReference);
     if (!values.length || values.length > 10000 || values.some(value => value !== null && (typeof value !== 'number' || !Number.isFinite(value))) || type === 'scatter' && (!categories.length || categories.length !== values.length || categories.some(value => value !== null && (typeof value !== 'number' || !Number.isFinite(value))))) return null;
     series.push({ name: chartSeriesName(item, index, resolveReference).slice(0, 256), categories: categories.slice(0, 10000).map(value => value === null ? '' : String(value).slice(0, 256)), values, ...(type === 'scatter' ? { xValues: categories } : {}) });
   }
@@ -1218,6 +1222,13 @@ function analyze(input, extension = '.xlsx') {
   const workbookPart = [...rootMap.values()].find(rel => rel.Type.endsWith('/officeDocument') && rel.path);
   if (!workbookPart || workbookPart.path !== 'xl/workbook.xml') fail('표준 위치의 통합문서 파트를 찾을 수 없습니다.');
   const workbook = parseXml(files[workbookPart.path], workbookPart.path).root;
+  const workbookChildren = new Set(['fileVersion', 'fileSharing', 'workbookPr', 'workbookProtection', 'bookViews', 'sheets', 'functionGroups', 'externalReferences', 'definedNames', 'calcPr', 'oleSize', 'customWorkbookViews', 'pivotCaches', 'smartTagPr', 'smartTagTypes', 'webPublishing', 'extLst']);
+  const workbookAttributes = new Set(['conformance']);
+  if (workbook.name !== 'workbook' || Object.keys(workbook.attributes).some(attribute => !workbookAttributes.has(attribute) && !/^xmlns(?::[\w.-]+)?$/.test(attribute)) || workbook.children.some(item => !workbookChildren.has(item.name))) markUnsupported('지원하지 않는 통합 문서 메타데이터가 포함되어 있습니다.');
+  for (const element of ['pivotCaches', 'smartTagPr', 'smartTagTypes', 'webPublishing']) {
+    if (child(workbook, element)) markUnsupported(`통합 문서 기능 ${element}은 현재 저장을 지원하지 않습니다.`);
+  }
+  if (children(workbook, 'calcPr').length > 1 || children(workbook, 'workbookPr').length > 1 || children(workbook, 'sheets').length !== 1 || children(workbook, 'definedNames').length > 1 || children(workbook, 'bookViews').length > 1) markUnsupported('통합 문서 메타데이터 구성이 중복되었거나 유효하지 않습니다.');
   const date1904 = ['1', 'true', 'on'].includes(child(workbook, 'workbookPr')?.attributes.date1904);
   const workbookRelsPath = 'xl/_rels/workbook.xml.rels';
   const workbookRels = parseXml(files[workbookRelsPath], workbookRelsPath).root;
@@ -1552,8 +1563,8 @@ function patchFilterVisibility(model, options = {}) {
     const show = [...old].filter(row => !wanted.has(row)).sort((a,b) => a-b);
     const hide = [...wanted].filter(row => !old.has(row)).sort((a,b) => a-b);
     let current = model;
-    if (show.length) current = patchHiddenRows(current, [{ sheetIndex, rows: show, hidden: false }], false).model;
-    if (hide.length) current = patchHiddenRows(current, [{ sheetIndex, rows: hide, hidden: true }], false).model;
+    if (show.length) current = patchHiddenRows(current, [{ sheetIndex, rows: show, hidden: false }], false, false).model;
+    if (hide.length) current = patchHiddenRows(current, [{ sheetIndex, rows: hide, hidden: true }], false, false).model;
     let xml = current.sheets[sheetIndex].xml;
     const opening = /<worksheet\b[^>]*>/.exec(xml);
     if (!opening) fail('행 표시 메타데이터를 추가할 수 없습니다.');
@@ -1615,8 +1626,14 @@ function patchFilterVisibility(model, options = {}) {
     files['xl/workbook.xml'] = new TextEncoder().encode(enableFullCalculationOnLoad(new TextDecoder().decode(files['xl/workbook.xml'])));
     modifiedPaths.add('xl/workbook.xml');
   }
-  const bytes = zipSync(files, { level: 0 }), checked = analyze(bytes, model.extension);
+  let bytes = zipSync(files, { level: 0 }), checked = analyze(bytes, model.extension);
   if (!checked.writable) fail('필터 행 표시 저장 검사에서 거절되었습니다: ' + checked.readOnlyReason);
+  const recalculatedFiles = { ...checked.files };
+  if (refreshCalculationCaches(recalculatedFiles, model.extension).size) {
+    bytes = zipSync(recalculatedFiles, { level: 0 });
+    checked = analyze(bytes, model.extension);
+    if (!checked.writable) fail('필터 변경 수식 캐시 갱신 후 검사에서 거절되었습니다: ' + checked.readOnlyReason);
+  }
   return { bytes, model: checked };
 }
 
@@ -1698,17 +1715,27 @@ function chartRangeValues(model, sourceSheetIndex, source, numeric, calculator, 
 
 function calculateChartPreviews(model, sheetIndex, calculator, getCell, changes) {
   const sheet = model.sheets[sheetIndex];
-  if (!sheet?.charts?.length || !changes.length) return sheet?.charts || [];
-  const refreshAll = chartHasFormulaSources(model);
+  if (!sheet?.charts?.length) return sheet?.charts || [];
+  const hiddenRowsBySheet = new Map(model.sheets.map((item, index) => [index, new Set([...(item.hiddenRows || []), ...(item.nativeHiddenRows || []), ...(item.outlineHiddenRows || [])])]));
+  const hasHiddenChartSource = (model.chartSourceRanges || []).some(source => {
+    const hidden = hiddenRowsBySheet.get(source.sheetIndex);
+    return hidden && [...hidden].some(row => row >= source.top && row <= source.bottom);
+  });
+  if (!changes.length && !hasHiddenChartSource) return sheet.charts;
+  const refreshAll = chartHasFormulaSources(model) || hasHiddenChartSource;
   if (!refreshAll && !model.chartSourceRanges?.some(source => changes.some(cell => chartSourceContains(source, cell)))) return sheet.charts;
-  const resolveReference = reference => {
+  const resolveReference = (reference, options = {}) => {
     const formula = firstDescendant(reference, ['f'])?.text.trim();
     if (!formula || !['strRef', 'numRef'].includes(localName(reference))) return undefined;
     const source = parseRangeReference(formula, sheet.name);
     const sourceSheetIndex = source?.sheetName ? model.sheets.findIndex(item => item.name.toLocaleLowerCase() === source.sheetName.toLocaleLowerCase()) : sheetIndex;
     if (!source || !model.sheets[sourceSheetIndex]) fail('차트 원본 워크시트를 찾을 수 없습니다.');
     if (!refreshAll && !changes.some(cell => chartSourceContains({ ...source, sheetIndex: sourceSheetIndex }, cell))) return undefined;
-    return chartRangeValues(model, sourceSheetIndex, source, localName(reference) === 'numRef', calculator, getCell);
+    const values = chartRangeValues(model, sourceSheetIndex, source, localName(reference) === 'numRef', calculator, getCell);
+    if (options.plotVisibleOnly === false) return values;
+    const hiddenRows = hiddenRowsBySheet.get(sourceSheetIndex);
+    if (!hiddenRows?.size) return values;
+    return values.map((value, index) => hiddenRows.has(source.top + (source.left === source.right ? index : 0)) ? null : value);
   };
   return sheet.chartPaths.map((partName, index) => {
     const chart = readChartPreview(model.files[partName], partName, sheet.name, resolveReference);
@@ -1774,6 +1801,66 @@ function serializeCellContent(value, kind, keep, formula) {
   if ((kind === 'boolean' || kind === 'blank') && /^(?:TRUE|FALSE)$/i.test(text)) return '<c' + keep + ' t="b"><v>' + (text.toUpperCase() === 'TRUE' ? '1' : '0') + '</v></c>';
   const space = /^\s|\s$/.test(text) ? ' xml:space="preserve"' : '';
   return '<c' + keep + ' t="inlineStr"><is><t' + space + '>' + xmlEscape(text) + '</t></is></c>';
+}
+
+function updateFormulaCache(xml, range, cell) {
+  const original = xml.slice(range.start, range.end), opening = original.slice(0, range.startTagEnd - range.start);
+  const element = /^<([A-Za-z_][\w.:-]*)/.exec(opening)?.[1];
+  if (!element || !cell?.formula) fail('수식 캐시 셀을 안전하게 수정할 수 없습니다.');
+  let type, value;
+  if (cell.kind === 'number' && typeof cell.cachedValue === 'number' && Number.isFinite(cell.cachedValue)) value = String(cell.cachedValue);
+  else if (cell.kind === 'boolean' && typeof cell.cachedValue === 'boolean') { type = 'b'; value = cell.cachedValue ? '1' : '0'; }
+  else if (cell.kind === 'error' && typeof cell.cachedValue === 'string' && /^#[A-Z0-9/?!]+$/i.test(cell.cachedValue)) { type = 'e'; value = cell.cachedValue; }
+  else if (cell.kind === 'string' && (typeof cell.cachedValue === 'string' || cell.cachedValue === null)) { type = 'str'; value = cell.cachedValue ?? ''; }
+  else return null;
+  let updatedOpening = type ? setTagAttribute(opening, 't', type) : opening.replace(/\s+t\s*=\s*(["'])[^"']*\1/, '');
+  const innerStart = range.startTagEnd - range.start, innerEnd = original.lastIndexOf('</' + element + '>');
+  if (innerEnd < innerStart) fail('수식 캐시 셀 끝 태그를 찾을 수 없습니다.');
+  let inner = original.slice(innerStart, innerEnd);
+  const values = findElementRanges(inner, 'v');
+  if (values.size > 1) fail('수식 캐시 값이 중복되었습니다.');
+  const serializedValue = '<v>' + xmlEscape(value) + '</v>';
+  if (values.size === 1) {
+    const valueRange = values.values().next().value;
+    inner = inner.slice(0, valueRange.start) + serializedValue + inner.slice(valueRange.end);
+  } else {
+    const formulas = findElementRanges(inner, 'f');
+    if (formulas.size !== 1) fail('수식 요소를 안전하게 찾을 수 없습니다.');
+    const formulaRange = formulas.values().next().value;
+    inner = inner.slice(0, formulaRange.end) + serializedValue + inner.slice(formulaRange.end);
+  }
+  return updatedOpening + inner + original.slice(innerEnd);
+}
+
+function refreshCalculationCaches(files, extension, writeNameErrorsFor = null) {
+  const workbookXml = new TextDecoder().decode(files['xl/workbook.xml']);
+  const model = analyze(zipSync(files, { level: 0 }), extension);
+  const calculator = createFormulaCalculator({ state: model, getCell: (row, column, sheetIndex = 0) => model.sheets[sheetIndex]?.cells.get(columnLetters(column + 1) + (row + 1)) || null });
+  const modified = new Set();
+  for (const [sheetIndex, sheet] of model.sheets.entries()) {
+    const patches = [];
+    for (const cell of sheet.cells.values()) {
+      if (!cell.formula || cell.formulaType && cell.formulaType !== 'normal' && cell.formulaType !== 'shared') continue;
+      const calculated = calculator.cell(sheetIndex, cell.row, cell.column);
+      if (!calculated || calculated.kind === 'error' && ['#NAME?', '#VALUE!'].includes(calculated.cachedValue) && !writeNameErrorsFor?.(cell, sheetIndex)) continue;
+      const range = sheet.ranges.get(cell.address);
+      if (!range) fail('수식 캐시 셀의 XML 위치를 찾을 수 없습니다.');
+      const replacement = updateFormulaCache(sheet.xml, range, calculated);
+      if (replacement && replacement !== sheet.xml.slice(range.start, range.end)) patches.push({ ...range, replacement });
+    }
+    if (!patches.length) continue;
+    patches.sort((left, right) => left.start - right.start);
+    const parts = []; let previousEnd = 0;
+    for (const patch of patches) {
+      if (patch.start < previousEnd) fail('수식 캐시 셀 위치가 겹칩니다.');
+      parts.push(sheet.xml.slice(previousEnd, patch.start), patch.replacement);
+      previousEnd = patch.end;
+    }
+    parts.push(sheet.xml.slice(previousEnd));
+    files[sheet.path] = new TextEncoder().encode(parts.join(''));
+    modified.add(sheet.path);
+  }
+  return modified;
 }
 
 function serializeUnsharedFormula(xml, range, formula) {
@@ -2467,7 +2554,7 @@ function patchCells(model, edits) {
   if (requestedBorders.size && !borderStylesXml) fail('셀 테두리를 추가할 스타일 정의를 찾을 수 없습니다.');
   const borderStyles = requestedBorders.size ? prepareBorderStyles(model.stylesPath, borderStylesXml, requestedBorders) : null;
   const bySheet = new Map(), additions = new Map(), seen = new Set();
-  let writesFormula = false, chartSourceEdited = false, chartDataEdited = false;
+  let writesFormula = false, formulaInputsChanged = false, chartSourceEdited = false, chartDataEdited = false;
   const changedChartSourceCells = [];
   for (const edit of edits) {
     const sheetIndex = edit.sheetIndex, address = edit.address, value = edit.value, sheet = model.sheets[sheetIndex];
@@ -2483,6 +2570,7 @@ function patchCells(model, edits) {
     if (seen.has(key)) fail('같은 셀을 중복 수정할 수 없습니다.');
     seen.add(key);
     const cell = sheet.cells.get(address), range = sheet.ranges.get(address);
+    formulaInputsChanged ||= cell ? value !== cell.value || kind !== undefined && kind !== cell.kind || hasFormula && formula !== cell.formula : value !== '' || hasFormula && formula !== null;
     if (model.hasCharts) {
       const previousValue = cell?.value === null || cell?.value === undefined ? '' : String(cell.value);
       const previousKind = cell?.kind || 'blank';
@@ -2597,6 +2685,7 @@ function patchCells(model, edits) {
       modifiedPaths.add(chart.path);
     }
   }
+  if (formulaInputsChanged) for (const sheetPath of refreshCalculationCaches(outputFiles, model.extension)) modifiedPaths.add(sheetPath);
 const output = zipSync(outputFiles, { level: 0 });
 const checked = analyze(output, model.extension);
   if (!checked.writable) fail('저장 후 패키지 검사에서 거절되었습니다: ' + checked.readOnlyReason);
@@ -3650,7 +3739,7 @@ function patchHyperlinks(model, sheetIndex, row, column, request = null) {
   return { bytes, model: checked };
 }
 
-function patchHiddenRows(model, edits, updateDrawings = true) {
+function patchHiddenRows(model, edits, updateDrawings = true, refreshCaches = true) {
   if (!model.writable) fail(model.readOnlyReason || '이 통합문서는 읽기 전용입니다.');
   if (updateDrawings) model = preserveImportedFilterVisibility(model);
   if (!Array.isArray(edits) || edits.length > LIMITS.sheets) fail('숨김 행 수정 요청이 유효하지 않습니다.');
@@ -3705,8 +3794,21 @@ function patchHiddenRows(model, edits, updateDrawings = true) {
   }
   if (!modifiedPaths.size) return { bytes: model.bytes, model };
   if (updateDrawings) updateDimensionDrawings(model, outputFiles, modifiedPaths);
-  const bytes = zipSync(outputFiles, { level: 0 }), checked = analyze(bytes, model.extension);
+  if (model.formulas) {
+    outputFiles['xl/workbook.xml'] = new TextEncoder().encode(enableFullCalculationOnLoad(new TextDecoder().decode(outputFiles['xl/workbook.xml'])));
+    modifiedPaths.add('xl/workbook.xml');
+  }
+  let bytes = zipSync(outputFiles, { level: 0 }), checked = analyze(bytes, model.extension);
   if (!checked.writable) fail('숨김 행 저장 후 패키지 검사에서 거절되었습니다: ' + checked.readOnlyReason);
+  if (refreshCaches) {
+    const recalculatedFiles = { ...checked.files }, refreshedPaths = refreshCalculationCaches(recalculatedFiles, model.extension);
+    if (refreshedPaths.size) {
+      for (const refreshedPath of refreshedPaths) modifiedPaths.add(refreshedPath);
+      bytes = zipSync(recalculatedFiles, { level: 0 });
+      checked = analyze(bytes, model.extension);
+      if (!checked.writable) fail('숨김 행 수식 캐시 갱신 후 검사에서 거절되었습니다: ' + checked.readOnlyReason);
+    }
+  }
   for (const [name, before] of Object.entries(model.files)) if (!modifiedPaths.has(name) && (!checked.files[name] || Buffer.compare(Buffer.from(before), Buffer.from(checked.files[name])) !== 0)) fail('숨김 행 저장 중 비수정 패키지 항목이 달라졌습니다: ' + name);
   return { bytes, model: checked };
 }
@@ -3987,10 +4089,23 @@ function definedNameReference(source) {
   return "'" + source.sheetName.replaceAll("'", "''") + "'!$" + columnLetters(source.left + 1) + '$' + (source.top + 1) + ':$' + columnLetters(source.right + 1) + '$' + (source.bottom + 1);
 }
 
+function formulaUsesDefinedName(formula, name) {
+  const source = String(formula).replace(/"(?:[^"]|"")*"/g, '');
+  for (const match of source.matchAll(/[A-Za-z_\\][A-Za-z0-9_.\\]*/g)) {
+    if (match[0].toLocaleLowerCase() !== name.toLocaleLowerCase()) continue;
+    const before = source[match.index - 1], after = source[match.index + match[0].length];
+    if (before === '[' || after === ']' || after === '!') continue;
+    if (/^\s*\(/.test(source.slice(match.index + match[0].length))) continue;
+    return true;
+  }
+  return false;
+}
+
 function patchDefinedName(model, request) {
   if (!model.writable) fail(model.readOnlyReason || '이 통합문서는 읽기 전용입니다.');
   if (!request || !['set', 'delete'].includes(request.action) || typeof request.name !== 'string' || !/^[A-Z_\\][A-Z0-9_.]*$/i.test(request.name) || request.name.length > 255 || /^_xlnm\./i.test(request.name) || /^(?:[A-Z]{1,3}[1-9]\d*|R|C|TRUE|FALSE)$/i.test(request.name)) fail('정의된 이름이나 작업이 유효하지 않습니다.');
   const { name, action } = request, localSheetId = request.localSheetId ?? null;
+  const deletedNameHasNoSheetConflict = action === 'delete' && !model.sheets.some(sheet => sheet.name.toLocaleLowerCase() === name.toLocaleLowerCase());
   if (localSheetId !== null && (!Number.isInteger(localSheetId) || !model.sheets[localSheetId])) fail('정의된 이름의 범위 시트가 유효하지 않습니다.');
   const current = model.definedNames.find(item => item.name.toLocaleLowerCase() === name.toLocaleLowerCase() && item.localSheetId === localSheetId);
   if (action === 'delete' && !current) fail('삭제할 정의된 이름을 찾을 수 없습니다.');
@@ -4009,22 +4124,16 @@ function patchDefinedName(model, request) {
   if (updated === xml) return { bytes: model.bytes, model };
   updated = enableFullCalculationOnLoad(updated);
   const outputFiles = { ...model.files, [workbookPath]: new TextEncoder().encode(updated) }, changedFormulaSheets = new Set();
-  for (const sheet of model.sheets) {
-    const patches = [];
-    for (const cell of sheet.cells.values()) {
-      if (!cell.formula) continue;
-      const cellRange = sheet.ranges.get(cell.address);
-      if (!cellRange) fail('이름 변경 후 수식 캐시를 갱신할 셀을 찾을 수 없습니다.');
-      const cellXml = sheet.xml.slice(cellRange.start, cellRange.end), value = findElementRanges(cellXml, 'v').get('');
-      if (value && !value.selfClosing) patches.push({ start: cellRange.start + value.startTagEnd, end: cellRange.start + value.closingStart, replacement: '' });
-    }
-    if (!patches.length) continue;
-    let sheetXml = sheet.xml;
-    for (const patch of patches.sort((left, right) => right.start - left.start)) sheetXml = sheetXml.slice(0, patch.start) + patch.replacement + sheetXml.slice(patch.end);
-    outputFiles[sheet.path] = new TextEncoder().encode(sheetXml); changedFormulaSheets.add(sheet.path);
-  }
-  const bytes = zipSync(outputFiles, { level: 0 }), checked = analyze(bytes, model.extension);
+  let bytes = zipSync(outputFiles, { level: 0 }), checked = analyze(bytes, model.extension);
   if (!checked.writable) fail('정의된 이름을 저장한 뒤 검사에서 거절되었습니다: ' + checked.readOnlyReason);
+  const recalculatedFiles = { ...checked.files }, writeNameErrorsFor = deletedNameHasNoSheetConflict ? cell => formulaUsesDefinedName(cell.formula, name) : null;
+  const refreshedPaths = refreshCalculationCaches(recalculatedFiles, model.extension, writeNameErrorsFor);
+  if (refreshedPaths.size) {
+    for (const refreshedPath of refreshedPaths) changedFormulaSheets.add(refreshedPath);
+    bytes = zipSync(recalculatedFiles, { level: 0 });
+    checked = analyze(bytes, model.extension);
+    if (!checked.writable) fail('정의된 이름 수식 캐시 갱신 후 검사에서 거절되었습니다: ' + checked.readOnlyReason);
+  }
   for (const [partPath, before] of Object.entries(model.files)) if (partPath !== workbookPath && !changedFormulaSheets.has(partPath) && Buffer.compare(Buffer.from(before), Buffer.from(checked.files[partPath])) !== 0) fail('정의된 이름 수정 중 비수정 패키지 항목이 달라졌습니다: ' + partPath);
   return { bytes, model: checked };
 }
@@ -6170,8 +6279,15 @@ function patchDeleteSheet(model, sheetIndex) {
     modifiedPaths.add(sheet.tableRelationshipPath);
     for (const table of sheet.tables) { delete outputFiles[table.path]; modifiedPaths.add(table.path); }
   }
-  const bytes = zipSync(outputFiles, { level: 0 }), checked = analyze(bytes, model.extension);
+  let bytes = zipSync(outputFiles, { level: 0 }), checked = analyze(bytes, model.extension);
   if (!checked.writable) fail('시트 삭제 후 패키지 검사에서 거절되었습니다: ' + checked.readOnlyReason);
+  const recalculatedFiles = { ...checked.files }, refreshedPaths = refreshCalculationCaches(recalculatedFiles, model.extension);
+  if (refreshedPaths.size) {
+    for (const refreshedPath of refreshedPaths) modifiedPaths.add(refreshedPath);
+    bytes = zipSync(recalculatedFiles, { level: 0 });
+    checked = analyze(bytes, model.extension);
+    if (!checked.writable) fail('시트 삭제 수식 캐시 갱신 후 검사에서 거절되었습니다: ' + checked.readOnlyReason);
+  }
   for (const [path, before] of Object.entries(model.files)) {
     if (modifiedPaths.has(path)) continue;
     if (!checked.files[path] || Buffer.compare(Buffer.from(before), Buffer.from(checked.files[path])) !== 0) fail('시트 삭제 중 비수정 패키지 항목이 달라졌습니다: ' + path);
@@ -6966,7 +7082,13 @@ function transformStructure(model, operation) {
     if (metadata.length) checked = patchCalculatedColumns(checked, metadata).model;
     if (action === 'insert') checked = fillCalculatedRows(checked, checked.sheets[sheetIndex].tables.map(table => ({ sheetIndex, tableName: table.name, top: index, bottom: index }))).model;
   }
-  return patchFilterVisibility(checked);
+  const visibility = patchFilterVisibility(checked);
+  const recalculatedFiles = { ...visibility.model.files };
+  if (!refreshCalculationCaches(recalculatedFiles, model.extension).size) return visibility;
+  const recalculatedBytes = zipSync(recalculatedFiles, { level: 0 });
+  const recalculated = analyze(recalculatedBytes, model.extension);
+  if (!recalculated.writable) fail('구조 변경 수식 캐시 갱신 후 검사에서 거절되었습니다: ' + recalculated.readOnlyReason);
+  return { bytes: recalculatedBytes, model: recalculated };
 
 }
 

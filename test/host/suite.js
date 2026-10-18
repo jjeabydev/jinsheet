@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { performance } = require('node:perf_hooks');
 const { zipSync } = require('../../vendor/node_modules/fflate');
-const { analyze, patchColumnWidths, patchOutlineGroups, patchAddChart, patchPrintArea, patchPrintSettings, patchPrintTitles, patchHeaderFooter } = require('../../src/xlsx');
+const { analyze, patchColumnWidths, patchOutlineGroups, patchAddChart, patchAutoFilters, patchPrintArea, patchPrintSettings, patchPrintTitles, patchHeaderFooter } = require('../../src/xlsx');
 const { onePagePdf } = require('../helpers/pdf-fixture');
 const { DEFAULT_PRINT_SETTINGS, renderPrintDocument } = require('../../src/printing');
 const { defaultHeaderFooter } = require('../../src/header-footer');
@@ -196,6 +196,71 @@ suite('JinSheet Extension Host', () => {
       }
     } finally {
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    }
+  });
+
+  test('Chromium Webview displays INDEX row and column arrays through edit, save and reopen', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-index-array-host-'));
+    const file = path.join(directory, 'index-arrays.xlsx');
+    const parts = {
+      '[Content_Types].xml': '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
+      '_rels/.rels': '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+      'xl/workbook.xml': '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="s1"/></sheets></workbook>',
+      'xl/_rels/workbook.xml.rels': '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="s1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+      'xl/worksheets/sheet1.xml': '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>'
+        + '<row r="1"><c r="A1"><v>1</v></c><c r="B1"><v>2</v></c><c r="C1"><v>3</v></c><c r="D1"><f>INDEX(A1:C3,2,0)</f><v>4</v></c><c r="G1"><f>SUM(D1#)</f><v>15</v></c><c r="I1"><f>INDEX(A1:C3,0,2)</f><v>2</v></c><c r="K1"><f>SUM(I1#)</f><v>15</v></c></row>'
+        + '<row r="2"><c r="A2"><v>4</v></c><c r="B2"><v>5</v></c><c r="C2"><v>6</v></c></row>'
+        + '<row r="3"><c r="A3"><v>7</v></c><c r="B3"><v>8</v></c><c r="C3"><v>9</v></c></row>'
+        + '</sheetData></worksheet>'
+    };
+    await fs.writeFile(file, zipSync(Object.fromEntries(Object.entries(parts).map(([name, value]) => [name, new TextEncoder().encode(value)]))));
+    let devtools;
+    try {
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      const evaluate = async expression => {
+        const response = await devtools.send('Runtime.evaluate', { expression, contextId: devtools.contextId, returnByValue: true, awaitPromise: true });
+        if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+        return response.result?.value;
+      };
+      const waitForCell = async (row, column, value, message) => {
+        const selector = `#cell-${row}-${column}`;
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline && await evaluate(`document.querySelector(${JSON.stringify(selector)})?.textContent.trim()`) !== String(value)) await new Promise(resolve => setTimeout(resolve, 25));
+        assert.equal(await evaluate(`document.querySelector(${JSON.stringify(selector)})?.textContent.trim()`), String(value), message);
+      };
+      await waitForCell(0, 3, 4, 'INDEX row result renders in its anchor cell');
+      await waitForCell(0, 4, 5, 'INDEX row result spills to the next column');
+      await waitForCell(0, 5, 6, 'INDEX row result spills across the selected source row');
+      await waitForCell(0, 6, 15, 'SUM reads the spilled INDEX row');
+      await waitForCell(0, 8, 2, 'INDEX column result renders in its anchor cell');
+      await waitForCell(1, 8, 5, 'INDEX column result spills to the next row');
+      await waitForCell(2, 8, 8, 'INDEX column result spills through the selected source column');
+      await waitForCell(0, 10, 15, 'SUM reads the spilled INDEX column');
+
+      const sourceCell = await evaluate(`(()=>{const rect=document.querySelector('#cell-1-0').getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2}})()`);
+      await devtools.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: sourceCell.x + devtools.frameOffset.x, y: sourceCell.y + devtools.frameOffset.y, button: 'left', buttons: 1, clickCount: 1 });
+      await devtools.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: sourceCell.x + devtools.frameOffset.x, y: sourceCell.y + devtools.frameOffset.y, button: 'left', buttons: 0, clickCount: 1 });
+      await evaluate(`(()=>{const input=document.querySelector('#formula');input.value='40';input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))})()`);
+      await waitForCell(0, 3, 40, 'editing the source recalculates the INDEX row');
+      await waitForCell(0, 6, 51, 'the formula using the row spill recalculates');
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      const saved = analyze(await fs.readFile(file));
+      assert.equal(saved.sheets[0].cells.get('A2').value, '40');
+      assert.equal(saved.sheets[0].cells.get('D1').formula, 'INDEX(A1:C3,2,0)');
+      assert.match(new TextDecoder().decode(saved.files['xl/workbook.xml']), /forceFullCalc="1"/);
+
+      await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools.close();
+      devtools = await waitForSpreadsheetWebview();
+      await waitForCell(0, 3, 40, 'the saved INDEX array reopens with its recalculated anchor');
+      await waitForCell(0, 6, 51, 'the saved spill reference reopens with the recalculated total');
+      await waitForCell(2, 8, 8, 'the column INDEX array remains available after reopening');
+    } finally {
+      devtools?.close();
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
     }
   });
 
@@ -3101,7 +3166,7 @@ suite('JinSheet Extension Host', () => {
       await wait('Boolean(document.querySelector("#autoCalculatedColumns"))');await evaluate('document.querySelector("#autoCalculatedColumns").checked=false');
       for(const [row,value,display] of [[1,'=DATE(2024,2,29)','2/29/24'],[2,'=EDATE(B2,1)','3/29/24'],[3,'=WORKDAY(B2,1)','3/1/24']]){await enter(row,1,value);await act(row,1,'document.querySelector("#formatDate").click()');await wait('document.querySelector("#cell-'+row+'-1")?.textContent==="'+display+'"')}
       for(const [row,value] of [[1,'10'],[2,'20'],[3,'30']]){await enter(row,2,value);await wait('document.querySelector("#cell-'+row+'-2")?.textContent==="'+value+'"')}
-      await enter(1,5,'=YEAR(B2)');await wait('document.querySelector("#cell-1-5")?.textContent==="2024"');await enter(2,5,'=TEXT(B2,"yyyy-mm-dd")');await wait('document.querySelector("#cell-2-5")?.textContent==="2024-02-29"');await enter(3,5,'=WEEKDAY(0)');await wait('document.querySelector("#cell-3-5")?.textContent==="6"');let saved=await save();assert.equal(saved.date1904,true);assert.equal(saved.sheets[0].cells.get('B2').formula,'DATE(2024,2,29)');
+      await enter(1,5,'=YEAR(B2)');await wait('document.querySelector("#cell-1-5")?.textContent==="2024"');await enter(2,5,'=TEXT(B2,"yyyy-mm-dd")');await wait('document.querySelector("#cell-2-5")?.textContent==="2024-02-29"');await enter(3,5,'=WEEKDAY(0)');await wait('document.querySelector("#cell-3-5")?.textContent==="6"');await enter(2,8,'=TEXT(B2+0.5,"yyyy-mm-dd ""at"" h:mm A/P")');await wait('document.querySelector("#cell-2-8")?.textContent==="2024-02-29 at 12:00 P"');let saved=await save();assert.equal(saved.date1904,true);assert.equal(saved.sheets[0].cells.get('B2').formula,'DATE(2024,2,29)');assert.equal(saved.sheets[0].cells.get('I3').formula,'TEXT(B2+0.5,"yyyy-mm-dd ""at"" h:mm A/P")');
       await enter(1,1,'=DATE(2024,3,1)');await wait('document.querySelector("#cell-1-1")?.textContent==="3/1/24"&&document.querySelector("#cell-2-1")?.textContent==="4/1/24"&&document.querySelector("#cell-3-1")?.textContent==="3/4/24"');await vscode.commands.executeCommand('jinsheet.undo');await wait('document.querySelector("#cell-1-1")?.textContent==="2/29/24"');await vscode.commands.executeCommand('jinsheet.redo');await wait('document.querySelector("#cell-1-1")?.textContent==="3/1/24"');await save();
       await act(0,1,'document.querySelector("#filterValuesButton").click()');await wait('!document.querySelector("#filterPanel").hidden');await evaluate('document.querySelector("#filterMode").value="dates";document.querySelector("#filterMode").dispatchEvent(new Event("change"));document.querySelector("#filterDateGroups").value="2024-03";document.querySelector("#filterApply").click()');await wait('document.querySelector("#filterPanel").hidden&&!document.querySelector("#cell-2-1")&&document.querySelector("#cell-5-3")?.textContent==="40"');saved=await save();assert.deepEqual(saved.sheets[0].nativeHiddenRows,[2]);
       devtools.close();devtools=null;await vscode.commands.executeCommand('workbench.action.closeAllEditors');await vscode.commands.executeCommand('vscode.openWith',vscode.Uri.file(file),'jinsheet.editor');devtools=await waitForSpreadsheetWebview();await wait('document.querySelector("#cell-1-1")?.textContent==="3/1/24"&&document.querySelector("#cell-3-1")?.textContent==="3/4/24"&&document.querySelector("#cell-5-3")?.textContent==="40"');
@@ -3453,6 +3518,40 @@ suite('JinSheet Extension Host', () => {
       assert.deepEqual(analyze(await fs.readFile(file)).sheets[0].charts[0].series[0].xValues, [5, 7]);
     } finally {
       devtools?.close(); await vscode.commands.executeCommand('workbench.action.closeAllEditors'); await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('Chromium Webview omits filtered rows from the chart preview', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-filtered-chart-host-'));
+    const file = path.join(directory, 'filtered-chart.xlsx');
+    let model = analyze(await fs.readFile(path.join(__dirname, '..', 'fixtures', 'JinSheet-Sample.xlsx')));
+    model = patchAddChart(model, 0, { top: 0, bottom: 2, left: 0, right: 1 }).model;
+    model = patchAutoFilters(model, [{ sheetIndex: 0, filter: { top: 0, bottom: 2, left: 0, right: 2, columns: [{ column: 0, values: ['사과'], blanks: false }] } }]).model;
+    assert.deepEqual(model.sheets[0].nativeHiddenRows, [2]);
+    await fs.writeFile(file, model.bytes);
+    let devtools;
+    try {
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      const evaluate = async expression => {
+        const result = await devtools.send('Runtime.evaluate', { expression, contextId: devtools.contextId, returnByValue: true, awaitPromise: true });
+        if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
+        return result.result?.value;
+      };
+      const blueBarCount = 'document.querySelectorAll(' + JSON.stringify('.chart-card svg rect[fill="#4f81bd"]') + ').length';
+      const deadline = Date.now() + 6000;
+      while (Date.now() < deadline && !await evaluate('Boolean(document.querySelector(".chart-card svg"))')) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(await evaluate('Boolean(document.querySelector(".chart-card svg"))'), true, 'the chart preview is visible');
+      assert.equal(await evaluate(blueBarCount), 2, 'one visible bar and its legend marker are rendered; the filtered point is omitted');
+      await evaluate('(()=>{const input=document.querySelector("#formula");document.querySelector("#cell-1-1").click();input.value="15";input.dispatchEvent(new Event("input",{bubbles:true}));input.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}))})()');
+      const editDeadline = Date.now() + 6000;
+      while (Date.now() < editDeadline && await evaluate(blueBarCount) !== 2) await new Promise(resolve => setTimeout(resolve, 25));
+      assert.equal(await evaluate(blueBarCount), 2, 'an unsaved visible point edit does not bring the filtered point back');
+      assert.deepEqual(analyze(await fs.readFile(file)).sheets[0].nativeHiddenRows, [2], 'the preview update does not require saving filter state');
+    } finally {
+      devtools?.close();
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
     }
   });
 
@@ -4043,10 +4142,10 @@ suite('JinSheet Extension Host', () => {
     }
   });
 
-  test('Chromium Webview finds and cycles through results beyond the first 100', async () => {
+  test('Chromium Webview paginates and wraps search results in a 100,000-cell CSV', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-find-pages-ui-'));
     const file = path.join(directory, 'matches.csv');
-    await fs.writeFile(file, Array.from({ length: 101 }, (_, index) => `needle-${index},value`).join('\n'), 'utf8');
+    await fs.writeFile(file, Array.from({ length: 10000 }, (_, index) => Array.from({ length: 10 }, (_, column) => column === 0 && index <= 9800 && index % 49 === 0 ? `needle-${index}` : `other-${index}-${column}`).join(',')).join('\n'), 'utf8');
     let devtools;
     try {
       await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
@@ -4056,18 +4155,27 @@ suite('JinSheet Extension Host', () => {
         if (response.exceptionDetails) throw new Error(response.exceptionDetails.text);
         return response.result?.value;
       };
-      const waitFor = async (expression, message, timeoutMs = 8000) => {
+      const waitFor = async (expression, message, timeoutMs = 15000) => {
         const end = Date.now() + timeoutMs;
         while (Date.now() < end) { if (await evaluate(expression)) return; await new Promise(resolve => setTimeout(resolve, 30)); }
         assert.fail(message + ': ' + JSON.stringify(await evaluate(`(()=>({address:document.querySelector('#address')?.value,count:document.querySelector('#searchCount')?.textContent,selected:document.querySelector('.cell.selected')?.id}))()`)));
       };
+      await waitFor('document.querySelector("#cell-0-0")?.textContent.trim() === "needle-0"', 'the first CSV record is rendered before searching');
       await waitFor('Boolean(document.querySelector("#search"))', 'Find control is ready');
       await evaluate(`(()=>{const search=document.querySelector('#search');search.value='needle';search.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('#findButton').click()})()`);
-      await waitFor('document.querySelector("#searchCount")?.textContent.includes("101") && document.querySelector("#address")?.value === "A1"', 'first result page starts at the first matching cell');
+      await waitFor('document.querySelector("#searchCount")?.textContent.includes("201") && document.querySelector("#address")?.value === "A1"', 'first result page starts at the first match in the 100,000-cell file');
+      let started = performance.now();
       await evaluate(`(()=>{const search=document.querySelector('#search');for(let index=0;index<100;index++)search.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))})()`);
-      await waitFor('document.querySelector("#address")?.value === "A101" && document.querySelector(".cell.selected")?.id === "cell-100-0"', 'Enter moves past the first 100 results to row 101');
+      await waitFor('document.querySelector("#address")?.value === "A4901" && document.querySelector(".cell.selected")?.id === "cell-4900-0"', 'Enter moves past the first 100 results to the next matching row');
+      const secondPageMs = performance.now() - started;
+      started = performance.now();
+      await evaluate(`(()=>{const search=document.querySelector('#search');for(let index=0;index<100;index++)search.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))})()`);
+      await waitFor('document.querySelector("#address")?.value === "A9801" && document.querySelector(".cell.selected")?.id === "cell-9800-0"', 'the last result page remains row-ordered in the large file');
+      const thirdPageMs = performance.now() - started;
+      started = performance.now();
       await evaluate(`document.querySelector('#search').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))`);
       await waitFor('document.querySelector("#address")?.value === "A1" && document.querySelector(".cell.selected")?.id === "cell-0-0"', 'Enter wraps from the last result to the first');
+      console.log('[JinSheet Search 100k]', JSON.stringify({ cells: 100000, rows: 10000, columns: 10, matches: 201, secondPageMs: Math.round(secondPageMs), thirdPageMs: Math.round(thirdPageMs), wrapMs: Math.round(performance.now() - started) }));
     } finally {
       devtools?.close();
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');
@@ -4353,6 +4461,8 @@ suite('JinSheet Extension Host', () => {
       await dispatchMouse({ type: 'mouseReleased', ...sourcePoint, button: 'left', buttons: 0, clickCount: 1 });
       await devtools.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'c', code: 'KeyC', windowsVirtualKeyCode: 67, modifiers: 2 });
       await devtools.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'c', code: 'KeyC', windowsVirtualKeyCode: 67, modifiers: 2 });
+      const clipboardDeadline = Date.now() + 5000;
+      while (Date.now() < clipboardDeadline && testClipboard !== 'name') await new Promise(resolve => setTimeout(resolve, 25));
       assert.equal(testClipboard, 'name', 'Ctrl+C writes the selected cell to the clipboard');
 
       const targetPoint = await evaluate(`(() => { const r = document.querySelector('#cell-1-1').getBoundingClientRect(); return {x:r.left + r.width / 2, y:r.top + r.height / 2}; })()`);

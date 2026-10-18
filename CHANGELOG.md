@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+## 1.4.0 / 2026-10-18
+- Match direct-value coercion and reference handling for `SUMSQ`, `DEVSQ`, `AVEDEV`, `GEOMEAN`, and `HARMEAN`.
+- Ignore nonnumeric logical and text values in `RANK.EQ` and `RANK.AVG` reference lists.
+- Match direct-value coercion, logical-value handling, and error propagation for `STDEVA`, `STDEVPA`, `VARA`, and `VARPA`.
+- Match Excel direct-value coercion and reference-range exclusions for `STDEV.S`, `STDEV.P`, `VAR.S`, and `VAR.P`.
+- Match Excel direct-argument coercion and reference-range exclusions in `MEDIAN`, `MIN`, and `MAX`; ignore logical values in `PRODUCT` arrays and references.
+- Propagate error values in the data and bins arrays of `FREQUENCY` while continuing to ignore text and blanks.
+- Support `MODE.SNGL` and `MODE.MULT` with up to 254 arguments, direct numeric text conversion, and error propagation from supplied values and ranges.
+- Recalculate supported XLSX formula caches after changing a defined-name range in manual calculation mode.
+- Recalculate supported XLSX formula caches after cell edits, row or column changes, filter or manual row visibility changes, and worksheet deletion in manual calculation mode.
+- Support `AGGREGATE` functions 1–19, Excel ignore options, and up to 253 reference-form numeric arguments.
+- Interpret ambiguous pasted XLSX dates using the system locale independently of the VS Code UI language, while accepting Korean date text in either UI language.
+- Protect XLSX workbooks with unknown workbook-level metadata from editing while preserving recognized protection, sharing, custom-view, and extension metadata during formula recalculation updates.
+- Support scientific notation in `TEXT` formats, including exponent padding, optional sign display, and mantissa rounding across powers of ten.
+- Support localized weekday names, one-letter month names, and flexible date token combinations in `TEXT` formats.
+- Support minute-second and second-only `TEXT` time formats, including combined date and minute-second output.
+- Support elapsed hour, minute, and second `TEXT` formats that do not wrap at a day or hour boundary.
+- Truncate seconds in `TEXT` time output so near-boundary times do not round into the next day or hour.
+- Support fractional second placeholders in `TEXT` time and elapsed time formats, including rounding across date boundaries.
+- Support fractional seconds in elapsed-second formats such as `[s].000`.
+- Preserve quoted and escaped literals in `TEXT` date formats without interpreting date tokens inside them.
+- Support the short `A/P` meridiem token in `TEXT` time formats and date-time combinations.
+- Preserve source offsets in case-insensitive `TEXTSPLIT` when Unicode lowercase conversion changes string length.
+- Return a numeric error for negative `TIME` components instead of wrapping them into the previous day.
+- Enforce Excel's 32767 maximum for each `TIME` argument while preserving overflow normalization within the supported range.
+- Reject differently shaped array ranges in `COUNTIFS`, `SUMIFS`, `AVERAGEIFS`, `MAXIFS`, and `MINIFS`, even when their cell counts match.
+- Treat an empty-cell reference used as a conditional-aggregate criterion as numeric zero, matching Excel's `COUNTIFS` behavior.
+- Propagate reference and array errors through `AVERAGEA`, `MINA`, and `MAXA` instead of treating them as zero.
+- Convert numeric text passed directly to `AVERAGEA`, `MINA`, and `MAXA`; ignore text in `MINA` and `MAXA` reference ranges.
+- Resolve `DATEVALUE` inputs without a year using the current calculation year for numeric and English month-name dates.
+- Parse ambiguous numeric `DATEVALUE` dates using the runtime system locale and recognize dotted year-first dates such as `2024. 2. 29.`.
+- Treat quoted text that resembles Excel error values as text in error predicates, error handlers, lookup inputs, and text or numeric functions.
+- Flatten ranges in `CONCAT`, `CONCATENATE`, and `TEXTJOIN`, propagate actual cell errors while preserving error-like text cells, and enforce `CONCAT` argument and cell text length limits.
+- Extend `TEXT` numeric formats to support optional decimal places such as `0.##` and `#,##0.##`.
+- Support up to three numeric `TEXT` format sections for positive, negative, and zero values, including quoted prefix/suffix literals.
+- Support numeric conditions in `TEXT` format sections, such as `[>=100]` and `[<0]`, with an unconditional fallback section.
+- Match actual error cells with quoted error-text criteria in `COUNTIF`/`COUNTIFS`, and propagate error values passed as criteria.
+- Parse comparison operators from criteria cells referenced by conditional aggregation functions.
+- Preserve referenced error-text criteria in sparse full-column `COUNTIF` and `COUNTIFS` evaluation.
+- Evaluate `SUMPRODUCT` with sparse full-row and full-column references without materializing blank cells.
+- Evaluate `MATCH` and `XMATCH` against sparse full-row and full-column lookup arrays while preserving worksheet-relative result positions.
+- Evaluate `XLOOKUP` against sparse full-row and full-column lookup and return arrays without materializing blank cells.
+- Support sparse full-column `VLOOKUP` and full-row `HLOOKUP` tables without expanding blank cells into arrays.
+- Support `LOOKUP` with sparse full-row and full-column vectors while preserving worksheet-relative return positions.
+- Search sparse full-row and full-column `MATCH`/`XMATCH` exact lookups by populated cells and resolve forward/reverse blank matches by position.
+- Distinguish numeric values from numeric text in exact `MATCH`, `XMATCH`, `VLOOKUP`, `HLOOKUP`, and `XLOOKUP` matches.
+
 ## 1.3.0 / 2026-10-18
 - Open and edit workbooks with standard custom document properties or package preview thumbnails; preserve those metadata parts and worksheet row/column outline groups when saving.
 - Distinguish numeric text and logical values typed directly into `SUM`, `AVERAGE`, and `COUNT` from text and logical values returned by cell references or ranges.

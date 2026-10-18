@@ -11,6 +11,8 @@ const FORMULA_RANGE = Symbol('formulaRange');
 const FORMULA_RANGE_METADATA = Symbol('formulaRangeMetadata');
 const FORMULA_TEXT_LITERAL = Symbol('formulaTextLiteral');
 const FORMULA_REFERENCE_VALUE = Symbol('formulaReferenceValue');
+const FORMULA_TYPED_TEXT = Symbol('formulaTypedText');
+const FORMULA_TYPED_ERROR = Symbol('formulaTypedError');
 const ERROR_TYPE_CODES = new Map([['#NULL!', 1], ['#DIV/0!', 2], ['#VALUE!', 3], ['#REF!', 4], ['#NAME?', 5], ['#NUM!', 6], ['#N/A', 7], ['#N/A!', 7], ['#GETTING_DATA', 8], ['#SPILL!', 9], ['#CALC!', 14]]);
 
 function columnNumber(letters) {
@@ -80,9 +82,28 @@ function tokenize(source) {
   return tokens;
 }
 
-function isError(value) { if (value?.[FORMULA_TEXT_LITERAL] || value?.[FORMULA_REFERENCE_VALUE]) value = value.value; return typeof value === 'string' && /^#(?:REF!|DIV\/0!|VALUE!|NAME\?|NUM!|N\/A|NULL!|CALC!|CIRC!|SPILL!|GETTING_DATA)/.test(value); }
+function isError(value) {
+  if (value?.[FORMULA_TYPED_ERROR]) return true;
+  if (value?.[FORMULA_TYPED_TEXT]) return false;
+  if (value?.[FORMULA_TEXT_LITERAL] || value?.[FORMULA_REFERENCE_VALUE]) return isError(value.value);
+  return typeof value === 'string' && /^#(?:REF!|DIV\/0!|VALUE!|NAME\?|NUM!|N\/A|NULL!|CALC!|CIRC!|SPILL!|GETTING_DATA)/.test(value);
+}
+function typedFormulaCellValue(value, kind) {
+  if (value?.[FORMULA_TYPED_TEXT] || value?.[FORMULA_TYPED_ERROR]) return value;
+  if (kind === 'error' && typeof value === 'string') return { [FORMULA_TYPED_ERROR]: true, value };
+  if (kind === 'string' && typeof value === 'string' && isErrorText(value)) return { [FORMULA_TYPED_TEXT]: true, value };
+  return value;
+}
+function isErrorText(value) { return typeof value === 'string' && /^#(?:REF!|DIV\/0!|VALUE!|NAME\?|NUM!|N\/A|NULL!|CALC!|CIRC!|SPILL!|GETTING_DATA)/.test(value); }
+function formulaTextResult(value, preserve = false) {
+  if (!preserve) return value;
+  if (Array.isArray(value)) return value.map(item => Array.isArray(item) ? formulaTextResult(item, true) : formulaTextResult(item, true));
+  return isErrorText(value) ? { [FORMULA_TYPED_TEXT]: true, value } : value;
+}
+function plainFormulaValue(value) { return value?.[FORMULA_TYPED_TEXT] || value?.[FORMULA_TYPED_ERROR] ? value.value : value; }
 function failValue() { return '#VALUE!'; }
 function numeric(value) {
+  if (value?.[FORMULA_TYPED_TEXT]) return isErrorText(value.value) ? '#VALUE!' : numeric(value.value);
   if (value?.[FORMULA_TEXT_LITERAL] || value?.[FORMULA_REFERENCE_VALUE]) value = value.value;
   if (isError(value)) return value;
   if (value === null || value === undefined || value === '') return 0;
@@ -235,6 +256,7 @@ function poissonDistribution(value, mean) {
 }
 function matrix(value) { return Array.isArray(value) && value.every(Array.isArray) ? value : null; }
 function comparable(value) {
+  if (value?.[FORMULA_TYPED_TEXT]) value = value.value;
   if (value === null || value === undefined) return '';
   if (typeof value === 'number' || typeof value === 'boolean') return Number(value);
   if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value.trim()))) return Number(value.trim());
@@ -262,13 +284,25 @@ function interpolateNumber(lower, upper, fraction) {
     ? lower * (1 - fraction) + upper * fraction
     : lower + (upper - lower) * fraction;
 }
-function criterionMatch(value, criterion) {
-  const text = typeof criterion === 'string' ? criterion : String(criterion ?? '');
+function criterionMatch(value, criterion, errorTextCriterion = false) {
+  if (isError(value)) {
+    if (errorTextCriterion) {
+      const criterionText = plainFormulaValue(criterion), match = typeof criterionText === 'string' && /^(<=|>=|<>|=|<|>)(.*)$/.exec(criterionText);
+      const operator = match?.[1] || '=', expected = match?.[2] ?? criterionText;
+      if (['=', '<>'].includes(operator) && isErrorText(expected)) {
+        const equal = String(expected).toUpperCase() === String(plainFormulaValue(value)).toUpperCase();
+        return operator === '=' ? equal : !equal;
+      }
+    }
+    return false;
+  }
+  if (value?.[FORMULA_TYPED_TEXT]) value = value.value;
+  const normalizedCriterion = plainFormulaValue(criterion);
+  const text = typeof normalizedCriterion === 'string' ? normalizedCriterion : String(normalizedCriterion ?? '');
   const match = /^(<=|>=|<>|=|<|>)(.*)$/.exec(text);
   const operator = match?.[1] || '=';
-  const expected = comparable(match ? match[2] : criterion);
+  const expected = comparable(match ? match[2] : normalizedCriterion);
   const actual = comparable(value);
-  if (isError(value)) return false;
   if ((operator === '=' || operator === '<>') && typeof expected === 'string' && /[*?]/.test(expected)) {
     if (typeof value !== 'string') return operator === '<>' && value !== null && value !== undefined;
     let pattern = '^';
@@ -318,6 +352,24 @@ function sparseRangeIndex(range) {
 function sameSparseShape(ranges) {
   return ranges.every(range => isFormulaRange(range) && range.bounds.bottom - range.bounds.top === ranges[0].bounds.bottom - ranges[0].bounds.top && range.bounds.right - range.bounds.left === ranges[0].bounds.right - ranges[0].bounds.left);
 }
+function formulaArrayShape(value) {
+  if (isFormulaRange(value)) return {
+    rows: value.bounds.bottom - value.bounds.top + 1,
+    columns: value.bounds.right - value.bounds.left + 1
+  };
+  if (!Array.isArray(value)) return { rows: 1, columns: 1 };
+  if (!value.length) return null;
+  const matrix = Array.isArray(value[0]) ? value : value.map(item => [item]);
+  if (matrix.some(row => !Array.isArray(row)) || matrix.some(row => row.length !== matrix[0].length)) return null;
+  return { rows: matrix.length, columns: matrix[0].length };
+}
+function sameFormulaArrayShape(ranges) {
+  const first = formulaArrayShape(ranges[0]);
+  return Boolean(first && ranges.every(range => {
+    const shape = formulaArrayShape(range);
+    return shape && shape.rows === first.rows && shape.columns === first.columns;
+  }));
+}
 function sparsePositionUnion(ranges) {
   const positions = new Set();
   for (const range of ranges) for (const entry of range.entries) positions.add((entry.row - range.bounds.top) + ':' + (entry.column - range.bounds.left));
@@ -327,12 +379,19 @@ function lookupValue(value, approximate) {
   if (isError(value)) return value;
   return comparable(value);
 }
+function exactLookupValue(value) {
+  if (value?.[FORMULA_TEXT_LITERAL] || value?.[FORMULA_REFERENCE_VALUE]) value = value.value;
+  if (value?.[FORMULA_TYPED_TEXT]) value = value.value;
+  if (isError(value)) return value;
+  if (value === null || value === undefined) return '';
+  return typeof value === 'string' ? value.toLocaleLowerCase() : value;
+}
 function lookupIndex(values, target, approximate, lastEqual = false) {
-  const sought = lookupValue(target, approximate);
+  const sought = approximate ? lookupValue(target, true) : exactLookupValue(target);
   if (isError(sought)) return sought;
   if (!approximate) return values.findIndex(value => typeof sought === 'string' && /[*?~]/.test(sought)
     ? criterionMatch(value, target)
-    : lookupValue(value, false) === sought);
+    : exactLookupValue(value) === sought);
   let found = -1;
   for (let index = 0; index < values.length; index++) {
     const candidate = lookupValue(values[index], true);
@@ -351,16 +410,31 @@ function lookupIndex(values, target, approximate, lastEqual = false) {
 function aggregateNumbers(values) {
   const result = [];
   for (const value of flatten(values)) {
-    if (isError(value)) return value;
+    if (isError(value)) return plainFormulaValue(value);
     if (typeof value === 'number' && Number.isFinite(value)) result.push(value);
     else if (typeof value === 'boolean') result.push(value ? 1 : 0);
   }
   return result;
 }
-function aggregateDirectArguments(args) {
+function rankReferenceNumbers(argument) {
+  const result = [];
+  if (argument?.[FORMULA_REFERENCE_VALUE]) {
+    const value = argument.value;
+    if (isError(value)) return plainFormulaValue(value);
+    if (typeof value === 'number' && Number.isFinite(value)) result.push(value);
+    return result;
+  }
+  for (const value of flatten([argument])) {
+    if (isError(value)) return plainFormulaValue(value);
+    if (typeof value === 'number' && Number.isFinite(value)) result.push(value);
+  }
+  return result;
+}
+function aggregateDirectArguments(args, { ignoreReferenceErrors = false } = {}) {
   const result = [];
   for (const argument of args) {
     if (argument?.[FORMULA_TEXT_LITERAL]) {
+      if (isError(argument.value)) return '#VALUE!';
       const value = numeric(argument.value);
       if (typeof value !== 'number') return value;
       result.push(value);
@@ -368,12 +442,16 @@ function aggregateDirectArguments(args) {
     }
     if (argument?.[FORMULA_REFERENCE_VALUE]) {
       const value = argument.value;
-      if (isError(value)) return value;
+      if (value?.[FORMULA_TYPED_TEXT]) continue;
+      if (isError(value)) {
+        if (ignoreReferenceErrors) continue;
+        return plainFormulaValue(value);
+      }
       if (typeof value === 'number' && Number.isFinite(value)) result.push(value);
       continue;
     }
     if (!isFormulaRange(argument) && !Array.isArray(argument)) {
-      if (isError(argument)) return argument;
+      if (isError(argument)) return plainFormulaValue(argument);
       if (typeof argument === 'number' && Number.isFinite(argument)) result.push(argument);
       else if (typeof argument === 'boolean') result.push(argument ? 1 : 0);
       else if (typeof argument === 'string') {
@@ -384,8 +462,70 @@ function aggregateDirectArguments(args) {
       continue;
     }
     for (const value of flatten([argument])) {
-      if (isError(value)) return value;
+      if (isError(value)) {
+        if (ignoreReferenceErrors) continue;
+        return plainFormulaValue(value);
+      }
       if (typeof value === 'number' && Number.isFinite(value)) result.push(value);
+    }
+  }
+  return result;
+}
+function productArguments(args) {
+  const result = [];
+  for (const argument of args) {
+    if (argument?.[FORMULA_REFERENCE_VALUE]) {
+      const value = argument.value;
+      if (isError(value)) return plainFormulaValue(value);
+      if (typeof value === 'number' && Number.isFinite(value)) result.push(value);
+      continue;
+    }
+    if (!isFormulaRange(argument) && !Array.isArray(argument)) {
+      if (isError(argument)) return plainFormulaValue(argument);
+      if (typeof argument === 'number' && Number.isFinite(argument)) result.push(argument);
+      else if (typeof argument === 'boolean') result.push(argument ? 1 : 0);
+      continue;
+    }
+    for (const value of flatten([argument])) {
+      if (isError(value)) return plainFormulaValue(value);
+      if (typeof value === 'number' && Number.isFinite(value)) result.push(value);
+    }
+  }
+  return result;
+}
+function aggregateLogicalArguments(args) {
+  const result = [];
+  for (const argument of args) {
+    if (argument?.[FORMULA_TEXT_LITERAL]) {
+      if (isError(argument.value)) return '#VALUE!';
+      const value = numeric(argument.value);
+      if (typeof value !== 'number') return value;
+      result.push(value);
+      continue;
+    }
+    if (argument?.[FORMULA_REFERENCE_VALUE]) {
+      const value = argument.value;
+      if (isError(value)) return plainFormulaValue(value);
+      if (value?.[FORMULA_TYPED_TEXT] || typeof value === 'string' || value === null || value === undefined) continue;
+      if (typeof value === 'number' && Number.isFinite(value)) result.push(value);
+      else if (typeof value === 'boolean') result.push(Number(value));
+      continue;
+    }
+    if (!isFormulaRange(argument) && !Array.isArray(argument)) {
+      if (isError(argument)) return plainFormulaValue(argument);
+      if (typeof argument === 'number' && Number.isFinite(argument)) result.push(argument);
+      else if (typeof argument === 'boolean') result.push(Number(argument));
+      else if (typeof argument === 'string') {
+        const value = numeric(argument);
+        if (typeof value !== 'number') return value;
+        result.push(value);
+      }
+      continue;
+    }
+    for (const value of flatten([argument])) {
+      if (isError(value)) return plainFormulaValue(value);
+      if (typeof value === 'number' && Number.isFinite(value)) result.push(value);
+      else if (typeof value === 'boolean') result.push(Number(value));
     }
   }
   return result;
@@ -394,13 +534,13 @@ function countDirectArguments(args) {
   let count = 0;
   for (const argument of args) {
     if (argument?.[FORMULA_TEXT_LITERAL]) {
-      if (isError(argument.value)) return argument.value;
+      if (isError(argument.value)) continue;
       const value = numeric(argument.value);
       if (typeof value === 'number') count++;
       continue;
     }
     if (argument?.[FORMULA_REFERENCE_VALUE]) {
-      if (typeof argument.value === 'number' && Number.isFinite(argument.value)) count++;
+      if (!argument.value?.[FORMULA_TYPED_TEXT] && typeof argument.value === 'number' && Number.isFinite(argument.value)) count++;
       continue;
     }
     if (!isFormulaRange(argument) && !Array.isArray(argument) && typeof argument === 'boolean') { count++; continue; }
@@ -503,6 +643,7 @@ function pairedNumbers(left, right) {
 }
 
 function logical(value) {
+  if (value?.[FORMULA_TYPED_TEXT]) return isErrorText(value.value) ? '#VALUE!' : logical(value.value);
   if (isError(value)) return value;
   if (typeof value === 'boolean') return value;
   if (typeof value === 'number') return value !== 0;
@@ -512,23 +653,50 @@ function logical(value) {
 }
 
 function formatTextDateTime(value, format, locale = 'en-US', date1904 = false) {
-  const text = String(format).trim(), timeSeparator = text.search(/\s+(?=h{1,2}:mm)/i), hasDateAndTime = timeSeparator >= 0;
+  const text = String(format).trim();
+  let quoted = false, escaped = false, timeSeparator = -1;
+  for (let index = 0; index < text.length; index++) {
+    const character = text[index];
+    if (escaped) { escaped = false; continue; }
+    if (character === '\\') { escaped = true; continue; }
+    if (character === '"') {
+      if (quoted && text[index + 1] === '"') { index++; continue; }
+      quoted = !quoted;
+      continue;
+    }
+    if (!quoted && /\s/.test(character) && /^(?:h{1,2}:mm|m{1,2}:ss|ss)/i.test(text.slice(index).trimStart())) {
+      timeSeparator = index;
+      break;
+    }
+  }
+  const hasDateAndTime = timeSeparator >= 0;
   const dateFormat = hasDateAndTime ? text.slice(0, timeSeparator).trim() : text, timeFormat = hasDateAndTime ? text.slice(timeSeparator).trim() : text;
-  const datePattern = /^(?:yyyy|yy)[-/.](?:m|mm)[-/.](?:d|dd)$/i.test(dateFormat)
-    || /^(?:m|mm)[-/.](?:d|dd)[-/.](?:yyyy|yy)$/i.test(dateFormat)
-    || /^(?:d|dd)[ -](?:mmm|mmmm)[ -](?:yyyy|yy)$/i.test(dateFormat);
-  const timePattern = /^(?:h|hh):mm(?::ss)?(?:\s+AM\/PM)?$/i.test(hasDateAndTime ? timeFormat : text);
+  const unquotedDateFormat = dateFormat.replace(/"((?:[^"]|"")*)"|\\(.)/g, '');
+  const unquotedTimeFormat = timeFormat.replace(/"((?:[^"]|"")*)"|\\(.)/g, '').trim();
+  const dateRemainder = unquotedDateFormat.replace(/yyyy|yy|mmmmm|mmmm|mmm|mm|m|dddd|ddd|dd|d/gi, '');
+  const datePattern = /[ymd]/i.test(unquotedDateFormat) && !/[A-Za-z0-9]/.test(dateRemainder) && /^[\s.,/\-]*$/.test(dateRemainder);
+  const elapsedMatch = /^\[(h{1,2}|m{1,2}|s{1,2})\](?:\.(0{1,3}))?(?::(mm|ss)(?::(ss)(?:\.(0{1,3}))?)?)?$/i.exec(timeFormat);
+  const timePattern = Boolean(elapsedMatch) || /^(?:(?:h|hh):mm(?::ss(?:\.0{1,3})?)?|m{1,2}:ss(?:\.0{1,3})?|ss(?:\.0{1,3})?)(?:\s+(?:AM\/PM|A\/P))?$/i.test(unquotedTimeFormat);
+  if (elapsedMatch && (elapsedMatch[2] && (elapsedMatch[1][0].toLowerCase() !== 's' || elapsedMatch[3]) || elapsedMatch[5] && elapsedMatch[1][0].toLowerCase() === 's')) return null;
   if (hasDateAndTime && (!datePattern || !timePattern) || !hasDateAndTime && !datePattern && !timePattern) return null;
   const epochOffset = date1904 ? 1462 : 0;
-  if (!Number.isFinite(value) || value < 0 || value > 2958465.999999 - epochOffset) return '#NUM!';
+  if (!Number.isFinite(value) || !elapsedMatch && (value < 0 || value > 2958465.999999 - epochOffset)) return '#NUM!';
   const dateText = serial => {
     const date = dateParts(Math.floor(serial) + epochOffset);
     if (typeof date === 'string') return date;
     const monthName = (length) => new Intl.DateTimeFormat(locale, { month: length === 3 ? 'short' : 'long', timeZone: 'UTC' }).format(utcDate(date.year, date.month, 15));
-    return dateFormat.replace(/yyyy|yy|mmmm|mmm|mm|m|dd|d/gi, token => {
+    const weekdayName = length => {
+      const weekday = ((Math.floor(serial) + epochOffset + 6) % 7 + 7) % 7;
+      return new Intl.DateTimeFormat(locale, { weekday: length === 3 ? 'short' : 'long', timeZone: 'UTC' }).format(new Date(Date.UTC(2024, 0, 7 + weekday)));
+    };
+    return dateFormat.replace(/"((?:[^"]|"")*)"|\\(.)|yyyy|yy|mmmmm|mmmm|mmm|mm|m|dddd|ddd|dd|d/gi, (token, quoted, escaped) => {
+      if (quoted !== undefined) return quoted.replaceAll('""', '"');
+      if (escaped !== undefined) return escaped;
       const lower = token.toLowerCase();
       if (lower === 'yyyy') return String(date.year).padStart(4, '0');
       if (lower === 'yy') return String(date.year % 100).padStart(2, '0');
+      if (lower === 'dddd' || lower === 'ddd') return weekdayName(lower.length);
+      if (lower === 'mmmmm') return monthName(4).slice(0, 1);
       if (lower === 'mmmm' || lower === 'mmm') return monthName(lower.length);
       if (lower === 'mm') return String(date.month).padStart(2, '0');
       if (lower === 'm') return String(date.month);
@@ -537,20 +705,98 @@ function formatTextDateTime(value, format, locale = 'en-US', date1904 = false) {
     });
   };
   const timeText = totalSeconds => {
+    if (elapsedMatch) {
+      if (!Number.isSafeInteger(Math.floor(Math.abs(totalSeconds)))) return '#NUM!';
+      const negative = totalSeconds < 0, absoluteSeconds = Math.abs(totalSeconds), unit = elapsedMatch[1][0].toLowerCase();
+      const main = unit === 'h' ? Math.floor(absoluteSeconds / 3600) : unit === 'm' ? Math.floor(absoluteSeconds / 60) : absoluteSeconds;
+      const remainder = unit === 'h' ? absoluteSeconds % 3600 : unit === 'm' ? absoluteSeconds % 60 : 0;
+      const mainText = elapsedMatch[2] ? main.toFixed(elapsedMatch[2].length) : String(main);
+      const parts = [elapsedMatch[1].length === 2 ? mainText.padStart(2, '0') : mainText];
+      if (elapsedMatch[3]) parts.push(String(elapsedMatch[3].toLowerCase() === 'mm' ? Math.floor(remainder / 60) : unit === 'h' ? Math.floor(remainder) % 60 : Math.floor(remainder)).padStart(2, '0'));
+      if (elapsedMatch[4]) {
+        let seconds = String(Math.floor(absoluteSeconds) % 60).padStart(2, '0');
+        if (elapsedMatch[5]) seconds += '.' + String(Math.round((absoluteSeconds % 1) * 1000)).padStart(3, '0').slice(0, elapsedMatch[5].length);
+        parts.push(seconds);
+      }
+      return (negative ? '-' : '') + parts.join(':');
+    }
     const secondsInDay = ((totalSeconds % 86400) + 86400) % 86400;
     let hour = Math.floor(secondsInDay / 3600);
-    const minute = Math.floor(secondsInDay / 60) % 60, second = secondsInDay % 60;
-    const meridiem = /AM\/PM/i.test(timeFormat);
+    const minute = Math.floor(secondsInDay / 60) % 60, second = Math.floor(secondsInDay) % 60;
+    const meridiemToken = /AM\/PM|A\/P/i.exec(unquotedTimeFormat)?.[0] || '';
+    const meridiem = Boolean(meridiemToken);
     if (meridiem) hour = hour % 12 || 12;
-    const hourToken = /hh/i.test(timeFormat) ? String(hour).padStart(2, '0') : String(hour);
-    return hourToken + ':' + String(minute).padStart(2, '0') + (/:ss/i.test(timeFormat) ? ':' + String(second).padStart(2, '0') : '') + (meridiem ? (Math.floor(secondsInDay / 3600) < 12 ? ' AM' : ' PM') : '');
+    const fractionDigits = /ss\.(0{1,3})/i.exec(unquotedTimeFormat)?.[1].length || 0;
+    const fractionalText = fractionDigits ? '.' + String(Math.round((secondsInDay % 1) * 1000)).padStart(3, '0').slice(0, fractionDigits) : '';
+    return timeFormat.replace(/"((?:[^"]|"")*)"|\\(.)|AM\/PM|A\/P|hh|h|mm|m|ss(?:\.0{1,3})?/gi, (token, quoted, escaped) => {
+      if (quoted !== undefined) return quoted.replaceAll('""', '"');
+      if (escaped !== undefined) return escaped;
+      const lower = token.toLowerCase();
+      if (lower === 'am/pm') return Math.floor(secondsInDay / 3600) < 12 ? (token[0] === token[0].toLowerCase() ? 'am' : 'AM') : (token[0] === token[0].toLowerCase() ? 'pm' : 'PM');
+      if (lower === 'a/p') return Math.floor(secondsInDay / 3600) < 12 ? (token[0] === token[0].toLowerCase() ? 'a' : 'A') : (token[0] === token[0].toLowerCase() ? 'p' : 'P');
+      if (lower === 'hh') return String(hour).padStart(2, '0');
+      if (lower === 'h') return String(hour);
+      if (lower === 'mm') return String(minute).padStart(2, '0');
+      if (lower === 'm') return String(minute);
+      if (lower.startsWith('ss')) return String(second).padStart(2, '0') + fractionalText;
+      return token;
+    });
   };
   try {
-    const totalSeconds = Math.round(value * 86400);
+    const rawSeconds = Math.abs(value) * 86400;
+    const fractionDigits = elapsedMatch?.[2]?.length || elapsedMatch?.[5]?.length || /ss\.(0{1,3})/i.exec(timeFormat)?.[1].length || 0;
+    const elapsedSeconds = fractionDigits
+      ? Math.round(rawSeconds * 10 ** fractionDigits) / 10 ** fractionDigits
+      : Math.floor(rawSeconds + Number.EPSILON * Math.max(1, rawSeconds));
+    const totalSeconds = value < 0 ? -elapsedSeconds : elapsedSeconds;
+    if (!Number.isSafeInteger(Math.floor(Math.abs(totalSeconds)))) return '#NUM!';
     if (!hasDateAndTime) return datePattern ? dateText(value) : timeText(totalSeconds);
     const dateResult = dateText(Math.floor(totalSeconds / 86400));
     return typeof dateResult === 'string' && dateResult.startsWith('#') ? dateResult : dateResult + ' ' + timeText(totalSeconds);
   } catch { return '#VALUE!'; }
+}
+
+function splitTextFormatSections(format) {
+  const sections = [];
+  let quoted = false, start = 0;
+  for (let index = 0; index < format.length; index++) {
+    if (format[index] === '"') {
+      if (quoted && format[index + 1] === '"') { index++; continue; }
+      quoted = !quoted;
+    } else if (format[index] === ';' && !quoted) {
+      sections.push(format.slice(start, index));
+      start = index + 1;
+    }
+  }
+  if (quoted) return null;
+  sections.push(format.slice(start));
+  return sections.length <= 4 ? sections : null;
+}
+
+function parseTextFormatCondition(section) {
+  const match = /^\[(<=|>=|<>|=|<|>)([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\]/.exec(section);
+  if (!match) return { condition: null, body: section };
+  const value = Number(match[2]);
+  return Number.isFinite(value) ? { condition: { operator: match[1], value }, body: section.slice(match[0].length) } : null;
+}
+
+function matchesTextFormatCondition(value, condition) {
+  if (!condition) return false;
+  if (condition.operator === '<') return value < condition.value;
+  if (condition.operator === '<=') return value <= condition.value;
+  if (condition.operator === '>') return value > condition.value;
+  if (condition.operator === '>=') return value >= condition.value;
+  if (condition.operator === '=') return value === condition.value;
+  return value !== condition.value;
+}
+
+function decodeTextFormatLiteral(value) {
+  const decoded = value.replace(/"((?:[^"]|"")*)"|\\(.)/g, (match, quoted, escaped) => {
+    if (quoted !== undefined) return quoted.replaceAll('""', '"');
+    return escaped;
+  });
+  const unquoted = value.replace(/"(?:[^"]|"")*"|\\./g, '');
+  return /"|\\|[A-Za-z0-9#?,.]/.test(unquoted) ? null : decoded;
 }
 
 const DATE_1904_SERIAL_RESULTS = new Set(['DATE', 'DATEVALUE', 'TODAY', 'NOW', 'EDATE', 'EOMONTH', 'WORKDAY', 'WORKDAY.INTL', 'COUPNCD', 'COUPPCD']);
@@ -591,24 +837,46 @@ function call1904DateFunction(name, args, context) {
 
 function callFunction(name, args, context = {}) {
   const sourceArgs = args;
+  const isTextLiteralArgument = index => Boolean(sourceArgs[index]?.[FORMULA_TEXT_LITERAL] || sourceArgs[index]?.[FORMULA_REFERENCE_VALUE] && sourceArgs[index].value?.[FORMULA_TYPED_TEXT]);
+  const argumentError = (...indexes) => {
+    const selected = indexes.length ? indexes : args.map((_, index) => index);
+    for (const index of selected) {
+      if (isTextLiteralArgument(index)) continue;
+      const value = args[index];
+      if (isFormulaRange(value) || Array.isArray(value)) continue;
+      if (isError(value)) return value;
+    }
+    return null;
+  };
+  const logicalArgument = index => isTextLiteralArgument(index) && isError(args[index]) ? '#VALUE!' : logical(args[index]);
+  const numericArgument = index => isTextLiteralArgument(index) && isError(args[index]) ? '#VALUE!' : numeric(sourceArgs[index]?.[FORMULA_REFERENCE_VALUE] ? sourceArgs[index].value : args[index]);
+  const criteriaArgument = index => sourceArgs[index]?.[FORMULA_REFERENCE_VALUE] && (args[index] === null || args[index] === undefined) ? 0 : args[index];
+  const textResult = value => formulaTextResult(value, context.preserveFormulaText);
   args = args.map(value => value?.[FORMULA_TEXT_LITERAL] || value?.[FORMULA_REFERENCE_VALUE] ? value.value : value);
   if (context.date1904 && (DATE_1904_INPUTS.has(name) || DATE_1904_SERIAL_RESULTS.has(name))) return call1904DateFunction(name, args, context);
-  const sparseRangeSupported = ['SUM', 'PRODUCT', 'AVERAGE', 'AVERAGEA', 'MEDIAN', 'MIN', 'MINA', 'MAX', 'MAXA', 'LARGE', 'SMALL', 'MODE.SNGL', 'MODE.MULT', 'FREQUENCY', 'COUNT', 'COUNTA', 'COUNTBLANK', 'COUNTIF', 'SUMIF', 'AVERAGEIF', 'COUNTIFS', 'SUMIFS', 'AVERAGEIFS', 'MAXIFS', 'MINIFS', 'SUBTOTAL', 'ROWS', 'COLUMNS', 'INDEX', 'NETWORKDAYS', 'NETWORKDAYS.INTL', 'WORKDAY', 'WORKDAY.INTL', 'SUMSQ', 'DEVSQ', 'AVEDEV', 'GEOMEAN', 'HARMEAN', 'CORREL', 'PEARSON', 'COVARIANCE.P', 'COVARIANCE.S', 'SLOPE', 'INTERCEPT', 'RSQ', 'STEYX', 'FORECAST', 'FORECAST.LINEAR', 'GCD', 'LCM', 'MULTINOMIAL', 'SUMXMY2', 'SUMX2MY2', 'SUMX2PY2', 'TRANSPOSE', 'TOCOL', 'TOROW', 'WRAPROWS', 'WRAPCOLS', 'HSTACK', 'VSTACK', 'STDEV.S', 'STDEV.P', 'STDEVA', 'STDEVPA', 'VAR.S', 'VAR.P', 'VARA', 'VARPA', 'NPV', 'IRR', 'MIRR', 'XNPV', 'XIRR', 'FVSCHEDULE'];
+  const sparseRangeSupported = ['SUM', 'PRODUCT', 'AVERAGE', 'AVERAGEA', 'MEDIAN', 'MIN', 'MINA', 'MAX', 'MAXA', 'LARGE', 'SMALL', 'MODE.SNGL', 'MODE.MULT', 'FREQUENCY', 'COUNT', 'COUNTA', 'COUNTBLANK', 'COUNTIF', 'SUMIF', 'AVERAGEIF', 'COUNTIFS', 'SUMIFS', 'AVERAGEIFS', 'MAXIFS', 'MINIFS', 'SUBTOTAL', 'AGGREGATE', 'ROWS', 'COLUMNS', 'INDEX', 'MATCH', 'XMATCH', 'XLOOKUP', 'VLOOKUP', 'HLOOKUP', 'LOOKUP', 'NETWORKDAYS', 'NETWORKDAYS.INTL', 'WORKDAY', 'WORKDAY.INTL', 'SUMSQ', 'DEVSQ', 'AVEDEV', 'GEOMEAN', 'HARMEAN', 'CORREL', 'PEARSON', 'COVARIANCE.P', 'COVARIANCE.S', 'SLOPE', 'INTERCEPT', 'RSQ', 'STEYX', 'FORECAST', 'FORECAST.LINEAR', 'GCD', 'LCM', 'MULTINOMIAL', 'SUMXMY2', 'SUMX2MY2', 'SUMX2PY2', 'TRANSPOSE', 'TOCOL', 'TOROW', 'WRAPROWS', 'WRAPCOLS', 'HSTACK', 'VSTACK', 'STDEV.S', 'STDEV.P', 'STDEVA', 'STDEVPA', 'VAR.S', 'VAR.P', 'VARA', 'VARPA', 'NPV', 'IRR', 'MIRR', 'XNPV', 'XIRR', 'FVSCHEDULE', 'SUMPRODUCT', 'CONCAT', 'CONCATENATE', 'TEXTJOIN'];
   if (args.some(isFormulaRange) && !sparseRangeSupported.includes(name)) return '#VALUE!';
   const values = flatten(args);
-  const textValue = value => value === null || value === undefined ? '' : value === true ? 'TRUE' : value === false ? 'FALSE' : String(value);
+  const textValue = value => { value = plainFormulaValue(value); return value === null || value === undefined ? '' : value === true ? 'TRUE' : value === false ? 'FALSE' : String(value); };
+  const flattenTextArguments = indexes => indexes.flatMap(index => {
+    const value = args[index];
+    const parts = flatten([value]);
+    if (isTextLiteralArgument(index) && parts.length === 1 && isErrorText(plainFormulaValue(parts[0]))) return [{ [FORMULA_TYPED_TEXT]: true, value: plainFormulaValue(parts[0]) }];
+    return parts;
+  });
   if (['ISBLANK', 'ISNUMBER', 'ISTEXT', 'ISNONTEXT', 'ISLOGICAL'].includes(name)) {
     if (args.length !== 1) return '#VALUE!';
     const value = args[0];
+    const isText = isTextLiteralArgument(0) || Boolean(value?.[FORMULA_TYPED_TEXT]) || typeof value === 'string' && !isError(value);
     if (name === 'ISBLANK') return value === null || value === undefined;
     if (name === 'ISNUMBER') return typeof value === 'number' && Number.isFinite(value);
-    if (name === 'ISTEXT') return typeof value === 'string';
-    if (name === 'ISNONTEXT') return typeof value !== 'string';
+    if (name === 'ISTEXT') return isText;
+    if (name === 'ISNONTEXT') return !isText;
     return typeof value === 'boolean';
   }
   if (name === 'ISEVEN' || name === 'ISODD') {
     if (args.length !== 1) return '#VALUE!';
-    const value = numeric(args[0]);
+    const value = numericArgument(0);
     if (typeof value !== 'number') return value;
     const even = Math.abs(Math.trunc(value)) % 2 === 0;
     return name === 'ISEVEN' ? even : !even;
@@ -616,7 +884,7 @@ function callFunction(name, args, context = {}) {
   if (name === 'NA') return args.length ? '#VALUE!' : '#N/A';
   if (name === 'VALUE') {
     if (args.length !== 1) return '#VALUE!';
-    if (isError(args[0])) return args[0];
+    if (argumentError(0) !== null) return argumentError(0);
     if (typeof args[0] === 'number') return Number.isFinite(args[0]) ? args[0] : '#VALUE!';
     const source = textValue(args[0]).trim();
     if (!source) return '#VALUE!';
@@ -627,7 +895,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'NUMBERVALUE') {
     if (args.length < 1 || args.length > 3) return '#VALUE!';
-    if (isError(args[0])) return args[0];
+    if (argumentError(0) !== null) return argumentError(0);
     const decimalSeparator = args.length > 1 && args[1] !== null ? args[1] : '.';
     const groupSeparator = args.length > 2 && args[2] !== null ? args[2] : ',';
     if (typeof decimalSeparator !== 'string' || typeof groupSeparator !== 'string'
@@ -649,7 +917,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'INDIRECT') {
     if (args.length < 1 || args.length > 2) return '#VALUE!';
-    if (isError(args[0]) || isError(args[1])) return isError(args[0]) ? args[0] : args[1];
+    if (argumentError(0, 1) !== null) return argumentError(0, 1);
     const reference = textValue(args[0]).trim(), a1 = args.length < 2 || args[1] === null ? true : logical(args[1]);
     if (typeof a1 !== 'boolean') return '#VALUE!';
     if (!reference || reference.startsWith('[') || reference.length > 512) return '#REF!';
@@ -690,14 +958,14 @@ function callFunction(name, args, context = {}) {
   if (name === 'ROWS' || name === 'COLUMNS') {
     if (args.length !== 1) return '#VALUE!';
     const value = args[0];
-    if (isError(value)) return value;
+    if (argumentError(0) !== null) return argumentError(0);
     if (isFormulaRange(value)) return name === 'ROWS' ? value.bounds.bottom - value.bounds.top + 1 : value.bounds.right - value.bounds.left + 1;
     if (!Array.isArray(value)) return 1;
     if (!value.length) return 0;
     return name === 'ROWS' ? value.length : (Array.isArray(value[0]) ? value[0].length : 1);
   }
   if (name === 'SEQUENCE') {
-    if (args.length < 1 || args.length > 4 || args.some(isError)) return args.find(isError) || '#VALUE!';
+    if (args.length < 1 || args.length > 4 || argumentError() !== null) return argumentError() || '#VALUE!';
     const dimension = (value, fallback) => value === undefined || value === null ? fallback : numeric(value);
     const rows = dimension(args[0], 1), columns = dimension(args[1], 1), start = dimension(args[2], 1), step = dimension(args[3], 1);
     if (![rows, columns].every(value => typeof value === 'number' && Number.isInteger(value) && value > 0) || typeof start !== 'number' || typeof step !== 'number') return '#VALUE!';
@@ -717,7 +985,7 @@ function callFunction(name, args, context = {}) {
   if (name === 'FILTER') {
     if (args.length < 2 || args.length > 3) return '#VALUE!';
     const source = matrixValue(args[0]), include = matrixValue(args[1]);
-    if (!source || !include) return isError(args[0]) ? args[0] : isError(args[1]) ? args[1] : '#VALUE!';
+    if (!source || !include) return argumentError(0, 1) ?? '#VALUE!';
     const height = source.length, width = source[0].length;
     const rowFilter = include.length === height && include[0].length === 1;
     const columnFilter = include.length === 1 && include[0].length === width;
@@ -734,12 +1002,12 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'SORT') {
     if (args.length < 1 || args.length > 4) return '#VALUE!';
-    if (args.some(isError)) return args.find(isError);
+    if (argumentError() !== null) return argumentError();
     const source = matrixValue(args[0]);
     if (!source) return '#VALUE!';
     const height = source.length, width = source[0].length;
-    const sortIndex = args[1] === undefined || args[1] === null ? 1 : numeric(args[1]);
-    const sortOrder = args[2] === undefined || args[2] === null ? 1 : numeric(args[2]);
+    const sortIndex = args[1] === undefined || args[1] === null ? 1 : numericArgument(1);
+    const sortOrder = args[2] === undefined || args[2] === null ? 1 : numericArgument(2);
     const byColumn = args[3] === undefined || args[3] === null ? false : logical(args[3]);
     const limit = byColumn === true ? height : width;
     if (!Number.isInteger(sortIndex) || sortIndex < 1 || sortIndex > limit || ![1, -1].includes(sortOrder) || typeof byColumn !== 'boolean') return '#VALUE!';
@@ -754,7 +1022,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'SORTBY') {
     if (args.length < 2 || args.length > 127) return '#VALUE!';
-    if (args.some(isError)) return args.find(isError);
+    if (argumentError() !== null) return argumentError();
     const source = matrixValue(args[0]);
     if (!source) return '#VALUE!';
     const height = source.length, width = source[0].length, keys = [];
@@ -781,7 +1049,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'UNIQUE') {
     if (args.length < 1 || args.length > 3) return '#VALUE!';
-    if (args.some(isError)) return args.find(isError);
+    if (argumentError() !== null) return argumentError();
     const source = matrixValue(args[0]);
     if (!source) return '#VALUE!';
     const byColumn = args[1] === undefined || args[1] === null ? false : logical(args[1]);
@@ -813,14 +1081,14 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'TRANSPOSE') {
     if (args.length !== 1) return '#VALUE!';
-    if (isError(args[0])) return args[0];
+    if (argumentError(0) !== null) return argumentError(0);
     const source = matrixValue(args[0]);
     if (!source || source.length * source[0].length > MAX_RANGE_CELLS) return source ? '#NUM!' : '#VALUE!';
     return source[0].map((_, column) => source.map(row => row[column]));
   }
   if (name === 'CHOOSECOLS' || name === 'CHOOSEROWS') {
     if (args.length < 2 || args.length > 254) return '#VALUE!';
-    if (args.some(isError)) return args.find(isError);
+    if (argumentError() !== null) return argumentError();
     const source = matrixValue(args[0]);
     if (!source) return '#VALUE!';
     const size = name === 'CHOOSECOLS' ? source[0].length : source.length;
@@ -838,7 +1106,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'TAKE' || name === 'DROP') {
     if (args.length < 2 || args.length > 3) return '#VALUE!';
-    if (args.some(isError)) return args.find(isError);
+    if (argumentError() !== null) return argumentError();
     const source = matrixValue(args[0]);
     if (!source) return '#VALUE!';
     const dimension = value => {
@@ -865,10 +1133,10 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'EXPAND') {
     if (args.length < 2 || args.length > 4) return '#VALUE!';
-    if (isError(args[0]) || isError(args[1]) || args.length > 2 && isError(args[2])) return [args[0], args[1], args[2]].find(isError);
+    if (argumentError(0, 1, 2) !== null) return argumentError(0, 1, 2);
     const source = matrixValue(args[0]) || [[args[0]]];
-    const rowsValue = numeric(args[1]);
-    const columnsValue = args.length > 2 && args[2] !== null ? numeric(args[2]) : source[0].length;
+    const rowsValue = numericArgument(1);
+    const columnsValue = args.length > 2 && args[2] !== null ? numericArgument(2) : source[0].length;
     if (typeof rowsValue !== 'number' || typeof columnsValue !== 'number') return '#VALUE!';
     const rows = Math.trunc(rowsValue), columns = Math.trunc(columnsValue);
     if (rows < source.length || columns < source[0].length || rows < 1 || columns < 1) return '#VALUE!';
@@ -880,10 +1148,10 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'TOCOL' || name === 'TOROW') {
     if (args.length < 1 || args.length > 3) return '#VALUE!';
-    if (args.some(isError)) return args.find(isError);
+    if (argumentError() !== null) return argumentError();
     const source = matrixValue(args[0]);
     if (!source) return '#VALUE!';
-    const ignoreValue = args.length > 1 && args[1] !== null ? numeric(args[1]) : 0;
+    const ignoreValue = args.length > 1 && args[1] !== null ? numericArgument(1) : 0;
     const scanByColumn = args.length > 2 && args[2] !== null ? logical(args[2]) : false;
     if (typeof ignoreValue !== 'number' || !Number.isInteger(ignoreValue) || ignoreValue < 0 || ignoreValue > 3 || typeof scanByColumn !== 'boolean') return '#VALUE!';
     const values = [];
@@ -899,8 +1167,8 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'WRAPROWS' || name === 'WRAPCOLS') {
     if (args.length < 2 || args.length > 3) return '#VALUE!';
-    if (isError(args[0]) || isError(args[1])) return isError(args[0]) ? args[0] : args[1];
-    const source = matrixValue(args[0]), countValue = numeric(args[1]);
+    if (argumentError(0, 1) !== null) return argumentError(0, 1);
+    const source = matrixValue(args[0]), countValue = numericArgument(1);
     if (!source || typeof countValue !== 'number') return '#VALUE!';
     const wrapCount = Math.trunc(countValue);
     if (wrapCount < 1) return '#NUM!';
@@ -943,8 +1211,8 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'ADDRESS') {
     if (args.length < 2 || args.length > 5) return '#VALUE!';
-    if (args.some(isError)) return args.find(isError);
-    const row = numeric(args[0]), column = numeric(args[1]), absMode = args.length > 2 && args[2] !== null ? numeric(args[2]) : 1;
+    if (argumentError() !== null) return argumentError();
+    const row = numericArgument(0), column = numericArgument(1), absMode = args.length > 2 && args[2] !== null ? numericArgument(2) : 1;
     const a1 = args.length > 3 && args[3] !== null ? logical(args[3]) : true;
     if (typeof row !== 'number' || !Number.isInteger(row) || row < 1 || row > 1048576 || typeof column !== 'number' || !Number.isInteger(column) || column < 1 || column > 16384 || typeof absMode !== 'number' || !Number.isInteger(absMode) || absMode < 1 || absMode > 4 || typeof a1 !== 'boolean') return '#VALUE!';
     let letters = '';
@@ -959,103 +1227,152 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'TEXT') {
     if (args.length !== 2) return '#VALUE!';
-    if (args.some(isError)) return args.find(isError);
-    const format = textValue(args[1]).trim(), match = /^([$€£¥₩])?(#,##0|0)(?:\.([0#]{1,10}))?(%)?$/.exec(format);
-    const value = numeric(args[0]);
+    if (argumentError() !== null) return argumentError();
+    const format = textValue(args[1]).trim();
+    const value = numericArgument(0);
     if (typeof value !== 'number') return value;
-    if (!match) return formatTextDateTime(value, format, context.locale, context.date1904) ?? '#VALUE!';
-    const percent = Boolean(match[4]), scaled = percent ? value * 100 : value;
+    const sections = splitTextFormatSections(format);
+    if (!sections) return '#VALUE!';
+    const parsedSections = sections.map(parseTextFormatCondition);
+    if (parsedSections.some(section => !section)) return '#VALUE!';
+    const conditionIndexes = parsedSections.flatMap((section, index) => section.condition ? [index] : []);
+    if (conditionIndexes.length > 2 || conditionIndexes.some(index => index > 1)) return '#VALUE!';
+    const hasConditions = conditionIndexes.length > 0;
+    let selectedIndex;
+    if (hasConditions) {
+      selectedIndex = conditionIndexes.find(index => matchesTextFormatCondition(value, parsedSections[index].condition));
+      if (selectedIndex === undefined) selectedIndex = parsedSections.findIndex(section => !section.condition);
+      if (selectedIndex < 0) return '#VALUE!';
+    } else selectedIndex = value < 0 && sections.length > 1 ? 1 : value === 0 && sections.length > 2 ? 2 : 0;
+    const selected = parsedSections[selectedIndex].body;
+    const scientificMatch = /^(.*?)0(?:\.([0#]{1,10}))?([Ee])([+-])(0{1,3})(.*?)$/.exec(selected);
+    if (scientificMatch) {
+      const prefix = decodeTextFormatLiteral(scientificMatch[1]), suffix = decodeTextFormatLiteral(scientificMatch[6]);
+      const unquotedLiterals = (scientificMatch[1] + scientificMatch[6]).replace(/"(?:[^"]|"")*"|\\./g, '');
+      if (prefix === null || suffix === null || /[A-Za-z]/.test(unquotedLiterals) || suffix.includes('%')) return '#VALUE!';
+      const decimals = scientificMatch[2] || '', minimumFractionDigits = (decimals.match(/0/g) || []).length;
+      const negativeSection = !hasConditions && selectedIndex === 1 && value < 0;
+      const absolute = negativeSection ? Math.abs(value) : value;
+      const magnitude = Math.abs(absolute);
+      try {
+        const [mantissaText, exponentTextValue] = magnitude.toExponential(decimals.length).split('e');
+        const mantissa = Number(mantissaText), exponent = Number(exponentTextValue);
+        const finalMantissa = new Intl.NumberFormat(context.locale || 'en-US', { useGrouping: false, minimumFractionDigits, maximumFractionDigits: decimals.length }).format(mantissa);
+        const formattedExponent = (exponent < 0 ? '-' : scientificMatch[4] === '+' ? '+' : '') + String(Math.abs(exponent)).padStart(scientificMatch[5].length, '0');
+        const negativeSign = value < 0 && !negativeSection;
+        return textResult(prefix + (negativeSign ? '-' : '') + finalMantissa + scientificMatch[3] + formattedExponent + suffix);
+      } catch { return '#VALUE!'; }
+    }
+    if (!/^(?:[$€£¥₩()+-]|"(?:[^"]|"")*"|\\.)*(?:#,##0|0|#)(?:\.[0#]{1,10})?(?:[$€£¥₩%()+-]|"(?:[^"]|"")*"|\\.)*$/.test(selected)) {
+      const literal = decodeTextFormatLiteral(selected);
+      if (literal !== null) return textResult(literal);
+      const formatted = formatTextDateTime(value, format, context.locale, context.date1904);
+      return !hasConditions && sections.length === 1 && formatted !== null ? textResult(formatted) : '#VALUE!';
+    }
+    const match = /^(.*?)((?:#,##0|0|#))(?:\.([0#]{1,10}))?(.*?)$/.exec(selected);
+    if (!match) {
+      const literal = decodeTextFormatLiteral(selected);
+      return literal === null ? '#VALUE!' : textResult(literal);
+    }
+    const prefix = decodeTextFormatLiteral(match[1]), suffix = decodeTextFormatLiteral(match[4]);
+    const unquotedLiterals = (match[1] + match[4]).replace(/"(?:[^"]|"")*"|\\./g, '');
+    if (prefix === null || suffix === null || /[A-Za-z]/.test(unquotedLiterals)) return '#VALUE!';
+    const negativeSection = !hasConditions && selectedIndex === 1 && value < 0;
+    const percent = suffix.includes('%'), absolute = negativeSection ? Math.abs(value) : value, scaled = percent ? absolute * 100 : absolute;
     if (!Number.isFinite(scaled)) return '#VALUE!';
     const decimals = match[3] || '';
     const minimumFractionDigits = (decimals.match(/0/g) || []).length;
     const maximumFractionDigits = decimals.length;
     try {
       const number = new Intl.NumberFormat(context.locale || 'en-US', { useGrouping: match[2].startsWith('#,'), minimumFractionDigits, maximumFractionDigits }).format(scaled);
-      return (match[1] || '') + number + (percent ? '%' : '');
+      return textResult(prefix + number + suffix);
     } catch { return '#VALUE!'; }
   }
   if (name === 'EXACT') {
     if (args.length !== 2) return '#VALUE!';
-    if (args.some(isError)) return args.find(isError);
+    if (argumentError() !== null) return argumentError();
     return textValue(args[0]) === textValue(args[1]);
   }
   if (name === 'PROPER') {
     if (args.length !== 1) return '#VALUE!';
-    if (isError(args[0])) return args[0];
-    return textValue(args[0]).replace(/\p{L}+/gu, word => {
+    if (argumentError(0) !== null) return argumentError(0);
+    return textResult(textValue(args[0]).replace(/\p{L}+/gu, word => {
       const characters = Array.from(word);
       return characters[0].toLocaleUpperCase() + characters.slice(1).join('').toLocaleLowerCase();
-    });
+    }));
   }
   if (name === 'REPT') {
     if (args.length !== 2) return '#VALUE!';
-    if (args.some(isError)) return args.find(isError);
-    const count = numeric(args[1]);
+    if (argumentError() !== null) return argumentError();
+    const count = numericArgument(1);
     if (typeof count !== 'number' || count < 0) return '#VALUE!';
     const repetitions = Math.floor(count), source = textValue(args[0]);
     if (!source) return '';
     if (repetitions * source.length > 32767) return '#VALUE!';
-    return source.repeat(repetitions);
+    return textResult(source.repeat(repetitions));
   }
   if (name === 'CLEAN') {
     if (args.length !== 1) return '#VALUE!';
-    if (isError(args[0])) return args[0];
-    return textValue(args[0]).replace(/[\x00-\x1F]/g, '');
+    if (argumentError(0) !== null) return argumentError(0);
+    return textResult(textValue(args[0]).replace(/[\x00-\x1F]/g, ''));
   }
   if (name === 'T') {
     if (args.length !== 1) return '#VALUE!';
-    if (isError(args[0])) return args[0];
-    return typeof args[0] === 'string' ? args[0] : '';
+    if (argumentError(0) !== null) return argumentError(0);
+    const value = plainFormulaValue(args[0]);
+    return textResult(typeof value === 'string' ? value : '');
   }
   if (name === 'N') {
     if (args.length !== 1) return '#VALUE!';
     const value = args[0];
-    if (isError(value)) return value;
+    if (argumentError(0) !== null) return argumentError(0);
     return typeof value === 'number' ? value : typeof value === 'boolean' ? Number(value) : 0;
   }
   if (name === 'UNICHAR') {
     if (args.length !== 1) return '#VALUE!';
-    if (isError(args[0])) return args[0];
-    const codePoint = numeric(args[0]);
+    if (argumentError(0) !== null) return argumentError(0);
+    const codePoint = numericArgument(0);
     if (typeof codePoint !== 'number' || !Number.isInteger(codePoint) || codePoint < 1 || codePoint > 0x10ffff || codePoint >= 0xd800 && codePoint <= 0xdfff) return '#VALUE!';
-    return String.fromCodePoint(codePoint);
+    return textResult(String.fromCodePoint(codePoint));
   }
   if (name === 'UNICODE') {
     if (args.length !== 1) return '#VALUE!';
-    if (isError(args[0])) return args[0];
+    if (argumentError(0) !== null) return argumentError(0);
     const characters = Array.from(textValue(args[0]));
     return characters.length ? characters[0].codePointAt(0) : '#VALUE!';
   }
   if (['ISERROR', 'ISERR', 'ISNA'].includes(name)) {
     if (args.length !== 1) return '#VALUE!';
-    const value = args[0];
+    const value = plainFormulaValue(args[0]);
+    if (isTextLiteralArgument(0)) return false;
     if (name === 'ISNA') return value === '#N/A' || value === '#N/A!';
     if (name === 'ISERR') return isError(value) && value !== '#N/A' && value !== '#N/A!';
     return isError(value);
   }
   if (name === 'ERROR.TYPE') {
     if (args.length !== 1) return '#VALUE!';
-    const error = args[0];
+    if (isTextLiteralArgument(0)) return '#N/A';
+    const error = plainFormulaValue(args[0]);
     const type = ERROR_TYPE_CODES.get(error);
     return type ?? '#N/A';
   }
   if (name === 'SIGN') {
     if (args.length !== 1) return '#VALUE!';
-    if (isError(args[0])) return args[0];
-    const value = numeric(args[0]);
+    if (argumentError(0) !== null) return argumentError(0);
+    const value = numericArgument(0);
     return typeof value === 'number' ? Math.sign(value) : '#VALUE!';
   }
   if (name === 'QUOTIENT') {
     if (args.length !== 2) return '#VALUE!';
-    if (args.some(isError)) return args.find(isError);
-    const numerator = numeric(args[0]), denominator = numeric(args[1]);
+    if (argumentError() !== null) return argumentError();
+    const numerator = numericArgument(0), denominator = numericArgument(1);
     if (typeof numerator !== 'number' || typeof denominator !== 'number') return '#VALUE!';
     return denominator === 0 ? '#DIV/0!' : Math.trunc(numerator / denominator);
   }
   if (name === 'EVEN' || name === 'ODD') {
     if (args.length !== 1) return '#VALUE!';
-    if (isError(args[0])) return args[0];
-    const value = numeric(args[0]);
+    if (argumentError(0) !== null) return argumentError(0);
+    const value = numericArgument(0);
     if (typeof value !== 'number') return '#VALUE!';
     if (name === 'EVEN' && value === 0) return 0;
     const magnitude = Math.ceil(Math.abs(value));
@@ -1068,10 +1385,10 @@ function callFunction(name, args, context = {}) {
     return flatten([args[0]]).filter(value => value === null || value === undefined || value === '').length;
   }
   if (name === 'SUBTOTAL') {
-    const error = args.find(isError);
+    const error = argumentError();
     if (error) return error;
     if (args.length < 2 || isFormulaRange(args[0])) return '#VALUE!';
-    const functionNumber = numeric(args[0]);
+    const functionNumber = numericArgument(0);
     if (typeof functionNumber !== 'number' || !Number.isInteger(functionNumber)) return '#VALUE!';
     const functions = { 1: 'AVERAGE', 2: 'COUNT', 3: 'COUNTA', 4: 'MAX', 5: 'MIN', 6: 'PRODUCT', 7: 'STDEV.S', 8: 'STDEV.P', 9: 'SUM', 10: 'VAR.S', 11: 'VAR.P' };
     const code = functionNumber > 100 ? functionNumber - 100 : functionNumber;
@@ -1090,11 +1407,54 @@ function callFunction(name, args, context = {}) {
     }
     return callFunction(aggregate, [included], context);
   }
+  if (name === 'AGGREGATE') {
+    if (args.length < 3 || args.length > 255) return '#VALUE!';
+    const functionNumber = numericArgument(0), option = args[1] === null ? 0 : numericArgument(1);
+    if (typeof functionNumber !== 'number' || !Number.isInteger(functionNumber) || functionNumber < 1 || functionNumber > 19
+      || typeof option !== 'number' || !Number.isInteger(option) || option < 0 || option > 7) return '#VALUE!';
+    const functions = {
+      1: 'AVERAGE', 2: 'COUNT', 3: 'COUNTA', 4: 'MAX', 5: 'MIN', 6: 'PRODUCT', 7: 'STDEV.S',
+      8: 'STDEV.P', 9: 'SUM', 10: 'VAR.S', 11: 'VAR.P', 12: 'MEDIAN', 13: 'MODE.SNGL',
+      14: 'LARGE', 15: 'SMALL', 16: 'PERCENTILE.INC', 17: 'QUARTILE.INC', 18: 'PERCENTILE.EXC', 19: 'QUARTILE.EXC'
+    };
+    const aggregate = functions[functionNumber], needsRank = functionNumber >= 14;
+    if (needsRank ? args.length !== 4 : args.length < 3) return '#VALUE!';
+    if (argumentError(0, 1) !== null) return argumentError(0, 1);
+    const ignoreErrors = option === 2 || option === 3 || option === 6 || option === 7;
+    const ignoreHidden = option === 1 || option === 3 || option === 5 || option === 7;
+    const ignoreNested = option <= 3;
+    const included = [];
+    for (const argument of args.slice(2, needsRank ? 3 : args.length)) {
+      const range = isFormulaRange(argument) ? argument : argument?.[FORMULA_RANGE_METADATA];
+      if (range) {
+        for (const entry of range.entries) {
+          if (ignoreHidden && (context.isFilteredRow?.(range.sheetIndex, entry.row) || context.isManuallyHiddenRow?.(range.sheetIndex, entry.row))) continue;
+          if (ignoreNested && entry.formula && /^\s*(?:SUBTOTAL|AGGREGATE)\s*\(/i.test(entry.formula)) continue;
+          if (isError(entry.value)) {
+            if (ignoreErrors) continue;
+            return plainFormulaValue(entry.value);
+          }
+          included.push(entry.value);
+        }
+        continue;
+      }
+      for (const value of flatten([argument])) {
+        if (isError(value)) {
+          if (ignoreErrors) continue;
+          return plainFormulaValue(value);
+        }
+        included.push(value);
+      }
+    }
+    const aggregateArgs = [included];
+    if (needsRank) aggregateArgs.push(args[3]);
+    return callFunction(aggregate, aggregateArgs, context);
+  }
   if (name === 'FIND' || name === 'SEARCH') {
     if (args.length < 2 || args.length > 3) return '#VALUE!';
-    if (args.some(isError)) return args.find(isError);
+    if (argumentError() !== null) return argumentError();
     const needle = textValue(args[0]), haystack = textValue(args[1]), characters = Array.from(haystack);
-    const start = args.length === 3 ? numeric(args[2]) : 1;
+    const start = args.length === 3 ? numericArgument(2) : 1;
     if (typeof start !== 'number' || !Number.isInteger(start) || start < 1 || start > characters.length + 1) return '#VALUE!';
     const startOffset = characters.slice(0, start - 1).join('').length;
     if (name === 'FIND') {
@@ -1114,8 +1474,8 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'TEXTSPLIT') {
     if (args.length < 2 || args.length > 6) return '#VALUE!';
-    const inputError = flatten(args.slice(0, 5)).find(isError);
-    if (inputError) return inputError;
+    const inputError = argumentError(0, 1, 2, 3, 4);
+    if (inputError !== null) return inputError;
     const source = textValue(args[0]);
     const delimiters = value => {
       if (value === null || value === undefined) return [];
@@ -1124,26 +1484,49 @@ function callFunction(name, args, context = {}) {
     };
     const columnDelimiters = delimiters(args[1]), rowDelimiters = args.length > 2 ? delimiters(args[2]) : [];
     const ignoreEmpty = args.length > 3 && args[3] !== null ? logical(args[3]) : false;
-    const matchMode = args.length > 4 && args[4] !== null ? numeric(args[4]) : 0;
+    const matchMode = args.length > 4 && args[4] !== null ? numericArgument(4) : 0;
     const pad = args.length > 5 && args[5] !== null ? args[5] : '#N/A';
     if (!columnDelimiters.length || columnDelimiters.length + rowDelimiters.length > 256 || columnDelimiters.some(delimiter => !delimiter) || rowDelimiters.some(delimiter => !delimiter) || typeof ignoreEmpty !== 'boolean' || typeof matchMode !== 'number' || ![0, 1].includes(matchMode)) return '#VALUE!';
     columnDelimiters.sort((left, right) => right.length - left.length);
     rowDelimiters.sort((left, right) => right.length - left.length);
     const split = (value, delimiterList) => {
       if (!delimiterList.length) return [value];
-      const result = [], haystack = matchMode ? value.toLocaleLowerCase() : value;
+      const result = [];
+      let searchValue = value, sourceBoundaries = null, sourceSearchOffsets = null;
+      if (matchMode) {
+        searchValue = '';
+        sourceBoundaries = [0];
+        sourceSearchOffsets = new Map([[0, 0]]);
+        let sourceOffset = 0;
+        for (const character of value) {
+          const folded = character.toLocaleLowerCase();
+          searchValue += folded;
+          for (let offset = 1; offset < folded.length; offset++) sourceBoundaries.push(null);
+          sourceOffset += character.length;
+          sourceBoundaries.push(sourceOffset);
+          sourceSearchOffsets.set(sourceOffset, searchValue.length);
+        }
+      }
       let start = 0;
       while (start <= value.length) {
-        let index = -1, selected = null;
+        let index = -1, end = -1;
         for (const delimiter of delimiterList) {
-          const needle = matchMode ? delimiter.toLocaleLowerCase() : delimiter;
-          const candidate = haystack.indexOf(needle, start);
-          if (candidate >= 0 && (index < 0 || candidate < index || candidate === index && delimiter.length > selected.length)) { index = candidate; selected = delimiter; }
+          const needle = matchMode ? Array.from(delimiter, character => character.toLocaleLowerCase()).join('') : delimiter;
+          let candidate = searchValue.indexOf(needle, matchMode ? sourceSearchOffsets.get(start) : start);
+          while (candidate >= 0) {
+            const sourceStart = matchMode ? sourceBoundaries[candidate] : candidate;
+            const sourceEnd = matchMode ? sourceBoundaries[candidate + needle.length] : candidate + needle.length;
+            if (sourceStart !== null && sourceStart !== undefined && sourceEnd !== null && sourceEnd !== undefined) {
+              if (index < 0 || sourceStart < index || sourceStart === index && sourceEnd > end) { index = sourceStart; end = sourceEnd; }
+              break;
+            }
+            candidate = searchValue.indexOf(needle, candidate + 1);
+          }
         }
         if (index < 0) break;
         const part = value.slice(start, index);
         if (!ignoreEmpty || part !== '') result.push(part);
-        start = index + selected.length;
+        start = end;
       }
       const tail = value.slice(start);
       if (!ignoreEmpty || tail !== '') result.push(tail);
@@ -1154,17 +1537,19 @@ function callFunction(name, args, context = {}) {
     const width = Math.max(0, ...rows.map(row => row.length));
     if (!width) return '#CALC!';
     if (rows.length * width > MAX_RANGE_CELLS) return '#NUM!';
-    return rows.map(row => Array.from({ length: width }, (_, index) => row[index] === undefined ? pad : row[index]));
+    return rows.map(row => Array.from({ length: width }, (_, index) => row[index] === undefined
+      ? args.length > 5 ? textResult(pad) : pad
+      : textResult(row[index])));
   }
   if (name === 'TEXTBEFORE' || name === 'TEXTAFTER') {
     if (args.length < 2 || args.length > 6) return '#VALUE!';
-    if (isError(args[0]) || isError(args[1])) return isError(args[0]) ? args[0] : args[1];
+    if (argumentError(0, 1) !== null) return argumentError(0, 1);
     for (const value of args.slice(2, 5)) if (isError(value)) return value;
     const text = Array.from(textValue(args[0])), delimiter = Array.from(textValue(args[1]));
     if (!delimiter.length) return '#VALUE!';
-    const instance = args.length > 2 && args[2] !== null ? numeric(args[2]) : 1;
-    const matchMode = args.length > 3 && args[3] !== null ? numeric(args[3]) : 0;
-    const matchEnd = args.length > 4 && args[4] !== null ? numeric(args[4]) : 0;
+    const instance = args.length > 2 && args[2] !== null ? numericArgument(2) : 1;
+    const matchMode = args.length > 3 && args[3] !== null ? numericArgument(3) : 0;
+    const matchEnd = args.length > 4 && args[4] !== null ? numericArgument(4) : 0;
     if (typeof instance !== 'number' || !Number.isInteger(instance) || instance === 0 || typeof matchMode !== 'number' || ![0, 1].includes(matchMode) || typeof matchEnd !== 'number' || ![0, 1].includes(matchEnd)) return '#VALUE!';
     const equal = (left, right) => matchMode ? left.toLocaleLowerCase() === right.toLocaleLowerCase() : left === right;
     const matches = [];
@@ -1175,41 +1560,62 @@ function callFunction(name, args, context = {}) {
     }
     let selected = instance > 0 ? matches[instance - 1] : matches[matches.length + instance];
     if (selected === undefined && matchEnd) selected = text.length;
-    if (selected === undefined) return args.length > 5 ? args[5] : '#N/A';
+    if (selected === undefined) return args.length > 5 ? textResult(args[5]) : '#N/A';
     const edge = selected + delimiter.length;
     const result = (name === 'TEXTBEFORE' ? text.slice(0, selected) : text.slice(edge)).join('');
-    return result.length > 32767 ? '#VALUE!' : result;
+    return result.length > 32767 ? '#VALUE!' : textResult(result);
   }
   if (name === 'SUBSTITUTE') {
     if (args.length < 3 || args.length > 4) return '#VALUE!';
-    if (args.some(isError)) return args.find(isError);
+    if (argumentError() !== null) return argumentError();
     const source = textValue(args[0]), oldText = textValue(args[1]), newText = textValue(args[2]);
-    if (!oldText) return source;
-    if (args.length === 3) return source.split(oldText).join(newText);
-    const instance = numeric(args[3]);
+    if (!oldText) return textResult(source);
+    if (args.length === 3) return textResult(source.split(oldText).join(newText));
+    const instance = numericArgument(3);
     if (typeof instance !== 'number' || !Number.isInteger(instance) || instance < 1) return '#VALUE!';
     let count = 0;
-    return source.replaceAll(oldText, (match, offset) => ++count === instance ? newText : match);
+    return textResult(source.replaceAll(oldText, (match, offset) => ++count === instance ? newText : match));
   }
   if (name === 'REPLACE') {
     if (args.length !== 4) return '#VALUE!';
-    if (args.some(isError)) return args.find(isError);
-    const source = Array.from(textValue(args[0])), start = numeric(args[1]), count = numeric(args[2]);
+    if (argumentError() !== null) return argumentError();
+    const source = Array.from(textValue(args[0])), start = numericArgument(1), count = numericArgument(2);
     if (typeof start !== 'number' || typeof count !== 'number' || !Number.isInteger(start) || !Number.isInteger(count) || start < 1 || count < 0) return '#VALUE!';
     const beginning = source.slice(0, start - 1), ending = source.slice(start - 1 + count);
-    return [...beginning, ...Array.from(textValue(args[3])), ...ending].join('');
+    return textResult([...beginning, ...Array.from(textValue(args[3])), ...ending].join(''));
   }
   if (name === 'SUMPRODUCT') {
     if (!args.length) return '#VALUE!';
-    const arrays = args.map(value => Array.isArray(value) && value.every(Array.isArray) ? value : [[value]]);
-    const rowCount = arrays[0].length, columnCount = arrays[0][0]?.length || 0;
-    if (!rowCount || !columnCount || arrays.some(array => array.length !== rowCount || array.some(row => row.length !== columnCount))) return '#VALUE!';
+    const arrays = args.map(value => {
+      if (isFormulaRange(value)) {
+        const { top, bottom, left, right } = value.bounds, rows = bottom - top + 1, columns = right - left + 1;
+        if (rows < 1 || columns < 1 || !Number.isSafeInteger(rows * columns)) return null;
+        return { rows, columns, sparse: new Map(value.entries.map(entry => [(entry.row - top) * columns + entry.column - left, entry.value])) };
+      }
+      const values = Array.isArray(value) && value.every(Array.isArray) ? value : [[value]];
+      const rows = values.length, columns = values[0]?.length || 0;
+      if (!rows || !columns || values.some(row => row.length !== columns)) return null;
+      return { rows, columns, values };
+    });
+    const rowCount = arrays[0]?.rows, columnCount = arrays[0]?.columns;
+    if (!rowCount || !columnCount || arrays.some(array => !array || array.rows !== rowCount || array.columns !== columnCount)) return '#VALUE!';
+    for (const array of arrays) {
+      const values = array.sparse ? array.sparse.values() : array.values.flat();
+      for (const value of values) if (isError(value)) return value;
+    }
+    const sparseArrays = arrays.filter(array => array.sparse);
+    let indexes;
+    if (sparseArrays.length === arrays.length) {
+      const smallest = sparseArrays.reduce((left, right) => left.sparse.size <= right.sparse.size ? left : right);
+      indexes = smallest.sparse.keys();
+    } else {
+      indexes = Array.from({ length: rowCount * columnCount }, (_, index) => index);
+    }
     let total = 0;
-    for (let row = 0; row < rowCount; row++) for (let column = 0; column < columnCount; column++) {
+    for (const index of indexes) {
       let product = 1;
       for (const array of arrays) {
-        const value = array[row][column];
-        if (isError(value)) return value;
+        const value = array.sparse ? array.sparse.get(index) : array.values[Math.floor(index / columnCount)][index % columnCount];
         const number = typeof value === 'number' ? value : typeof value === 'boolean' ? Number(value) : 0;
         product *= number;
       }
@@ -1221,40 +1627,48 @@ function callFunction(name, args, context = {}) {
   if (['LEFT', 'RIGHT', 'MID', 'LEN', 'LOWER', 'UPPER', 'TRIM'].includes(name)) {
     const expectedArgs = name === 'LEFT' || name === 'RIGHT' ? [1, 2] : name === 'MID' ? [3, 3] : [1, 1];
     if (args.length < expectedArgs[0] || args.length > expectedArgs[1]) return '#VALUE!';
-    if (args.some(isError)) return args.find(isError);
+    if (argumentError() !== null) return argumentError();
     const characters = Array.from(textValue(args[0]));
     if (name === 'LEN') return characters.length;
-    if (name === 'LOWER') return textValue(args[0]).toLowerCase();
-    if (name === 'UPPER') return textValue(args[0]).toUpperCase();
-    if (name === 'TRIM') return textValue(args[0]).replace(/^ +| +$/g, '').replace(/ {2,}/g, ' ');
-    const rawStart = name === 'MID' ? numeric(args[1]) - 1 : 0;
-    const rawCount = name === 'MID' ? numeric(args[2]) : (args.length === 1 ? 1 : numeric(args[1]));
+    if (name === 'LOWER') return textResult(textValue(args[0]).toLowerCase());
+    if (name === 'UPPER') return textResult(textValue(args[0]).toUpperCase());
+    if (name === 'TRIM') return textResult(textValue(args[0]).replace(/^ +| +$/g, '').replace(/ {2,}/g, ' '));
+    const rawStart = name === 'MID' ? numericArgument(1) - 1 : 0;
+    const rawCount = name === 'MID' ? numericArgument(2) : (args.length === 1 ? 1 : numericArgument(1));
     if (typeof rawStart !== 'number' || typeof rawCount !== 'number') return '#VALUE!';
     const start = Math.trunc(rawStart), count = Math.trunc(rawCount);
     if (count < 0 || (name === 'MID' && rawStart < 0)) return '#VALUE!';
-    if (name === 'LEFT') return characters.slice(0, count).join('');
-    if (name === 'RIGHT') return characters.slice(Math.max(0, characters.length - count)).join('');
-    return characters.slice(start, start + count).join('');
+    if (name === 'LEFT') return textResult(characters.slice(0, count).join(''));
+    if (name === 'RIGHT') return textResult(characters.slice(Math.max(0, characters.length - count)).join(''));
+    return textResult(characters.slice(start, start + count).join(''));
   }
   if (name === 'CONCAT' || name === 'CONCATENATE') {
-    if (!args.length || (name === 'CONCATENATE' && args.length > 255)) return '#VALUE!';
-    if (values.some(isError)) return values.find(isError);
-    return values.map(textValue).join('');
+    if (!args.length || name === 'CONCAT' && args.length > 253 || name === 'CONCATENATE' && args.length > 255) return '#VALUE!';
+    if (argumentError() !== null) return argumentError();
+    const parts = flattenTextArguments(args.map((_, index) => index));
+    const error = parts.find(value => isError(value) && !value?.[FORMULA_TYPED_TEXT]);
+    if (error) return error;
+    const result = parts.map(textValue).join('');
+    return Array.from(result).length > 32767 ? '#VALUE!' : textResult(result);
   }
   if (name === 'TEXTJOIN') {
     if (args.length < 3 || args.length > 254) return '#VALUE!';
-    if (isError(args[0]) || isError(args[1])) return isError(args[0]) ? args[0] : args[1];
+    if (argumentError(0, 1) !== null) return argumentError(0, 1);
     const delimiter = textValue(args[0]), ignoreEmpty = logical(args[1]);
     if (isError(ignoreEmpty)) return ignoreEmpty;
     if (typeof ignoreEmpty !== 'boolean') return '#VALUE!';
-    const parts = flatten(args.slice(2));
-    if (parts.some(isError)) return parts.find(isError);
+    const parts = flattenTextArguments(args.slice(2).map((_, index) => index + 2));
+    if (argumentError(...Array.from({ length: Math.max(0, args.length - 2) }, (_, index) => index + 2)) !== null) return argumentError(...Array.from({ length: Math.max(0, args.length - 2) }, (_, index) => index + 2));
+    const error = parts.find(value => isError(value) && !value?.[FORMULA_TYPED_TEXT]);
+    if (error) return error;
     const result = parts.filter(value => !ignoreEmpty || textValue(value) !== '').map(textValue).join(delimiter);
-    return Array.from(result).length > 32767 ? '#VALUE!' : result;
+    return Array.from(result).length > 32767 ? '#VALUE!' : textResult(result);
   }
   if (name === 'COUNTIF' || name === 'SUMIF' || name === 'AVERAGEIF') {
     if ((name === 'COUNTIF' && args.length !== 2) || (name !== 'COUNTIF' && (args.length < 2 || args.length > 3))) return '#VALUE!';
-    const criteriaRange = args[0], criteria = args[1], sumRange = args[2] ?? criteriaRange;
+    if (argumentError(1) !== null) return argumentError(1);
+    const criteriaRange = args[0], criteria = criteriaArgument(1), sumRange = args[2] ?? criteriaRange;
+    const criterionText = isTextLiteralArgument(1);
     if (isFormulaRange(criteriaRange) || isFormulaRange(sumRange)) {
       const criteriaBounds = isFormulaRange(criteriaRange) ? criteriaRange.bounds : criteriaRange?.[FORMULA_RANGE_METADATA]?.bounds;
       const sumMetadata = isFormulaRange(sumRange) ? sumRange : sumRange?.[FORMULA_RANGE_METADATA];
@@ -1276,7 +1690,7 @@ function callFunction(name, args, context = {}) {
       let count = 0, sum = 0;
       for (const position of positions) {
         const value = criteriaValues.get(position) ?? null;
-        if (!criterionMatch(value, criteria)) continue;
+        if (!criterionMatch(value, criteria, criterionText)) continue;
         if (name === 'COUNTIF') { count++; continue; }
         const [row, column] = position.split(':').map(Number);
         const number = row < sumHeight && column < sumWidth ? sumValues.get(position) ?? null : null;
@@ -1287,14 +1701,14 @@ function callFunction(name, args, context = {}) {
         count++;
       }
       const criteriaCellCount = isFormulaRange(criteriaRange) ? criteriaRange.cellCount : criteriaHeight * criteriaWidth;
-      if (name === 'COUNTIF') return count + (criterionMatch(null, criteria) ? criteriaCellCount - positions.size : 0);
+      if (name === 'COUNTIF') return count + (criterionMatch(null, criteria, criterionText) ? criteriaCellCount - positions.size : 0);
       return name === 'SUMIF' ? sum : count ? sum / count : '#DIV/0!';
     }
     const pairs = criteriaPairs(criteriaRange, sumRange);
     if (!pairs) return '#VALUE!';
     let count = 0, sum = 0;
     for (const [value, number] of pairs) {
-      if (!criterionMatch(value, criteria)) continue;
+      if (!criterionMatch(value, criteria, criterionText)) continue;
       if (name === 'COUNTIF') { count++; continue; }
       if (isError(number)) return number;
       if (typeof number !== 'number' || !Number.isFinite(number)) continue;
@@ -1308,19 +1722,22 @@ function callFunction(name, args, context = {}) {
   if (name === 'COUNTIFS' || name === 'SUMIFS' || name === 'AVERAGEIFS' || name === 'MAXIFS' || name === 'MINIFS') {
     const hasSumRange = name !== 'COUNTIFS';
     const firstCriteria = hasSumRange ? 1 : 0;
+    if ((name === 'MAXIFS' || name === 'MINIFS') && args.length > 253) return '#VALUE!';
     if (args.length < (hasSumRange ? 3 : 2) || (args.length - firstCriteria) % 2 !== 0) return '#VALUE!';
     const sparseSumRange = hasSumRange ? args[0] : null;
     const sparseConditions = [];
-    for (let index = firstCriteria; index < args.length; index += 2) sparseConditions.push([args[index], args[index + 1]]);
+    for (let index = firstCriteria; index < args.length; index += 2) sparseConditions.push([args[index], criteriaArgument(index + 1)]);
+    const criteriaErrors = argumentError(...sparseConditions.flatMap((_, index) => [firstCriteria + index * 2 + 1]));
+    if (criteriaErrors !== null) return criteriaErrors;
     if (sparseConditions.some(([range]) => isFormulaRange(range)) || isFormulaRange(sparseSumRange)) {
       const sparseRanges = [...sparseConditions.map(([range]) => range), ...(hasSumRange ? [sparseSumRange] : [])];
       if (!sameSparseShape(sparseRanges)) return '#VALUE!';
-      const conditionMaps = sparseConditions.map(([range, criterion]) => [sparseRangeIndex(range), criterion]);
+      const conditionMaps = sparseConditions.map(([range, criterion], index) => [sparseRangeIndex(range), criterion, isTextLiteralArgument(firstCriteria + index * 2 + 1)]);
       const sumValues = hasSumRange ? sparseRangeIndex(sparseSumRange) : null;
       const positions = sparsePositionUnion(sparseRanges);
       let count = 0, sum = 0, extreme = null;
       for (const position of positions) {
-        if (!conditionMaps.every(([range, criterion]) => criterionMatch(range.has(position) ? range.get(position) : null, criterion))) continue;
+        if (!conditionMaps.every(([range, criterion, textCriterion]) => criterionMatch(range.has(position) ? range.get(position) : null, criterion, textCriterion))) continue;
         if (!hasSumRange) { count++; continue; }
         const value = sumValues.has(position) ? sumValues.get(position) : null;
         if (isError(value)) return value;
@@ -1334,20 +1751,24 @@ function callFunction(name, args, context = {}) {
         count++;
       }
       if (name === 'COUNTIFS') {
-        if (conditionMaps.every(([, criterion]) => criterionMatch(null, criterion))) count += sparseRanges[0].cellCount - positions.size;
+        if (conditionMaps.every(([, criterion, textCriterion]) => criterionMatch(null, criterion, textCriterion))) count += sparseRanges[0].cellCount - positions.size;
         return count;
       }
       if (name === 'MAXIFS' || name === 'MINIFS') return extreme ?? 0;
       return name === 'SUMIFS' ? sum : count ? sum / count : '#DIV/0!';
     }
+    const shapeRanges = [];
+    if (hasSumRange) shapeRanges.push(args[0]);
+    for (let index = firstCriteria; index < args.length; index += 2) shapeRanges.push(args[index]);
+    if (!sameFormulaArrayShape(shapeRanges)) return '#VALUE!';
     const sumRange = hasSumRange ? flatten([args[0]]) : null;
     const conditions = [];
-    for (let index = firstCriteria; index < args.length; index += 2) conditions.push([flatten([args[index]]), args[index + 1]]);
+    for (let index = firstCriteria; index < args.length; index += 2) conditions.push([flatten([args[index]]), criteriaArgument(index + 1), isTextLiteralArgument(index + 1)]);
     const length = conditions[0][0].length;
     if (conditions.some(([range]) => range.length !== length) || (sumRange && sumRange.length !== length)) return '#VALUE!';
     let count = 0, sum = 0, extreme = null;
     for (let offset = 0; offset < length; offset++) {
-      if (!conditions.every(([range, criterion]) => criterionMatch(range[offset], criterion))) continue;
+      if (!conditions.every(([range, criterion, textCriterion]) => criterionMatch(range[offset], criterion, textCriterion))) continue;
       if (!hasSumRange) { count++; continue; }
       const value = sumRange[offset];
       if (isError(value)) return value;
@@ -1367,50 +1788,68 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'XLOOKUP') {
     if (args.length < 3 || args.length > 6) return '#VALUE!';
-    if (isError(args[1]) || isError(args[2])) return isError(args[1]) ? args[1] : args[2];
-    const lookupMatrix = matrixValue(args[1]) ?? (!Array.isArray(args[1]) ? [[args[1]]] : null);
-    const returnMatrix = matrixValue(args[2]) ?? (!Array.isArray(args[2]) ? [[args[2]]] : null);
-    if (!lookupMatrix || !returnMatrix) return '#VALUE!';
-    const lookupHorizontal = lookupMatrix.length === 1;
-    if (!lookupHorizontal && lookupMatrix.some(row => row.length !== 1)) return '#VALUE!';
-    const lookupValues = lookupHorizontal ? lookupMatrix[0] : lookupMatrix.map(row => row[0]);
-    if (!lookupValues.length || (lookupHorizontal ? returnMatrix[0].length : returnMatrix.length) !== lookupValues.length) return '#VALUE!';
-    const matchMode = args.length > 4 && args[4] !== null ? numeric(args[4]) : 0;
-    const searchMode = args.length > 5 && args[5] !== null ? numeric(args[5]) : 1;
+    const lookupArgumentError = argumentError(1, 2, 4, 5);
+    if (lookupArgumentError !== null) return lookupArgumentError;
+    const sparseView = value => {
+      if (!isFormulaRange(value)) return null;
+      const { top, bottom, left, right } = value.bounds;
+      const rows = bottom - top + 1, columns = right - left + 1;
+      const values = new Map(value.entries.map(entry => [entry.row + ':' + entry.column, entry.value]));
+      return { rows, columns, top, left, entries: value.entries, get: (row, column) => values.get((top + row) + ':' + (left + column)) ?? null };
+    };
+    const lookupSparse = sparseView(args[1]), returnSparse = sparseView(args[2]);
+    const lookupMatrix = lookupSparse ? null : matrixValue(args[1]) ?? (!Array.isArray(args[1]) ? [[args[1]]] : null);
+    const returnMatrix = returnSparse ? null : matrixValue(args[2]) ?? (!Array.isArray(args[2]) ? [[args[2]]] : null);
+    if ((!lookupSparse && !lookupMatrix) || (!returnSparse && !returnMatrix)) return '#VALUE!';
+    const lookupRows = lookupSparse?.rows ?? lookupMatrix.length, lookupColumns = lookupSparse?.columns ?? lookupMatrix[0]?.length ?? 0;
+    const lookupHorizontal = lookupRows === 1;
+    if (!lookupHorizontal && lookupColumns !== 1) return '#VALUE!';
+    const lookupLength = lookupHorizontal ? lookupColumns : lookupRows;
+    const lookupAt = index => lookupSparse ? lookupSparse.get(lookupHorizontal ? 0 : index, lookupHorizontal ? index : 0) : lookupHorizontal ? lookupMatrix[0][index] : lookupMatrix[index][0];
+    const returnRows = returnSparse?.rows ?? returnMatrix.length, returnColumns = returnSparse?.columns ?? returnMatrix[0]?.length ?? 0;
+    if (!lookupLength || (lookupHorizontal ? returnColumns : returnRows) !== lookupLength) return '#VALUE!';
+    const returnAt = (row, column) => returnSparse ? returnSparse.get(row, column) : returnMatrix[row]?.[column] ?? null;
+    const matchMode = args.length > 4 && args[4] !== null ? numericArgument(4) : 0;
+    const searchMode = args.length > 5 && args[5] !== null ? numericArgument(5) : 1;
     if (typeof matchMode !== 'number' || ![-1, 0, 1, 2].includes(matchMode) || typeof searchMode !== 'number' || ![1, -1, 2, -2].includes(searchMode)) return '#VALUE!';
-    if (isError(args[0])) return args[0];
+    if (argumentError(0) !== null) return argumentError(0);
     let found = -1;
-    const matches = candidate => matchMode === 2
+    const lookupKey = matchMode === 0 ? exactLookupValue(args[0]) : isTextLiteralArgument(0) ? comparable(args[0]) : lookupValue(args[0], false);
+    const matches = candidate => isTextLiteralArgument(0) && candidate?.[FORMULA_TYPED_ERROR] ? false : matchMode === 2
       ? criterionMatch(candidate, args[0])
-      : lookupValue(candidate, false) === lookupValue(args[0], false);
+      : matchMode === 0 ? exactLookupValue(candidate) === lookupKey
+        : isTextLiteralArgument(0) ? comparable(candidate) === lookupKey : lookupValue(candidate, false) === lookupKey;
     if ((searchMode === 2 || searchMode === -2) && matchMode !== 2) {
-      const sought = comparable(args[0]), ascending = searchMode === 2;
-      let low = 0, high = lookupValues.length - 1, candidateIndex = -1;
+      const sought = matchMode === 0 ? exactLookupValue(args[0]) : comparable(args[0]), ascending = searchMode === 2;
+      let low = 0, high = lookupLength - 1, candidateIndex = -1;
       while (low <= high) {
-        const middle = (low + high) >> 1, candidate = lookupValues[middle];
+        const middle = (low + high) >> 1, candidate = lookupAt(middle);
         if (isError(candidate)) return candidate;
         if (matches(candidate)) { found = middle; break; }
-        const current = comparable(candidate);
-        if (typeof current !== typeof sought) return '#N/A';
-        if (current < sought) {
+        const current = matchMode === 0 ? exactLookupValue(candidate) : comparable(candidate);
+        const comparison = matchMode === 0 ? sortCompareValues(current, sought, context.locale || 'en') : typeof current !== typeof sought ? null : current < sought ? -1 : current > sought ? 1 : 0;
+        if (comparison === null) return '#N/A';
+        if (comparison < 0) {
           if (matchMode === -1) candidateIndex = middle;
           if (ascending) low = middle + 1;
           else high = middle - 1;
-        } else {
+        } else if (comparison > 0) {
           if (matchMode === 1) candidateIndex = middle;
           if (ascending) high = middle - 1;
           else low = middle + 1;
-        }
+        } else low = middle + 1;
       }
       if (found < 0) found = candidateIndex;
     } else {
-      const order = Array.from({ length: lookupValues.length }, (_, index) => searchMode === -1 ? lookupValues.length - index - 1 : index);
-      for (const index of order) if (matches(lookupValues[index])) { found = index; break; }
+      const order = lookupSparse
+        ? lookupSparse.entries.map(entry => lookupHorizontal ? entry.column - lookupSparse.left : entry.row - lookupSparse.top).sort((left, right) => searchMode === -1 ? right - left : left - right)
+        : Array.from({ length: lookupLength }, (_, index) => searchMode === -1 ? lookupLength - index - 1 : index);
+      for (const index of order) if (matches(lookupAt(index))) { found = index; break; }
       if (found < 0 && matchMode !== 0 && matchMode !== 2) {
         const sought = comparable(args[0]);
         let best = null;
         for (const index of order) {
-          const candidate = lookupValues[index];
+          const candidate = lookupAt(index);
           if (isError(candidate)) continue;
           const current = comparable(candidate);
           if (typeof current !== typeof sought) continue;
@@ -1424,22 +1863,71 @@ function callFunction(name, args, context = {}) {
     if (found < 0) return args.length > 3 && args[3] !== null ? args[3] : '#N/A';
     const normalizeBlank = value => value === null || value === undefined ? 0 : value;
     if (lookupHorizontal) {
-      if (returnMatrix.length === 1) return normalizeBlank(returnMatrix[0][found]);
-      return returnMatrix.map(row => [normalizeBlank(row[found])]);
+      if (returnRows === 1) return normalizeBlank(returnAt(0, found));
+      return Array.from({ length: returnRows }, (_, row) => [normalizeBlank(returnAt(row, found))]);
     }
-    const resultRow = returnMatrix[found].map(normalizeBlank);
+    const resultRow = Array.from({ length: returnColumns }, (_, column) => normalizeBlank(returnAt(found, column)));
     return resultRow.length === 1 ? resultRow[0] : [resultRow];
   }
   if (name === 'VLOOKUP' || name === 'HLOOKUP') {
     if (args.length < 3 || args.length > 4) return '#VALUE!';
-    const table = matrix(args[1]), indexNumber = numeric(args[2]);
-    if (!table || typeof indexNumber !== 'number' || !Number.isInteger(indexNumber) || indexNumber < 1) return '#VALUE!';
+    if (argumentError(0, 1, 2, 3) !== null) return argumentError(0, 1, 2, 3);
+    const sparse = isFormulaRange(args[1]) ? args[1] : null;
+    const table = sparse ? null : matrix(args[1]), indexNumber = numericArgument(2);
+    if ((!sparse && !table) || typeof indexNumber !== 'number' || !Number.isInteger(indexNumber) || indexNumber < 1) return '#VALUE!';
     const horizontal = name === 'HLOOKUP';
-    const outerSize = horizontal ? table[0]?.length || 0 : table.length;
-    const innerSize = horizontal ? table.length : Math.max(0, ...table.map(row => row.length));
+    const { top = 0, bottom = (table?.length || 0) - 1, left = 0, right = (table?.[0]?.length || 0) - 1 } = sparse?.bounds || {};
+    const outerSize = sparse ? horizontal ? right - left + 1 : bottom - top + 1 : horizontal ? table[0]?.length || 0 : table.length;
+    const innerSize = sparse ? horizontal ? bottom - top + 1 : right - left + 1 : horizontal ? table.length : Math.max(0, ...table.map(row => row.length));
     if (indexNumber > innerSize || !outerSize) return '#REF!';
-    const approximate = args.length < 4 || (args[3] !== false && args[3] !== 0);
-    const keys = Array.from({ length: outerSize }, (_, index) => horizontal ? table[0]?.[index] : table[index]?.[0]);
+    let approximate = args.length < 4;
+    if (args.length > 3) {
+      if (args[3] === null) approximate = false;
+      else if (args[3] === '') return '#VALUE!';
+      else {
+        let rangeLookup = logicalArgument(3);
+        if (typeof rangeLookup !== 'boolean') {
+          rangeLookup = numericArgument(3);
+          if (typeof rangeLookup !== 'number') return rangeLookup;
+          rangeLookup = rangeLookup !== 0;
+        }
+        approximate = rangeLookup;
+      }
+    }
+    let positions = null;
+    let keys;
+    if (sparse) {
+      const coordinate = new Map(sparse.entries.map(entry => [(entry.row - top) + ':' + (entry.column - left), entry.value]));
+      const populated = new Map();
+      for (const entry of sparse.entries) {
+        const position = horizontal ? entry.column - left : entry.row - top;
+        if (horizontal ? entry.row === top : entry.column === left) populated.set(position, entry.value);
+      }
+      positions = [...populated.keys()].sort((a, b) => a - b);
+      keys = positions.map(position => populated.get(position));
+      if (!approximate && exactLookupValue(args[0]) === '') {
+        let cursor = 0, blankPosition = -1;
+        for (let index = 0; index < positions.length; index++) {
+          const position = positions[index];
+          if (position > cursor) { blankPosition = cursor; break; }
+          if (exactLookupValue(keys[index]) === '') { blankPosition = position; break; }
+          cursor = position + 1;
+        }
+        if (blankPosition < 0 && cursor < outerSize) blankPosition = cursor;
+        if (blankPosition >= 0) {
+          const value = horizontal ? coordinate.get((indexNumber - 1) + ':' + blankPosition) : coordinate.get(blankPosition + ':' + (indexNumber - 1));
+          return value === null || value === undefined ? 0 : value;
+        }
+      }
+      const found = lookupIndex(keys, args[0], approximate, approximate);
+      if (typeof found === 'string') return found;
+      if (found < 0) return '#N/A';
+      const offset = positions[found], value = horizontal
+        ? coordinate.get((indexNumber - 1) + ':' + offset)
+        : coordinate.get(offset + ':' + (indexNumber - 1));
+      return value === null || value === undefined ? 0 : value;
+    }
+    keys = Array.from({ length: outerSize }, (_, index) => horizontal ? table[0]?.[index] : table[index]?.[0]);
     const found = lookupIndex(keys, args[0], approximate, approximate);
     if (typeof found === 'string') return found;
     if (found < 0) return '#N/A';
@@ -1448,8 +1936,16 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'LOOKUP') {
     if (args.length < 2 || args.length > 3) return '#VALUE!';
-    if (isError(args[0]) || isError(args[1]) || isError(args[2])) return args.find(isError);
+    if (argumentError(0, 1, 2) !== null) return argumentError(0, 1, 2);
     const toVector = value => {
+      if (isFormulaRange(value)) {
+        const { top, bottom, left, right } = value.bounds;
+        const rows = bottom - top + 1, columns = right - left + 1;
+        if (rows !== 1 && columns !== 1) return null;
+        const horizontal = rows === 1, length = horizontal ? columns : rows;
+        const entries = new Map(value.entries.map(entry => [horizontal ? entry.column - left : entry.row - top, entry.value]));
+        return { sparse: true, length, positions: [...entries.keys()].sort((a, b) => a - b), entries };
+      }
       const source = matrixValue(value) ?? (!Array.isArray(value) ? [[value]] : null);
       if (!source) return null;
       if (source.length === 1) return source[0];
@@ -1457,69 +1953,122 @@ function callFunction(name, args, context = {}) {
       return source.map(row => row[0]);
     };
     const lookupVector = toVector(args[1]);
-    if (!lookupVector?.length) return '#VALUE!';
+    if (!lookupVector || !lookupVector.length) return '#VALUE!';
     const resultVector = args.length === 3 ? toVector(args[2]) : lookupVector;
     if (!resultVector || resultVector.length !== lookupVector.length) return '#VALUE!';
-    const found = lookupIndex(lookupVector, args[0], true, true);
+    const keys = lookupVector.sparse
+      ? lookupVector.positions.map(position => lookupVector.entries.get(position))
+      : lookupVector;
+    const found = lookupIndex(keys, args[0], true, true);
     if (typeof found === 'string') return found;
     if (found < 0) return '#N/A';
-    return resultVector[found] ?? 0;
+    const position = lookupVector.sparse ? lookupVector.positions[found] : found;
+    return (resultVector.sparse ? resultVector.entries.get(position) : resultVector[position]) ?? 0;
   }
   if (name === 'MATCH' || name === 'XMATCH') {
     if (args.length < 2 || args.length > (name === 'XMATCH' ? 4 : 3)) return '#VALUE!';
-    const range = flatten([args[1]]);
+    if (argumentError() !== null) return argumentError();
+    const sparseRange = isFormulaRange(args[1]) ? args[1] : null;
+    let range;
+    let sparsePositions = null;
+    if (sparseRange) {
+      const { top, bottom, left, right } = sparseRange.bounds;
+      const horizontal = top === bottom, vertical = left === right;
+      if (!horizontal && !vertical) return '#VALUE!';
+      const length = horizontal ? right - left + 1 : bottom - top + 1;
+      const offset = new Map(sparseRange.entries.map(entry => [horizontal ? entry.column - left : entry.row - top, entry.value]));
+      sparsePositions = sparseRange.entries.map(entry => ({ index: horizontal ? entry.column - left : entry.row - top, value: entry.value }));
+      range = { length, at: index => offset.get(index) ?? null };
+    } else {
+      const values = flatten([args[1]]);
+      range = { length: values.length, at: index => values[index] };
+    }
+    const valueAt = index => range.at(index), length = range.length;
     if (name === 'XMATCH') {
       if (args.length > 4) return '#VALUE!';
-      const mode = args.length < 3 ? 0 : numeric(args[2]), searchMode = args.length < 4 ? 1 : numeric(args[3]);
+      const mode = args.length < 3 ? 0 : numericArgument(2), searchMode = args.length < 4 ? 1 : numericArgument(3);
       if (typeof mode !== 'number' || ![-1, 0, 1, 2].includes(mode) || typeof searchMode !== 'number' || ![-2, -1, 1, 2].includes(searchMode)) return '#VALUE!';
-      const sought = comparable(args[0]);
+      const sought = mode === 0 ? exactLookupValue(args[0]) : comparable(args[0]);
       const matches = value => mode === 2
         ? typeof args[0] === 'string' && criterionMatch(value, args[0])
-        : comparable(value) === sought;
+        : (mode === 0 ? exactLookupValue(value) : comparable(value)) === sought;
       if (searchMode === 1 || searchMode === -1) {
-        const start = searchMode === 1 ? 0 : range.length - 1, end = searchMode === 1 ? range.length : -1, step = searchMode;
+        if (sparsePositions && (mode === 0 || mode === 2)) {
+          if (mode === 0 && sought === '') {
+            let cursor = searchMode === 1 ? 0 : length - 1;
+            const entries = searchMode === 1 ? sparsePositions : [...sparsePositions].reverse();
+            for (const entry of entries) {
+              if (searchMode === 1 ? entry.index > cursor : entry.index < cursor) return cursor + 1;
+              if (exactLookupValue(entry.value) === '') return entry.index + 1;
+              cursor = entry.index + searchMode;
+            }
+            if (searchMode === 1 ? cursor < length : cursor >= 0) return cursor + 1;
+            return '#N/A';
+          }
+          const entries = searchMode === 1 ? sparsePositions : [...sparsePositions].reverse();
+          for (const entry of entries) if (matches(entry.value)) return entry.index + 1;
+          return '#N/A';
+        }
+        const start = searchMode === 1 ? 0 : length - 1, end = searchMode === 1 ? length : -1, step = searchMode;
         let next = -1;
         for (let index = start; index !== end; index += step) {
-          if (matches(range[index])) return index + 1;
+          if (matches(valueAt(index))) return index + 1;
           if (mode !== 0 && mode !== 2) {
-            const candidate = comparable(range[index]);
+            const candidate = comparable(valueAt(index));
             if (typeof candidate === typeof sought && (mode === -1 ? candidate < sought : candidate > sought)) {
-              if (next < 0 || (mode === -1 ? comparable(range[next]) < candidate : comparable(range[next]) > candidate)) next = index;
+              if (next < 0 || (mode === -1 ? comparable(valueAt(next)) < candidate : comparable(valueAt(next)) > candidate)) next = index;
             }
           }
         }
         return next < 0 ? '#N/A' : next + 1;
       }
-      let low = 0, high = range.length - 1, candidateIndex = -1;
+      let low = 0, high = length - 1, candidateIndex = -1;
       while (low <= high) {
-        const middle = (low + high) >> 1, candidate = comparable(range[middle]);
-        if (matches(range[middle])) return middle + 1;
-        if (typeof candidate !== typeof sought) return '#N/A';
+        const middle = Math.floor((low + high) / 2), candidate = mode === 0 ? exactLookupValue(valueAt(middle)) : comparable(valueAt(middle));
+        if (matches(valueAt(middle))) return middle + 1;
         const ascending = searchMode === 2;
-        if (candidate < sought) {
+        const comparison = mode === 0 ? sortCompareValues(candidate, sought) : typeof candidate !== typeof sought ? null : candidate < sought ? -1 : candidate > sought ? 1 : 0;
+        if (comparison === null) return '#N/A';
+        if (comparison < 0) {
           if (mode === -1) candidateIndex = middle;
           if (ascending) low = middle + 1;
           else high = middle - 1;
-        } else {
+        } else if (comparison > 0) {
           if (mode === 1) candidateIndex = middle;
           if (ascending) high = middle - 1;
           else low = middle + 1;
-        }
+        } else low = middle + 1;
       }
       return candidateIndex < 0 ? '#N/A' : candidateIndex + 1;
     }
-    const mode = args.length < 3 ? 1 : numeric(args[2]);
+    const mode = args.length < 3 ? 1 : numericArgument(2);
     if (typeof mode !== 'number' || ![-1, 0, 1].includes(mode)) return '#VALUE!';
     if (mode === 0) {
-      const sought = lookupValue(args[0], false);
-      const found = range.findIndex(value => typeof sought === 'string' && /[*?~]/.test(sought)
-        ? criterionMatch(value, args[0])
-        : lookupValue(value, false) === sought);
+      const sought = exactLookupValue(args[0]);
+      if (sparsePositions && sought === '') {
+        let cursor = 0;
+        for (const entry of sparsePositions) {
+          if (entry.index > cursor) return cursor + 1;
+          if (exactLookupValue(entry.value) === '') return entry.index + 1;
+          cursor = entry.index + 1;
+        }
+        return cursor < length ? cursor + 1 : '#N/A';
+      }
+      if (sparsePositions) {
+        for (const entry of sparsePositions) if (typeof sought === 'string' && /[*?~]/.test(sought)
+          ? criterionMatch(entry.value, args[0])
+          : exactLookupValue(entry.value) === sought) return entry.index + 1;
+        return '#N/A';
+      }
+      let found = -1;
+      for (let index = 0; index < length; index++) if (typeof sought === 'string' && /[*?~]/.test(sought)
+        ? criterionMatch(valueAt(index), args[0])
+        : exactLookupValue(valueAt(index)) === sought) { found = index; break; }
       return found < 0 ? '#N/A' : found + 1;
     }
     let found = -1;
-    for (let index = 0; index < range.length; index++) {
-      const candidate = comparable(range[index]), sought = comparable(args[0]);
+    for (let index = 0; index < length; index++) {
+      const candidate = comparable(valueAt(index)), sought = comparable(args[0]);
       if (typeof candidate !== typeof sought) continue;
       if (candidate === sought) { found = index; continue; }
       if (mode === 1 && candidate < sought) found = index;
@@ -1529,70 +2078,94 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'INDEX') {
     if (args.length < 2 || args.length > 3) return '#VALUE!';
-    const row = numeric(args[1]), column = args.length === 3 ? numeric(args[2]) : 1;
-    if (typeof row !== 'number' || typeof column !== 'number' || !Number.isInteger(row) || !Number.isInteger(column) || row < 1 || column < 1) return '#VALUE!';
-    if (isFormulaRange(args[0])) {
-      const range = args[0], height = range.bounds.bottom - range.bounds.top + 1, width = range.bounds.right - range.bounds.left + 1;
-      if (row > height || column > width) return '#REF!';
-      const entry = range.entries.find(item => item.row === range.bounds.top + row - 1 && item.column === range.bounds.left + column - 1);
-      return entry?.value ?? 0;
+    if (argumentError(0, 1, 2) !== null) return argumentError(0, 1, 2);
+    if (args.length === 2 && args[1] === null || args.length === 3 && args[1] === null && args[2] === null) return '#VALUE!';
+    const row = args[1] === null && args.length === 3 ? 0 : numericArgument(1);
+    const column = args.length === 3 && args[2] !== null ? numericArgument(2) : 1;
+    if (typeof row !== 'number' || typeof column !== 'number' || !Number.isInteger(row) || !Number.isInteger(column) || row < 0 || column < 0) return '#VALUE!';
+    const sparse = isFormulaRange(args[0]) ? args[0] : null;
+    const range = sparse ? null : matrixValue(args[0]) ?? (!Array.isArray(args[0]) ? [[args[0]]] : null);
+    if (!sparse && !range) return '#VALUE!';
+    const height = sparse ? sparse.bounds.bottom - sparse.bounds.top + 1 : range.length;
+    const width = sparse ? sparse.bounds.right - sparse.bounds.left + 1 : range[0]?.length ?? 0;
+    if (row > height || column > width) return '#REF!';
+    const outputRows = row === 0 ? height : 1, outputColumns = column === 0 ? width : 1;
+    if (outputRows * outputColumns > MAX_RANGE_CELLS) {
+      if (!sparse || !context.formulaArgumentDepth) return '#NUM!';
+      const bounds = {
+        top: row === 0 ? sparse.bounds.top : sparse.bounds.top + row - 1,
+        bottom: row === 0 ? sparse.bounds.bottom : sparse.bounds.top + row - 1,
+        left: column === 0 ? sparse.bounds.left : sparse.bounds.left + column - 1,
+        right: column === 0 ? sparse.bounds.right : sparse.bounds.left + column - 1
+      };
+      return {
+        [FORMULA_RANGE]: true,
+        bounds,
+        entries: sparse.entries.filter(entry => entry.row >= bounds.top && entry.row <= bounds.bottom && entry.column >= bounds.left && entry.column <= bounds.right),
+        cellCount: outputRows * outputColumns,
+        sheetIndex: sparse.sheetIndex
+      };
     }
-    const range = matrix(args[0]);
-    if (!range) return '#VALUE!';
-    if (row > range.length || column > Math.max(0, ...range.map(line => line.length))) return '#REF!';
-    return range[row - 1]?.[column - 1] ?? 0;
+    const sparseValues = sparse ? new Map(sparse.entries.map(entry => [`${entry.row - sparse.bounds.top}:${entry.column - sparse.bounds.left}`, entry.value])) : null;
+    const at = (targetRow, targetColumn) => sparse
+      ? sparseValues.get(`${targetRow}:${targetColumn}`) ?? 0
+      : range[targetRow]?.[targetColumn] ?? 0;
+    if (row > 0 && column > 0) return at(row - 1, column - 1);
+    return Array.from({ length: outputRows }, (_, rowOffset) => Array.from({ length: outputColumns }, (_, columnOffset) =>
+      at(row === 0 ? rowOffset : row - 1, column === 0 ? columnOffset : column - 1)));
   }
   if (name === 'CHOOSE') {
     if (args.length < 2 || args.length > 255) return '#VALUE!';
-    const index = numeric(args[0]);
+    const index = numericArgument(0);
     if (typeof index !== 'number') return index;
     const choice = Math.trunc(index);
-    return choice < 1 || choice >= args.length ? '#VALUE!' : args[choice];
+    return choice < 1 || choice >= args.length ? '#VALUE!' : textResult(args[choice]);
   }
   if (name === 'IFS') {
     if (!args.length || args.length % 2 || args.length > 254) return '#VALUE!';
     for (let index = 0; index < args.length; index += 2) {
-      const condition = logical(args[index]);
+      const condition = logicalArgument(index);
       if (isError(condition)) return condition;
-      if (condition) return args[index + 1];
+      if (condition) return textResult(args[index + 1]);
     }
     return '#N/A';
   }
   if (name === 'SWITCH') {
     if (args.length < 3 || args.length > 255) return '#VALUE!';
     const expression = args[0];
-    if (isError(expression)) return expression;
+    if (argumentError(0) !== null) return argumentError(0);
     const hasDefault = args.length % 2 === 0;
     const pairEnd = hasDefault ? args.length - 1 : args.length;
     for (let index = 1; index < pairEnd; index += 2) {
       const candidate = args[index];
-      if (isError(candidate)) return candidate;
+      if (argumentError(index) !== null) return argumentError(index);
       const equal = typeof expression === 'string' && typeof candidate === 'string'
         ? expression.toLocaleLowerCase() === candidate.toLocaleLowerCase()
         : expression === candidate;
-      if (equal) return args[index + 1];
+      if (equal) return textResult(args[index + 1]);
     }
-    return hasDefault ? args.at(-1) : '#N/A';
+    return hasDefault ? textResult(args.at(-1)) : '#N/A';
   }
   if (name === 'IF') {
     if (args.length < 2 || args.length > 3) return '#VALUE!';
-    const condition = logical(args[0]);
+    const condition = logicalArgument(0);
     if (isError(condition)) return condition;
-    return condition ? args[1] : (args.length === 3 ? args[2] : false);
+    return textResult(condition ? args[1] : (args.length === 3 ? args[2] : false));
   }
   if (name === 'IFERROR') {
     if (args.length !== 2) return '#VALUE!';
-    return isError(args[0]) ? args[1] : args[0];
+    return textResult(argumentError(0) !== null ? args[1] : args[0]);
   }
   if (name === 'IFNA') {
     if (args.length !== 2) return '#VALUE!';
-    return args[0] === '#N/A' || args[0] === '#N/A!' ? args[1] : args[0];
+    const value = plainFormulaValue(args[0]);
+    return textResult(!isTextLiteralArgument(0) && (value === '#N/A' || value === '#N/A!') ? args[1] : args[0]);
   }
   if (name === 'AND' || name === 'OR' || name === 'XOR') {
     if (!values.length) return '#VALUE!';
     let result = name === 'AND', trueCount = 0;
-    for (const value of values) {
-      const truth = logical(value);
+    for (let index = 0; index < args.length; index++) for (const value of flatten([args[index]])) {
+      const truth = isTextLiteralArgument(index) && isError(value) ? '#VALUE!' : logical(value);
       if (isError(truth)) return truth;
       if (name === 'AND') result = result && truth;
       else if (name === 'OR') result = result || truth;
@@ -1602,7 +2175,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'NOT') {
     if (args.length !== 1) return '#VALUE!';
-    const truth = logical(args[0]);
+    const truth = logicalArgument(0);
     return isError(truth) ? truth : !truth;
   }
   if (name === 'RAND') {
@@ -1612,7 +2185,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'RANDBETWEEN') {
     if (args.length !== 2) return '#VALUE!';
-    const bottom = numeric(args[0]), top = numeric(args[1]);
+    const bottom = numericArgument(0), top = numericArgument(1);
     if (typeof bottom !== 'number' || typeof top !== 'number') return typeof bottom !== 'number' ? bottom : top;
     const minimum = Math.trunc(bottom), maximum = Math.trunc(top);
     if (minimum > maximum) return '#NUM!';
@@ -1622,7 +2195,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'RANDARRAY') {
     if (args.length > 5) return '#VALUE!';
-    if (args.some(isError)) return args.find(isError);
+    if (argumentError() !== null) return argumentError();
     const dimension = (value, fallback) => value === undefined || value === null ? fallback : numeric(value);
     const rows = dimension(args[0], 1), columns = dimension(args[1], 1);
     const minimum = dimension(args[2], 0), maximum = dimension(args[3], 1);
@@ -1649,7 +2222,7 @@ function callFunction(name, args, context = {}) {
   if (name === 'NORM.S.DIST' || name === 'NORM.DIST') {
     const standard = name === 'NORM.S.DIST';
     if (args.length !== (standard ? 2 : 4)) return '#VALUE!';
-    const value = numeric(args[0]), mean = standard ? 0 : numeric(args[1]), deviation = standard ? 1 : numeric(args[2]);
+    const value = numericArgument(0), mean = standard ? 0 : numericArgument(1), deviation = standard ? 1 : numericArgument(2);
     const cumulative = standard ? args[1] : args[3];
     if (typeof value !== 'number' || typeof mean !== 'number' || typeof deviation !== 'number') return [value, mean, deviation].find(item => typeof item !== 'number');
     if (typeof cumulative !== 'boolean') return '#VALUE!';
@@ -1662,7 +2235,7 @@ function callFunction(name, args, context = {}) {
   if (name === 'NORM.S.INV' || name === 'NORM.INV') {
     const standard = name === 'NORM.S.INV';
     if (args.length !== (standard ? 1 : 3)) return '#VALUE!';
-    const probability = numeric(args[0]), mean = standard ? 0 : numeric(args[1]), deviation = standard ? 1 : numeric(args[2]);
+    const probability = numericArgument(0), mean = standard ? 0 : numericArgument(1), deviation = standard ? 1 : numericArgument(2);
     if (typeof probability !== 'number' || typeof mean !== 'number' || typeof deviation !== 'number') return [probability, mean, deviation].find(item => typeof item !== 'number');
     if (probability <= 0 || probability >= 1 || deviation <= 0) return '#NUM!';
     const value = standardNormalInverse(probability);
@@ -1672,7 +2245,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'BINOM.DIST') {
     if (args.length !== 4) return '#VALUE!';
-    const successes = numeric(args[0]), trials = numeric(args[1]), probability = numeric(args[2]), cumulative = args[3];
+    const successes = numericArgument(0), trials = numericArgument(1), probability = numericArgument(2), cumulative = args[3];
     if ([successes, trials, probability].some(value => typeof value !== 'number')) return [successes, trials, probability].find(value => typeof value !== 'number');
     if (!Number.isInteger(successes) || !Number.isInteger(trials) || successes < 0 || trials < 0 || successes > trials || probability < 0 || probability > 1) return '#NUM!';
     if (typeof cumulative !== 'boolean') return '#VALUE!';
@@ -1683,7 +2256,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'POISSON.DIST') {
     if (args.length !== 3) return '#VALUE!';
-    const value = numeric(args[0]), mean = numeric(args[1]), cumulative = args[2];
+    const value = numericArgument(0), mean = numericArgument(1), cumulative = args[2];
     if (typeof value !== 'number' || typeof mean !== 'number') return typeof value !== 'number' ? value : mean;
     if (!Number.isInteger(value) || value < 0 || mean < 0) return '#NUM!';
     if (typeof cumulative !== 'boolean') return '#VALUE!';
@@ -1693,7 +2266,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'NPV') {
     if (args.length < 2) return '#VALUE!';
-    const rate = numeric(args[0]);
+    const rate = numericArgument(0);
     if (typeof rate !== 'number') return rate;
     if (rate <= -1) return '#NUM!';
     const cashFlows = financialCashFlows(args.slice(1));
@@ -1731,7 +2304,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'DOLLARDE' || name === 'DOLLARFR') {
     if (args.length !== 2) return '#VALUE!';
-    const value = numeric(args[0]), fractionValue = numeric(args[1]);
+    const value = numericArgument(0), fractionValue = numericArgument(1);
     if (typeof value !== 'number') return value;
     if (typeof fractionValue !== 'number') return fractionValue;
     const fraction = Math.trunc(fractionValue);
@@ -1745,8 +2318,8 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'BASE') {
     if (args.length < 2 || args.length > 3) return '#VALUE!';
-    const number = numeric(args[0]), radixValue = numeric(args[1]);
-    const minLengthValue = args.length === 3 ? numeric(args[2]) : 0;
+    const number = numericArgument(0), radixValue = numericArgument(1);
+    const minLengthValue = args.length === 3 ? numericArgument(2) : 0;
     for (const value of [number, radixValue, minLengthValue]) if (typeof value !== 'number') return value;
     if (number < 0 || number > Number.MAX_SAFE_INTEGER || radixValue < 2 || radixValue > 36 || minLengthValue < 0 || minLengthValue > 255) return '#NUM!';
     const integer = Math.trunc(number), radix = Math.trunc(radixValue), minLength = Math.trunc(minLengthValue);
@@ -1755,8 +2328,8 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'DECIMAL') {
     if (args.length !== 2) return '#VALUE!';
-    if (isError(args[0])) return args[0];
-    const text = String(args[0]), radixValue = numeric(args[1]);
+    if (argumentError(0) !== null) return argumentError(0);
+    const text = String(args[0]), radixValue = numericArgument(1);
     if (typeof radixValue !== 'number') return radixValue;
     if (radixValue < 2 || radixValue > 36) return '#NUM!';
     const radix = Math.trunc(radixValue);
@@ -1773,9 +2346,9 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'ACCRINTM') {
     if (args.length < 4 || args.length > 5) return '#VALUE!';
-    const issue = numeric(args[0]), settlement = numeric(args[1]);
-    const rate = numeric(args[2]), par = numeric(args[3]);
-    const basis = args.length === 5 ? numeric(args[4]) : 0;
+    const issue = numericArgument(0), settlement = numericArgument(1);
+    const rate = numericArgument(2), par = numericArgument(3);
+    const basis = args.length === 5 ? numericArgument(4) : 0;
     for (const value of [issue, settlement, rate, par, basis]) if (typeof value !== 'number') return value;
     if (issue < 0 || issue >= 2958466 || settlement < 0 || settlement >= 2958466 || issue >= settlement
       || rate < 0 || par <= 0 || !Number.isInteger(basis) || basis < 0 || basis > 4) return '#NUM!';
@@ -1786,9 +2359,9 @@ function callFunction(name, args, context = {}) {
   }
   if (['DISC', 'INTRATE', 'RECEIVED'].includes(name)) {
     if (args.length < 4 || args.length > 5) return '#VALUE!';
-    const settlement = numeric(args[0]), maturity = numeric(args[1]);
-    const first = numeric(args[2]), second = numeric(args[3]);
-    const basis = args.length === 5 ? numeric(args[4]) : 0;
+    const settlement = numericArgument(0), maturity = numericArgument(1);
+    const first = numericArgument(2), second = numericArgument(3);
+    const basis = args.length === 5 ? numericArgument(4) : 0;
     for (const value of [settlement, maturity, first, second, basis]) if (typeof value !== 'number') return value;
     if (settlement < 0 || settlement >= 2958466 || maturity < 0 || maturity >= 2958466
       || maturity <= settlement || !Number.isInteger(basis) || basis < 0 || basis > 4) return '#NUM!';
@@ -1807,9 +2380,9 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'PRICEDISC' || name === 'YIELDDISC') {
     if (args.length < 4 || args.length > 5) return '#VALUE!';
-    const settlement = numeric(args[0]), maturity = numeric(args[1]);
-    const priceOrDiscount = numeric(args[2]), redemption = numeric(args[3]);
-    const basis = args.length === 5 ? numeric(args[4]) : 0;
+    const settlement = numericArgument(0), maturity = numericArgument(1);
+    const priceOrDiscount = numericArgument(2), redemption = numericArgument(3);
+    const basis = args.length === 5 ? numericArgument(4) : 0;
     for (const value of [settlement, maturity, priceOrDiscount, redemption, basis]) if (typeof value !== 'number') return value;
     if (settlement < 0 || settlement >= 2958466 || maturity < 0 || maturity >= 2958466 || maturity <= settlement
       || redemption <= 0 || !Number.isInteger(basis) || basis < 0 || basis > 4
@@ -1823,9 +2396,9 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'PRICE' || name === 'YIELD') {
     if (args.length < 6 || args.length > 7) return '#VALUE!';
-    const settlement = numeric(args[0]), maturity = numeric(args[1]), rate = numeric(args[2]);
-    const quote = numeric(args[3]), redemption = numeric(args[4]), frequency = numeric(args[5]);
-    const basis = args.length === 7 ? numeric(args[6]) : 0;
+    const settlement = numericArgument(0), maturity = numericArgument(1), rate = numericArgument(2);
+    const quote = numericArgument(3), redemption = numericArgument(4), frequency = numericArgument(5);
+    const basis = args.length === 7 ? numericArgument(6) : 0;
     for (const value of [settlement, maturity, rate, quote, redemption, frequency, basis]) if (typeof value !== 'number') return value;
     if (settlement < 0 || settlement >= 2958466 || maturity < 0 || maturity >= 2958466 || settlement >= maturity
       || rate < 0 || redemption <= 0 || ![1, 2, 4].includes(frequency) || !Number.isInteger(basis) || basis < 0 || basis > 4
@@ -1854,7 +2427,7 @@ function callFunction(name, args, context = {}) {
     const cashFlows = financialCashFlows([args[0]]);
     if (typeof cashFlows === 'string') return cashFlows;
     if (cashFlows.length < 2 || !cashFlows.entries.some(entry => entry.value > 0) || !cashFlows.entries.some(entry => entry.value < 0)) return '#NUM!';
-    const guess = args.length === 2 ? numeric(args[1]) : 0.1;
+    const guess = args.length === 2 ? numericArgument(1) : 0.1;
     if (typeof guess !== 'number') return guess;
     if (guess <= -1) return '#NUM!';
     const scale = cashFlows.entries.reduce((maximum, entry) => Math.max(maximum, Math.abs(entry.value)), 1), tolerance = scale * 1e-10;
@@ -1881,7 +2454,7 @@ function callFunction(name, args, context = {}) {
     if (args.length !== 3) return '#VALUE!';
     const cashFlows = financialCashFlows([args[0]]);
     if (typeof cashFlows === 'string') return cashFlows;
-    const financeRate = numeric(args[1]), reinvestRate = numeric(args[2]);
+    const financeRate = numericArgument(1), reinvestRate = numericArgument(2);
     if (typeof financeRate !== 'number' || typeof reinvestRate !== 'number') return typeof financeRate !== 'number' ? financeRate : reinvestRate;
     if (financeRate <= -1 || reinvestRate <= -1) return '#NUM!';
     if (cashFlows.length < 2) return '#NUM!';
@@ -1902,7 +2475,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'XNPV') {
     if (args.length !== 3) return '#VALUE!';
-    const rate = numeric(args[0]);
+    const rate = numericArgument(0);
     if (typeof rate !== 'number') return rate;
     if (rate <= -1) return '#NUM!';
     const pairs = financialDatePairs(args[1], args[2]);
@@ -1919,7 +2492,7 @@ function callFunction(name, args, context = {}) {
     const pairs = financialDatePairs(args[0], args[1]);
     if (typeof pairs === 'string') return pairs;
     if (pairs.length < 2 || !pairs.entries.some(item => item.value > 0) || !pairs.entries.some(item => item.value < 0)) return '#NUM!';
-    const guess = args.length === 3 ? numeric(args[2]) : 0.1;
+    const guess = args.length === 3 ? numericArgument(2) : 0.1;
     if (typeof guess !== 'number') return guess;
     if (guess <= -1) return '#NUM!';
     const scale = pairs.entries.reduce((maximum, item) => Math.max(maximum, Math.abs(item.value)), 1), tolerance = scale * 1e-10;
@@ -1953,7 +2526,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'DATE') {
     if (args.length !== 3) return '#VALUE!';
-    const year = numeric(args[0]), month = numeric(args[1]), day = numeric(args[2]);
+    const year = numericArgument(0), month = numericArgument(1), day = numericArgument(2);
     if ([year, month, day].some(value => typeof value !== 'number')) return [year, month, day].find(value => typeof value === 'string');
     if (year < 0 || year > 9999) return '#NUM!';
     const normalizedYear = year < 1900 ? year + 1900 : year;
@@ -1962,15 +2535,17 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'DATEVALUE') {
     if (args.length !== 1) return '#VALUE!';
-    if (isError(args[0])) return args[0];
+    if (argumentError(0) !== null) return argumentError(0);
     if (typeof args[0] !== 'string') return '#VALUE!';
-    const date = parseDateValue(args[0]);
+    const currentDate = context.now instanceof Date ? context.now : Number.isFinite(context.todaySerial) ? dateParts(Math.floor(context.todaySerial)) : new Date();
+    const currentYear = currentDate instanceof Date ? currentDate.getFullYear() : typeof currentDate === 'object' ? currentDate.year : new Date().getFullYear();
+    const date = parseDateValue(args[0], currentYear, context.locale || 'en-US');
     if (!date) return '#VALUE!';
     return dateToSerial(utcDate(date.year, date.month, date.day));
   }
   if (['YEAR', 'MONTH', 'DAY'].includes(name)) {
     if (args.length !== 1) return '#VALUE!';
-    const serial = numeric(args[0]);
+    const serial = numericArgument(0);
     if (typeof serial !== 'number') return serial;
     const parts = dateParts(serial);
     if (typeof parts === 'string') return parts;
@@ -1978,10 +2553,10 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'WEEKDAY') {
     if (args.length < 1 || args.length > 2) return '#VALUE!';
-    const serial = numeric(args[0]);
+    const serial = numericArgument(0);
     if (typeof serial !== 'number') return serial;
     if (serial < 0 || serial >= 2958466) return '#NUM!';
-    const returnType = args.length === 1 ? 1 : numeric(args[1]);
+    const returnType = args.length === 1 ? 1 : numericArgument(1);
     if (typeof returnType !== 'number') return returnType;
     if (![1, 2, 3, 11, 12, 13, 14, 15, 16, 17].includes(returnType)) return '#NUM!';
     const whole = Math.floor(serial), sundayZero = ((whole - (whole > 60 ? 1 : 0)) % 7 + 7) % 7;
@@ -1992,10 +2567,10 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'WEEKNUM' || name === 'ISOWEEKNUM') {
     if (name === 'ISOWEEKNUM' ? args.length !== 1 : args.length < 1 || args.length > 2) return '#VALUE!';
-    const serial = numeric(args[0]);
+    const serial = numericArgument(0);
     if (typeof serial !== 'number') return serial;
     if (serial < 1 || serial >= 2958466) return '#NUM!';
-    const whole = Math.floor(serial), returnType = name === 'ISOWEEKNUM' ? 21 : args.length === 1 ? 1 : numeric(args[1]);
+    const whole = Math.floor(serial), returnType = name === 'ISOWEEKNUM' ? 21 : args.length === 1 ? 1 : numericArgument(1);
     if (typeof returnType !== 'number') return returnType;
     if (returnType === 21) {
       const weekday = ((whole - (whole > 60 ? 1 : 0)) % 7 + 7) % 7;
@@ -2017,7 +2592,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'EDATE' || name === 'EOMONTH') {
     if (args.length !== 2) return '#VALUE!';
-    const serial = numeric(args[0]), months = numeric(args[1]);
+    const serial = numericArgument(0), months = numericArgument(1);
     if (typeof serial !== 'number') return serial;
     if (typeof months !== 'number') return months;
     if (serial < 0 || serial >= 2958466) return '#NUM!';
@@ -2037,7 +2612,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'DAYS') {
     if (args.length !== 2) return '#VALUE!';
-    const end = numeric(args[0]), start = numeric(args[1]);
+    const end = numericArgument(0), start = numericArgument(1);
     if (typeof end !== 'number') return end;
     if (typeof start !== 'number') return start;
     if (start < 0 || start >= 2958466 || end < 0 || end >= 2958466) return '#NUM!';
@@ -2045,10 +2620,10 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'DATEDIF') {
     if (args.length !== 3) return '#VALUE!';
-    const startSerial = numeric(args[0]), endSerial = numeric(args[1]);
+    const startSerial = numericArgument(0), endSerial = numericArgument(1);
     if (typeof startSerial !== 'number') return startSerial;
     if (typeof endSerial !== 'number') return endSerial;
-    if (isError(args[2])) return args[2];
+    if (argumentError(2) !== null) return argumentError(2);
     if (typeof args[2] !== 'string') return '#VALUE!';
     if ([startSerial, endSerial].some(value => value < 0 || value >= 2958466) || endSerial < startSerial) return '#NUM!';
     const unit = args[2].toUpperCase(), start = dateParts(Math.floor(startSerial)), end = dateParts(Math.floor(endSerial));
@@ -2074,7 +2649,7 @@ function callFunction(name, args, context = {}) {
   if (name === 'NETWORKDAYS' || name === 'NETWORKDAYS.INTL') {
     const intl = name.endsWith('.INTL');
     if (args.length < 2 || args.length > (intl ? 4 : 3)) return '#VALUE!';
-    const startValue = numeric(args[0]), endValue = numeric(args[1]);
+    const startValue = numericArgument(0), endValue = numericArgument(1);
     if (typeof startValue !== 'number') return startValue;
     if (typeof endValue !== 'number') return endValue;
     if ([startValue, endValue].some(value => value < 0 || value >= 2958466)) return '#NUM!';
@@ -2100,7 +2675,7 @@ function callFunction(name, args, context = {}) {
   if (name === 'WORKDAY' || name === 'WORKDAY.INTL') {
     const intl = name.endsWith('.INTL');
     if (args.length < 2 || args.length > (intl ? 4 : 3)) return '#VALUE!';
-    const startValue = numeric(args[0]), daysValue = numeric(args[1]);
+    const startValue = numericArgument(0), daysValue = numericArgument(1);
     if (typeof startValue !== 'number') return startValue;
     if (typeof daysValue !== 'number') return daysValue;
     if (startValue < 0 || startValue >= 2958466) return '#NUM!';
@@ -2122,7 +2697,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'DAYS360') {
     if (args.length < 2 || args.length > 3) return '#VALUE!';
-    const startSerial = numeric(args[0]), endSerial = numeric(args[1]);
+    const startSerial = numericArgument(0), endSerial = numericArgument(1);
     if (typeof startSerial !== 'number') return startSerial;
     if (typeof endSerial !== 'number') return endSerial;
     if ([startSerial, endSerial].some(value => value < 0 || value >= 2958466)) return '#NUM!';
@@ -2147,11 +2722,11 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'YEARFRAC') {
     if (args.length < 2 || args.length > 3) return '#VALUE!';
-    const startSerial = numeric(args[0]), endSerial = numeric(args[1]);
+    const startSerial = numericArgument(0), endSerial = numericArgument(1);
     if (typeof startSerial !== 'number') return startSerial;
     if (typeof endSerial !== 'number') return endSerial;
     if ([startSerial, endSerial].some(value => value < 0 || value >= 2958466)) return '#NUM!';
-    const basis = args.length === 3 ? numeric(args[2]) : 0;
+    const basis = args.length === 3 ? numericArgument(2) : 0;
     if (typeof basis !== 'number') return basis;
     if (!Number.isInteger(basis) || basis < 0 || basis > 4) return '#NUM!';
     const start = Math.min(startSerial, endSerial), end = Math.max(startSerial, endSerial), sign = endSerial < startSerial ? -1 : 1;
@@ -2171,8 +2746,8 @@ function callFunction(name, args, context = {}) {
   }
   if (['COUPDAYBS', 'COUPDAYS', 'COUPDAYSNC', 'COUPNCD', 'COUPNUM', 'COUPPCD'].includes(name)) {
     if (args.length < 3 || args.length > 4) return '#VALUE!';
-    const settlement = numeric(args[0]), maturity = numeric(args[1]), frequency = numeric(args[2]);
-    const basis = args.length === 4 ? numeric(args[3]) : 0;
+    const settlement = numericArgument(0), maturity = numericArgument(1), frequency = numericArgument(2);
+    const basis = args.length === 4 ? numericArgument(3) : 0;
     for (const value of [settlement, maturity, frequency, basis]) if (typeof value !== 'number') return value;
     if (settlement < 0 || settlement >= 2958466 || maturity < 0 || maturity >= 2958466 || settlement >= maturity
       || ![1, 2, 4].includes(frequency) || !Number.isInteger(basis) || basis < 0 || basis > 4) return '#NUM!';
@@ -2192,19 +2767,20 @@ function callFunction(name, args, context = {}) {
     if (args.length !== 3) return '#VALUE!';
     const parts = args.map(numeric);
     if (parts.some(value => typeof value !== 'number')) return parts.find(value => typeof value === 'string');
+    if (parts.some(value => value < 0 || value > 32767)) return '#NUM!';
     const seconds = Math.trunc(parts[0]) * 3600 + Math.trunc(parts[1]) * 60 + Math.trunc(parts[2]);
     return ((seconds % 86400) + 86400) % 86400 / 86400;
   }
   if (name === 'TIMEVALUE') {
     if (args.length !== 1) return '#VALUE!';
-    if (isError(args[0])) return args[0];
+    if (argumentError(0) !== null) return argumentError(0);
     if (typeof args[0] !== 'string') return '#VALUE!';
     const seconds = parseTimeValue(args[0]);
     return seconds === null ? '#VALUE!' : seconds / 86400;
   }
   if (['HOUR', 'MINUTE', 'SECOND'].includes(name)) {
     if (args.length !== 1) return '#VALUE!';
-    const serial = numeric(args[0]);
+    const serial = numericArgument(0);
     if (typeof serial !== 'number') return serial;
     if (serial < 0 || serial >= 2958466) return '#NUM!';
     const seconds = Math.round((serial - Math.floor(serial)) * 86400) % 86400;
@@ -2213,8 +2789,8 @@ function callFunction(name, args, context = {}) {
   if (name === 'RATE') {
     if (args.length < 3 || args.length > 6) return '#VALUE!';
     const [periods, payment, presentValue, futureValue, paymentType, initialGuess] = [
-      numeric(args[0]), numeric(args[1]), numeric(args[2]), numeric(args[3] ?? 0),
-      args.length > 4 ? numeric(args[4]) : 0, args.length > 5 ? numeric(args[5]) : 0.1
+      numericArgument(0), numericArgument(1), numericArgument(2), numeric(args[3] ?? 0),
+      args.length > 4 ? numericArgument(4) : 0, args.length > 5 ? numericArgument(5) : 0.1
     ];
     for (const value of [periods, payment, presentValue, futureValue, paymentType, initialGuess]) if (typeof value !== 'number') return value;
     if (periods <= 0 || paymentType !== 0 && paymentType !== 1 || initialGuess <= -1) return '#NUM!';
@@ -2247,7 +2823,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'EFFECT' || name === 'NOMINAL') {
     if (args.length !== 2) return '#VALUE!';
-    const rate = numeric(args[0]), periods = numeric(args[1]);
+    const rate = numericArgument(0), periods = numericArgument(1);
     if (typeof rate !== 'number' || typeof periods !== 'number') return typeof rate !== 'number' ? rate : periods;
     if (rate < 0 || !Number.isInteger(periods) || periods < 1) return '#NUM!';
     const result = name === 'EFFECT' ? (1 + rate / periods) ** periods - 1 : periods * ((1 + rate) ** (1 / periods) - 1);
@@ -2296,7 +2872,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'DDB') {
     if (args.length < 4 || args.length > 5) return '#VALUE!';
-    const [cost, salvage, life, period] = args.slice(0, 4).map(numeric), factor = args.length === 5 ? numeric(args[4]) : 2;
+    const [cost, salvage, life, period] = args.slice(0, 4).map(numeric), factor = args.length === 5 ? numericArgument(4) : 2;
     for (const value of [cost, salvage, life, period, factor]) if (typeof value !== 'number') return value;
     const currentPeriod = Math.trunc(period);
     if (cost < 0 || salvage < 0 || life <= 0 || !Number.isInteger(life) || currentPeriod < 1 || currentPeriod > life || factor <= 0) return '#NUM!';
@@ -2311,7 +2887,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'DB') {
     if (args.length < 4 || args.length > 5) return '#VALUE!';
-    const [cost, salvage, life, period] = args.slice(0, 4).map(numeric), month = args.length === 5 && args[4] !== null ? numeric(args[4]) : 12;
+    const [cost, salvage, life, period] = args.slice(0, 4).map(numeric), month = args.length === 5 && args[4] !== null ? numericArgument(4) : 12;
     for (const value of [cost, salvage, life, period, month]) if (typeof value !== 'number') return value;
     const currentPeriod = Math.trunc(period), firstYearMonths = Math.trunc(month);
     if (cost <= 0 || salvage < 0 || salvage > cost || !Number.isInteger(life) || life <= 0 || !Number.isInteger(period)
@@ -2332,7 +2908,7 @@ function callFunction(name, args, context = {}) {
   if (name === 'VDB') {
     if (args.length < 5 || args.length > 7) return '#VALUE!';
     const [cost, salvage, life, startPeriod, endPeriod] = args.slice(0, 5).map(numeric);
-    const factor = args.length > 5 && args[5] !== null ? numeric(args[5]) : 2;
+    const factor = args.length > 5 && args[5] !== null ? numericArgument(5) : 2;
     const noSwitch = args.length > 6 ? logical(args[6]) : false;
     for (const value of [cost, salvage, life, startPeriod, endPeriod, factor]) if (typeof value !== 'number') return value;
     if (typeof noSwitch !== 'boolean') return noSwitch;
@@ -2353,7 +2929,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'FVSCHEDULE') {
     if (args.length !== 2) return '#VALUE!';
-    const principal = numeric(args[0]);
+    const principal = numericArgument(0);
     if (typeof principal !== 'number') return principal;
     const schedule = flatten([args[1]]);
     let factor = 1;
@@ -2369,10 +2945,10 @@ function callFunction(name, args, context = {}) {
   }
   if (['PMT', 'PV', 'FV', 'NPER'].includes(name)) {
     if (args.length < 3 || args.length > 5) return '#VALUE!';
-    const parameters = [numeric(args[0]), numeric(args[1]), numeric(args[2]), numeric(args[3] ?? 0)];
+    const parameters = [numericArgument(0), numericArgument(1), numericArgument(2), numeric(args[3] ?? 0)];
     if (parameters.some(value => typeof value !== 'number')) return parameters.find(value => typeof value !== 'number');
     const [rate, second, third, optional] = parameters;
-    const paymentType = args.length > 4 ? numeric(args[4]) : 0;
+    const paymentType = args.length > 4 ? numericArgument(4) : 0;
     if (typeof paymentType !== 'number') return paymentType;
     if (paymentType !== 0 && paymentType !== 1) return '#NUM!';
     if (name !== 'NPER' && second <= 0) return '#NUM!';
@@ -2400,7 +2976,7 @@ function callFunction(name, args, context = {}) {
     else result = -(optional * factor + third * annuityFactor);
     return Number.isFinite(result) ? (result === 0 ? 0 : result) : '#NUM!';
   }
-  if (values.some(isError)) return values.find(isError);
+  if (argumentError() !== null) return argumentError();
   if (['SUMXMY2', 'SUMX2MY2', 'SUMX2PY2'].includes(name)) {
     if (args.length !== 2) return '#VALUE!';
     const left = matrixValue(args[0]), right = matrixValue(args[1]);
@@ -2418,7 +2994,7 @@ function callFunction(name, args, context = {}) {
     return total;
   }
   if (['SUMSQ', 'DEVSQ', 'AVEDEV', 'GEOMEAN', 'HARMEAN'].includes(name)) {
-    const numbers = aggregateNumbers(args);
+    const numbers = aggregateDirectArguments(sourceArgs, { ignoreReferenceErrors: name === 'SUMSQ' });
     if (typeof numbers === 'string') return numbers;
     if (name === 'SUMSQ') {
       let total = 0;
@@ -2460,7 +3036,23 @@ function callFunction(name, args, context = {}) {
   if (name === 'COUNTA') return values.filter(value => value !== null && value !== undefined).length;
   if (name === 'COUNT') return countDirectArguments(sourceArgs);
   if (['AVERAGEA', 'MINA', 'MAXA'].includes(name)) {
-    const items = flatten(args).filter(value => value !== null && value !== undefined).map(value => typeof value === 'number' ? value : typeof value === 'boolean' ? Number(value) : 0);
+    const items = [];
+    for (let index = 0; index < args.length; index++) {
+      const argument = args[index];
+      const isReferenceOrArray = isFormulaRange(argument) || Array.isArray(argument) || Boolean(sourceArgs[index]?.[FORMULA_REFERENCE_VALUE]);
+      for (const value of flatten([argument])) {
+        if (isError(value)) return value;
+        if (value === null || value === undefined) continue;
+        const normalized = plainFormulaValue(value);
+        if (typeof normalized === 'number') { items.push(normalized); continue; }
+        if (typeof normalized === 'boolean') { items.push(Number(normalized)); continue; }
+        if (typeof normalized === 'string') {
+          if (isReferenceOrArray && name !== 'AVERAGEA') continue;
+          const numericText = !isReferenceOrArray && sourceArgs[index]?.[FORMULA_TEXT_LITERAL] ? numeric(normalized) : '#VALUE!';
+          items.push(typeof numericText === 'number' ? numericText : 0);
+        } else items.push(0);
+      }
+    }
     if (name === 'AVERAGEA') {
       if (!items.length) return '#DIV/0!';
       let sum = 0;
@@ -2474,7 +3066,7 @@ function callFunction(name, args, context = {}) {
   }
   if (['SUM', 'PRODUCT', 'AVERAGE', 'MEDIAN', 'MIN', 'MAX'].includes(name)) {
     if (name === 'PRODUCT' && !args.length) return '#VALUE!';
-    const numbers = name === 'SUM' || name === 'AVERAGE' ? aggregateDirectArguments(sourceArgs) : aggregateNumbers(args);
+    const numbers = name === 'PRODUCT' ? productArguments(sourceArgs) : aggregateDirectArguments(sourceArgs);
     if (typeof numbers === 'string') return numbers;
     if (name === 'SUM') {
       let sum = 0;
@@ -2508,15 +3100,32 @@ function callFunction(name, args, context = {}) {
     if (args.length !== 2) return '#VALUE!';
     const numbers = aggregateNumbers([args[0]]);
     if (typeof numbers === 'string') return numbers;
-    const rank = numeric(args[1]);
+    const rank = numericArgument(1);
     if (typeof rank !== 'number') return rank;
     if (!Number.isInteger(rank) || rank < 1 || rank > numbers.length) return '#NUM!';
     numbers.sort((a, b) => name === 'LARGE' ? b - a : a - b);
     return numbers[rank - 1];
   }
   if (name === 'MODE.SNGL' || name === 'MODE.MULT') {
-    if (args.length !== 1) return '#VALUE!';
-    const numbers = flatten(args[0]).filter(value => typeof value === 'number' && Number.isFinite(value));
+    if (args.length < 1 || args.length > 254) return '#VALUE!';
+    const numbers = [];
+    for (let index = 0; index < args.length; index++) {
+      const argument = args[index];
+      const isReferenceOrArray = isFormulaRange(argument) || Array.isArray(argument) || Boolean(sourceArgs[index]?.[FORMULA_REFERENCE_VALUE]);
+      for (const value of flatten([argument])) {
+        if (isError(value)) {
+          if (sourceArgs[index]?.[FORMULA_TEXT_LITERAL] && isErrorText(plainFormulaValue(value))) return '#VALUE!';
+          return plainFormulaValue(value);
+        }
+        if (typeof value === 'number' && Number.isFinite(value)) numbers.push(value);
+        else if (!isReferenceOrArray && typeof value === 'string') {
+          if (sourceArgs[index]?.[FORMULA_TEXT_LITERAL] && isErrorText(value)) return '#VALUE!';
+          const coerced = numeric(value);
+          if (typeof coerced !== 'number') return '#VALUE!';
+          numbers.push(coerced);
+        }
+      }
+    }
     if (!numbers.length) return '#N/A';
     const counts = new Map();
     for (const value of numbers) counts.set(value, (counts.get(value) || 0) + 1);
@@ -2528,8 +3137,18 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'FREQUENCY') {
     if (args.length !== 2) return '#VALUE!';
-    const data = flatten(args[0]).filter(value => typeof value === 'number' && Number.isFinite(value));
-    const bins = flatten(args[1]).filter(value => typeof value === 'number' && Number.isFinite(value));
+    const numericValues = argument => {
+      const numbers = [];
+      for (const value of flatten([argument])) {
+        if (isError(value)) return plainFormulaValue(value);
+        if (typeof value === 'number' && Number.isFinite(value)) numbers.push(value);
+      }
+      return numbers;
+    };
+    const data = numericValues(args[0]);
+    if (typeof data === 'string') return data;
+    const bins = numericValues(args[1]);
+    if (typeof bins === 'string') return bins;
     const counts = Array(bins.length + 1).fill(0);
     for (const value of data) {
       let bin = bins.findIndex(boundary => value <= boundary);
@@ -2540,12 +3159,12 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'RANK.EQ' || name === 'RANK.AVG') {
     if (args.length < 2 || args.length > 3) return '#VALUE!';
-    const sought = numeric(args[0]);
+    const sought = numericArgument(0);
     if (typeof sought !== 'number') return sought;
-    const numbers = aggregateNumbers([args[1]]);
+    const numbers = rankReferenceNumbers(sourceArgs[1]);
     if (typeof numbers === 'string') return numbers;
     if (args[2] !== undefined && args[2] !== null) {
-      const order = numeric(args[2]);
+      const order = numericArgument(2);
       if (typeof order !== 'number') return order;
       numbers.sort((a, b) => order === 0 ? b - a : a - b);
     } else numbers.sort((a, b) => b - a);
@@ -2558,14 +3177,14 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'PERCENTRANK.INC' || name === 'PERCENTRANK.EXC') {
     if (args.length < 2 || args.length > 3) return '#VALUE!';
-    const sought = numeric(args[1]);
+    const sought = numericArgument(1);
     if (typeof sought !== 'number') return sought;
     const numbers = aggregateNumbers([args[0]]);
     if (typeof numbers === 'string') return numbers;
     if (!numbers.length) return '#NUM!';
     let significance = 3;
     if (args[2] !== undefined && args[2] !== null) {
-      significance = numeric(args[2]);
+      significance = numericArgument(2);
       if (typeof significance !== 'number') return significance;
       if (significance < 1 || significance > 15) return '#NUM!';
       significance = Math.trunc(significance);
@@ -2590,7 +3209,7 @@ function callFunction(name, args, context = {}) {
     const numbers = aggregateNumbers([args[0]]);
     if (typeof numbers === 'string') return numbers;
     if (!numbers.length) return '#NUM!';
-    let k = numeric(args[1]);
+    let k = numericArgument(1);
     if (typeof k !== 'number') return k;
     const exclusive = name.endsWith('.EXC');
     if (name.startsWith('QUARTILE')) {
@@ -2604,14 +3223,15 @@ function callFunction(name, args, context = {}) {
     return interpolateNumber(numbers[lower], numbers[Math.min(lower + 1, numbers.length - 1)], fraction);
   }
   if (['STDEV.S', 'STDEV.P', 'VAR.S', 'VAR.P'].includes(name)) {
-    const numbers = aggregateNumbers(args);
+    const numbers = aggregateDirectArguments(sourceArgs, { ignoreReferenceErrors: true });
     if (typeof numbers === 'string') return numbers;
     const sample = name.endsWith('.S');
     if (numbers.length < (sample ? 2 : 1)) return '#DIV/0!';
     return varianceValue(numbers, sample, name.startsWith('STDEV'));
   }
   if (['STDEVA', 'STDEVPA', 'VARA', 'VARPA'].includes(name)) {
-    const numbers = flatten(args).filter(value => value !== null && value !== undefined).map(value => typeof value === 'number' ? value : typeof value === 'boolean' ? Number(value) : 0);
+    const numbers = aggregateLogicalArguments(sourceArgs);
+    if (typeof numbers === 'string') return numbers;
     const sample = name === 'STDEVA' || name === 'VARA';
     if (numbers.length < (sample ? 2 : 1)) return '#DIV/0!';
     return varianceValue(numbers, sample, name.startsWith('STDEV'));
@@ -2672,12 +3292,12 @@ function callFunction(name, args, context = {}) {
       const error = Math.sqrt(residuals / (count - 2)) * (scaled ? yScale : 1);
       return Number.isFinite(error) ? error : '#NUM!';
     }
-    const x = numeric(args[0]);
+    const x = numericArgument(0);
     if (typeof x !== 'number') return x;
     const forecastValue = scaled ? (normalizedIntercept + normalizedSlope * (x / xScale)) * yScale : intercept + slope * x;
     return Number.isFinite(forecastValue) ? forecastValue : '#NUM!';
   }
-  const first = ['GCD', 'LCM', 'MULTINOMIAL'].includes(name) && (isFormulaRange(args[0]) || args[0]?.[FORMULA_RANGE_METADATA]) ? 0 : numeric(args[0]);
+  const first = ['GCD', 'LCM', 'MULTINOMIAL'].includes(name) && (isFormulaRange(args[0]) || args[0]?.[FORMULA_RANGE_METADATA]) ? 0 : numericArgument(0);
   if (typeof first === 'string') return first;
   if (name === 'FACT' || name === 'FACTDOUBLE') {
     if (args.length !== 1) return '#VALUE!';
@@ -2692,7 +3312,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'COMBIN' || name === 'PERMUT') {
     if (args.length !== 2) return '#VALUE!';
-    const second = numeric(args[1]);
+    const second = numericArgument(1);
     if (typeof second !== 'number') return second;
     const n = Math.trunc(first), k = Math.trunc(second);
     if (n < 0 || k < 0 || k > n || n > Number.MAX_SAFE_INTEGER) return '#NUM!';
@@ -2759,7 +3379,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'ATAN2') {
     if (args.length !== 2) return '#VALUE!';
-    const y = numeric(args[1]);
+    const y = numericArgument(1);
     if (typeof y !== 'number') return y;
     if (first === 0 && y === 0) return '#DIV/0!';
     return Math.atan2(y, first);
@@ -2773,7 +3393,7 @@ function callFunction(name, args, context = {}) {
     if (first <= 0) return '#NUM!';
     if (name === 'LN') return Math.log(first);
     if (name === 'LOG10') return Math.log10(first);
-    const base = args.length === 1 ? 10 : numeric(args[1]);
+    const base = args.length === 1 ? 10 : numericArgument(1);
     if (typeof base === 'string') return base;
     if (base <= 0) return '#NUM!';
     if (base === 1) return '#DIV/0!';
@@ -2781,7 +3401,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'TRUNC') {
     if (args.length < 1 || args.length > 2) return '#VALUE!';
-    const digits = args.length === 1 ? 0 : numeric(args[1]);
+    const digits = args.length === 1 ? 0 : numericArgument(1);
     if (typeof digits === 'string') return digits;
     if (Math.abs(digits) > 100) return '#NUM!';
     const factor = 10 ** digits;
@@ -2790,9 +3410,9 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'CEILING.MATH' || name === 'FLOOR.MATH') {
     if (args.length < 1 || args.length > 3) return '#VALUE!';
-    const significance = args[1] === null || args[1] === undefined ? 1 : numeric(args[1]);
+    const significance = args[1] === null || args[1] === undefined ? 1 : numericArgument(1);
     if (typeof significance === 'string') return significance;
-    const mode = args.length < 3 || args[2] === null || args[2] === undefined ? 0 : numeric(args[2]);
+    const mode = args.length < 3 || args[2] === null || args[2] === undefined ? 0 : numericArgument(2);
     if (typeof mode === 'string') return mode;
     const magnitude = Math.abs(significance);
     if (magnitude === 0 || first === 0) return 0;
@@ -2807,7 +3427,7 @@ function callFunction(name, args, context = {}) {
   }
   if (name === 'CEILING' || name === 'FLOOR' || name === 'MROUND') {
     if (args.length !== 2) return '#VALUE!';
-    const significance = numeric(args[1]);
+    const significance = numericArgument(1);
     if (typeof significance === 'string') return significance;
     if (name === 'MROUND' && first !== 0 && significance !== 0 && Math.sign(first) !== Math.sign(significance)) return '#NUM!';
     if (first === 0 || significance === 0) return 0;
@@ -2821,7 +3441,7 @@ function callFunction(name, args, context = {}) {
   }
   if (['ROUND', 'ROUNDUP', 'ROUNDDOWN'].includes(name)) {
     if (args.length !== 2) return '#VALUE!';
-    const digits = numeric(args[1]);
+    const digits = numericArgument(1);
     if (typeof digits === 'string') return digits;
     if (Math.abs(digits) > 100) return '#NUM!';
     const factor = 10 ** digits;
@@ -2839,12 +3459,12 @@ function callFunction(name, args, context = {}) {
     return Number.isFinite(result) ? result : '#NUM!';
   }
   if (name === 'MOD' && args.length === 2) {
-    const divisor = numeric(args[1]);
+    const divisor = numericArgument(1);
     if (typeof divisor === 'string') return divisor;
     return divisor === 0 ? '#DIV/0!' : first - divisor * Math.floor(first / divisor);
   }
   if (name === 'POWER' && args.length === 2) {
-    const exponent = numeric(args[1]);
+    const exponent = numericArgument(1);
     if (typeof exponent === 'string') return exponent;
     if (first === 0 && exponent < 0) return '#DIV/0!';
     const result = first ** exponent;
@@ -2865,7 +3485,8 @@ function evaluateFormula(formula, context = {}) {
       const token = peek();
       if (token.type === 'value') {
         position++;
-        return captureFunctionArguments && typeof token.value === 'string' ? { [FORMULA_TEXT_LITERAL]: true, value: token.value } : token.value;
+        if (captureFunctionArguments && typeof token.value === 'string') return { [FORMULA_TEXT_LITERAL]: true, value: token.value };
+        return typeof token.value === 'string' ? formulaTextResult(token.value, context.preserveFormulaText) : token.value;
       }
       if (token.type === 'error') { position++; return token.value; }
       if (token.type === 'structuredReference') {
@@ -2899,16 +3520,18 @@ function evaluateFormula(formula, context = {}) {
         if (start.sheetName && end.sheetName && start.sheetName.toLocaleLowerCase() !== end.sheetName.toLocaleLowerCase()) return '#REF!';
         if (height === 1 && width === 1 && end === start) {
           const value = context.getCell?.(start.row, start.column, sheetName) ?? null;
-          return captureFunctionArguments ? { [FORMULA_REFERENCE_VALUE]: true, value } : value;
+          const typedValue = typedFormulaCellValue(value, context.getCellKind?.(start.row, start.column, sheetName));
+          return captureFunctionArguments ? { [FORMULA_REFERENCE_VALUE]: true, value: typedValue } : typedValue;
         }
         const top = Math.min(start.row, end.row), bottom = Math.max(start.row, end.row), left = Math.min(start.column, end.column), right = Math.max(start.column, end.column);
         const values = [], entries = [];
         for (let row = top; row <= bottom; row++) {
           const line = [];
           for (let column = left; column <= right; column++) {
-            const value = context.getCell?.(row, column, sheetName) ?? null;
+            const rawValue = context.getCell?.(row, column, sheetName) ?? null;
+            const value = typedFormulaCellValue(rawValue, context.getCellKind?.(row, column, sheetName));
             line.push(value);
-            entries.push({ row, column, value, formula: context.getCellFormula?.(row, column, sheetName) || null });
+            entries.push({ row, column, value, kind: context.getCellKind?.(row, column, sheetName) || null, formula: context.getCellFormula?.(row, column, sheetName) || null });
           }
           values.push(line);
         }
@@ -3059,7 +3682,7 @@ function evaluateFormula(formula, context = {}) {
           } while (true);
         }
         take(')');
-        return callFunction(token.value, args, context);
+        return callFunction(token.value, args, token.value === 'INDEX' ? { ...context, formulaArgumentDepth: captureFunctionArguments } : context);
       }
       throw new Error('#VALUE!');
     }
@@ -3083,13 +3706,13 @@ function evaluateFormula(formula, context = {}) {
         if (isError(left)) return left;
         if (isError(right)) return right;
         if (operator === '&') {
-          if (left?.[FORMULA_TEXT_LITERAL] || left?.[FORMULA_REFERENCE_VALUE]) left = left.value;
-          if (right?.[FORMULA_TEXT_LITERAL] || right?.[FORMULA_REFERENCE_VALUE]) right = right.value;
-          left = String(left ?? '') + String(right ?? '');
+          left = plainFormulaValue(left?.[FORMULA_TEXT_LITERAL] || left?.[FORMULA_REFERENCE_VALUE] ? left.value : left);
+          right = plainFormulaValue(right?.[FORMULA_TEXT_LITERAL] || right?.[FORMULA_REFERENCE_VALUE] ? right.value : right);
+          left = formulaTextResult(String(left ?? '') + String(right ?? ''), context.preserveFormulaText);
           continue;
         }
-        if (left?.[FORMULA_TEXT_LITERAL] || left?.[FORMULA_REFERENCE_VALUE]) left = left.value;
-        if (right?.[FORMULA_TEXT_LITERAL] || right?.[FORMULA_REFERENCE_VALUE]) right = right.value;
+        left = plainFormulaValue(left?.[FORMULA_TEXT_LITERAL] || left?.[FORMULA_REFERENCE_VALUE] ? left.value : left);
+        right = plainFormulaValue(right?.[FORMULA_TEXT_LITERAL] || right?.[FORMULA_REFERENCE_VALUE] ? right.value : right);
         if (['=', '<>', '<', '>', '<=', '>='].includes(operator)) {
           const a = typeof left === 'string' && typeof right === 'string' ? left.toLocaleLowerCase() : (typeof left === 'string' && typeof right === 'number' ? numeric(left) : left);
           const b = typeof left === 'string' && typeof right === 'string' ? right.toLocaleLowerCase() : (typeof right === 'string' && typeof left === 'number' ? numeric(right) : right);
@@ -3116,7 +3739,8 @@ function evaluateFormula(formula, context = {}) {
   }
 }
 
-function createFormulaCalculator(document) {
+function createFormulaCalculator(document, options = {}) {
+  const locale = options.locale || document.locale || 'en-US';
   const now = document.now instanceof Date ? new Date(document.now.getTime()) : new Date();
   let filterStyleReader;
   const filterStyle = (sheetIndex, row, column) => {
@@ -3150,10 +3774,14 @@ function createFormulaCalculator(document) {
     const entries = [];
     for (const [row, column] of [...coordinates.values()].sort((left, right) => left[0] - right[0] || left[1] - right[1])) {
       if (++steps > MAX_CALC_STEPS) return '#NUM!';
-      const cell = document.getCell(row, column, sheetIndex), value = cellValue(sheetIndex, row, column);
+      const cell = document.getCell(row, column, sheetIndex), value = formulaCellValue(sheetIndex, row, column);
       if (value !== null && value !== '' || Boolean(cell?.formula || cell?.hasFormula)) entries.push({ row, column, value, formula: cell?.formula || null });
     }
     return { [FORMULA_RANGE]: true, bounds, entries, cellCount: (bounds.bottom - bounds.top + 1) * (bounds.right - bounds.left + 1), sheetIndex };
+  }
+  function formulaCellValue(sheetIndex, row, column) {
+    const cell = document.getCell(row, column, sheetIndex);
+    return typedFormulaCellValue(cellValue(sheetIndex, row, column), cell?.kind);
   }
   function isFilteredRow(sheetIndex, row) {
     const sheet = document.state.sheets[sheetIndex];
@@ -3176,7 +3804,7 @@ function createFormulaCalculator(document) {
     if (spillScannedSheets.has(sheetIndex)) return;
     spillScannedSheets.add(sheetIndex);
     if (document.state?.formulas === false && !document.formulaDrafts?.size) return;
-    const producesArray = formula => typeof formula === 'string' && (/\b(?:LET|SEQUENCE|FILTER|SORT|SORTBY|UNIQUE|TRANSPOSE|TEXTSPLIT|INDIRECT|OFFSET|CHOOSECOLS|CHOOSEROWS|TAKE|DROP|TOCOL|TOROW|WRAPROWS|WRAPCOLS|HSTACK|VSTACK|MODE\.MULT|FREQUENCY|RANDARRAY)\s*\(/i.test(formula) || document.state.definedNames?.some(item => new RegExp(`(?<![A-Z0-9_.])${item.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Z0-9_.])`, 'i').test(formula)));
+    const producesArray = formula => typeof formula === 'string' && (/\b(?:LET|SEQUENCE|FILTER|SORT|SORTBY|UNIQUE|TRANSPOSE|TEXTSPLIT|INDIRECT|OFFSET|INDEX|CHOOSECOLS|CHOOSEROWS|TAKE|DROP|TOCOL|TOROW|WRAPROWS|WRAPCOLS|HSTACK|VSTACK|MODE\.MULT|FREQUENCY|RANDARRAY)\s*\(/i.test(formula) || document.state.definedNames?.some(item => new RegExp(`(?<![A-Z0-9_.])${item.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Z0-9_.])`, 'i').test(formula)));
     const referencesSpill = formula => typeof formula === 'string' && /(?:'[^']+'|[A-Za-z_][\w. ]*)!\$?[A-Z]{1,3}\$?[1-9]\d*#|\$?[A-Z]{1,3}\$?[1-9]\d*#/i.test(formula);
     const formulas = [...(document.state?.sheets?.[sheetIndex]?.cells?.values?.() || [])]
       .filter(cell => cell.formula)
@@ -3205,11 +3833,16 @@ function createFormulaCalculator(document) {
     if (cache.has(key)) return cache.get(key);
     if (active.has(key) || active.size > 1000) return '#CIRC!';
     active.add(key);
-    const evaluatedValue = evaluateFormula(cell.formula, { now, date1904: document.state.date1904, formulaRow: row, formulaColumn: column, allowArrayResult: true, getCell: (nextRow, nextColumn, sheetName) => {
+    const evaluatedValue = evaluateFormula(cell.formula, { now, locale, date1904: document.state.date1904, formulaRow: row, formulaColumn: column, allowArrayResult: true, preserveFormulaText: true, getCell: (nextRow, nextColumn, sheetName) => {
       if (++steps > MAX_CALC_STEPS) return '#NUM!';
-      if (!sheetName) return cellValue(sheetIndex, nextRow, nextColumn);
+      if (!sheetName) return formulaCellValue(sheetIndex, nextRow, nextColumn);
       const targetSheet = document.state.sheets.findIndex(item => item.name.toLocaleLowerCase() === sheetName.toLocaleLowerCase());
-      return targetSheet < 0 ? '#REF!' : cellValue(targetSheet, nextRow, nextColumn);
+      return targetSheet < 0 ? '#REF!' : formulaCellValue(targetSheet, nextRow, nextColumn);
+    }, getCellKind: (nextRow, nextColumn, sheetName) => {
+      const targetSheet = sheetName ? document.state.sheets.findIndex(item => item.name.toLocaleLowerCase() === sheetName.toLocaleLowerCase()) : sheetIndex;
+      if (targetSheet < 0) return null;
+      const target = document.getCell(nextRow, nextColumn, targetSheet);
+      return target?.kind || null;
     }, getCellFormula: (nextRow, nextColumn, sheetName) => {
       const targetSheet = sheetName ? document.state.sheets.findIndex(item => item.name.toLocaleLowerCase() === sheetName.toLocaleLowerCase()) : sheetIndex;
       return targetSheet < 0 ? null : document.getCell(nextRow, nextColumn, targetSheet)?.formula || null;
@@ -3223,7 +3856,7 @@ function createFormulaCalculator(document) {
       if (targetSheet < 0) return '#REF!';
       const { top, bottom, left, right } = definition.source, height = bottom - top + 1, width = right - left + 1;
       if (height < 1 || width < 1 || height * width > MAX_RANGE_CELLS) return '#REF!';
-      const values = Array.from({ length: height }, (_, row) => Array.from({ length: width }, (_, column) => cellValue(targetSheet, top + row, left + column)));
+      const values = Array.from({ length: height }, (_, row) => Array.from({ length: width }, (_, column) => formulaCellValue(targetSheet, top + row, left + column)));
       return height === 1 && width === 1 ? values[0][0] : values;
     },
     getSheetCount: () => document.state.sheets.length,
@@ -3252,7 +3885,7 @@ function createFormulaCalculator(document) {
       const dataTop = top + headerRows, dataBottom = bottom - totalsRows;
       if (parts.thisRow || parts.selector === '#thisrow') {
         if (targetSheetIndex !== sheetIndex || formulaRow < dataTop || formulaRow > dataBottom || column < 0) return '#VALUE!';
-        if (endColumn === column) return cellValue(targetSheetIndex, formulaRow, left + column);
+        if (endColumn === column) return formulaCellValue(targetSheetIndex, formulaRow, left + column);
         return sparseRange({ top: formulaRow, bottom: formulaRow, left: left + column, right: left + endColumn }, document.state.sheets[targetSheetIndex].name, targetSheetIndex);
       }
       let rowTop = dataTop, rowBottom = dataBottom;
@@ -3294,18 +3927,20 @@ function createFormulaCalculator(document) {
     cache.set(key, value);
     return value;
   }
-  const calculator = { now, filterStyle, value: cellValue, spillRanges: sheetIndex => { scanSpills(sheetIndex); return [...spillRanges].filter(([key]) => key.startsWith(sheetIndex + ':')).map(([, range]) => ({ ...range })); }, spillExtent: sheetIndex => { scanSpills(sheetIndex); return spillExtents.get(sheetIndex) || null; }, cell: (sheetIndex, row, column) => {
+  const calculator = { now, filterStyle, value: (sheetIndex, row, column) => plainFormulaValue(cellValue(sheetIndex, row, column)), spillRanges: sheetIndex => { scanSpills(sheetIndex); return [...spillRanges].filter(([key]) => key.startsWith(sheetIndex + ':')).map(([, range]) => ({ ...range })); }, spillExtent: sheetIndex => { scanSpills(sheetIndex); return spillExtents.get(sheetIndex) || null; }, cell: (sheetIndex, row, column) => {
     scanSpills(sheetIndex);
     const cell = document.getCell(row, column, sheetIndex);
     if (!cell?.formula) {
       const key = sheetIndex + ':' + addressFor(row + 1, column + 1);
       if (!spillValues.has(key)) return cell;
       const value = spillValues.get(key);
-      return { ...cell, row, column, address: addressFor(row + 1, column + 1), value: typeof value === 'boolean' ? String(value).toUpperCase() : String(value ?? ''), cachedValue: value, kind: typeof value === 'number' ? 'number' : typeof value === 'boolean' ? 'boolean' : isError(value) ? 'error' : 'string', isSpill: true, ...(document.state.date1904 ? { date1904: true } : {}) };
+      const publicValue = plainFormulaValue(value);
+      return { ...cell, row, column, address: addressFor(row + 1, column + 1), value: typeof publicValue === 'boolean' ? String(publicValue).toUpperCase() : String(publicValue ?? ''), cachedValue: publicValue, kind: typeof publicValue === 'number' ? 'number' : typeof publicValue === 'boolean' ? 'boolean' : isError(value) ? 'error' : 'string', isSpill: true, ...(document.state.date1904 ? { date1904: true } : {}) };
     }
     const value = cellValue(sheetIndex, row, column);
-    const kind = typeof value === 'number' ? 'number' : typeof value === 'boolean' ? 'boolean' : isError(value) ? 'error' : 'string';
-    return { ...cell, value: kind === 'boolean' ? (value ? 'TRUE' : 'FALSE') : value === null ? '' : String(value), cachedValue: value, kind };
+    const publicValue = plainFormulaValue(value);
+    const kind = typeof publicValue === 'number' ? 'number' : typeof publicValue === 'boolean' ? 'boolean' : isError(value) ? 'error' : 'string';
+    return { ...cell, value: kind === 'boolean' ? (publicValue ? 'TRUE' : 'FALSE') : publicValue === null ? '' : String(publicValue), cachedValue: publicValue, kind };
   } };
   return calculator;
 }
@@ -3346,7 +3981,7 @@ function dateParts(serial) {
   if (!Number.isFinite(date.getTime())) return '#NUM!';
   return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate() };
 }
-function parseDateValue(input) {
+function parseDateValue(input, currentYear = new Date().getFullYear(), locale = 'en-US') {
   const text = input.trim().replace(/[T ](?=\d{1,2}:\d{2}(?::|$))[\s\S]*$/i, '');
   let match = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(text);
   if (!match) match = /^(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일?$/.exec(text);
@@ -3354,21 +3989,31 @@ function parseDateValue(input) {
     const [, year, month, day] = match;
     return validDateValue(Number(year), Number(month), Number(day));
   }
-  match = /^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/.exec(text);
+  match = /^(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?$/.exec(text);
   if (match) {
-    const [, month, day, rawYear] = match;
-    const year = rawYear.length === 2 ? Number(rawYear) + (Number(rawYear) < 30 ? 2000 : 1900) : Number(rawYear);
+    const [, first, second, rawYear] = match;
+    const dayFirst = localeUsesDayFirstDates(locale);
+    const month = dayFirst ? second : first, day = dayFirst ? first : second;
+    const year = rawYear ? rawYear.length === 2 ? Number(rawYear) + (Number(rawYear) < 30 ? 2000 : 1900) : Number(rawYear) : currentYear;
     return validDateValue(year, Number(month), Number(day));
   }
+  match = /^(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.?$/.exec(text);
+  if (match) return validDateValue(Number(match[1]), Number(match[2]), Number(match[3]));
   const monthNames = new Map(['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].map((name, index) => [name, index + 1]));
-  match = /^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2}),?\s+(\d{2,4})$/i.exec(text);
-  if (!match) match = /^(\d{1,2})\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{2,4})$/i.exec(text);
+  match = /^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2}),?(?:\s+(\d{2,4}))?$/i.exec(text);
+  if (!match) match = /^(\d{1,2})\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)(?:\s+(\d{2,4}))?$/i.exec(text);
   if (!match) return null;
   const monthName = (match[1].match(/[A-Za-z]+/)?.[0] || match[2]).slice(0, 3).toLowerCase();
   const day = Number(/^\d/.test(match[1]) ? match[1] : match[2]);
   const rawYear = /^\d/.test(match[1]) ? match[3] : match[3];
-  const year = rawYear.length === 2 ? Number(rawYear) + (Number(rawYear) < 30 ? 2000 : 1900) : Number(rawYear);
+  const year = rawYear ? rawYear.length === 2 ? Number(rawYear) + (Number(rawYear) < 30 ? 2000 : 1900) : Number(rawYear) : currentYear;
   return validDateValue(year, monthNames.get(monthName), day);
+}
+function localeUsesDayFirstDates(locale) {
+  try {
+    const parts = new Intl.DateTimeFormat(locale, { day: 'numeric', month: 'numeric', year: 'numeric', timeZone: 'UTC' }).formatToParts(new Date(Date.UTC(2006, 10, 22)));
+    return parts.findIndex(part => part.type === 'day') < parts.findIndex(part => part.type === 'month');
+  } catch { return false; }
 }
 function validDateValue(year, month, day) {
   if (![year, month, day].every(Number.isInteger) || year < 0 || year > 9999 || month < 1 || month > 12 || day < 1 || day > 31) return null;

@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { unzipSync, zipSync } = require('../vendor/node_modules/fflate');
 const { SaxesParser } = require('../vendor/node_modules/saxes');
-const { analyze, formatCellValue, inspectZip, patchCell, patchCells, patchColumnWidths, patchRowHeights, patchRowHeightValues, patchPrintSettings, patchPrintArea, patchDefinedName, patchPrintTitles, patchHeaderFooter, patchPageBreaks, patchAutoFilters, patchFilterVisibility, patchHiddenRows, patchHiddenColumns, patchOutlineGroups, patchFreezePanes, patchMergedCells, patchAddTable, patchTableStyles, patchTableRanges, patchTableTotals, patchAddChart, patchChartMetadata, patchChartPlacement, patchChartSource, patchDeleteChart, patchClearConditionalFormats, patchDeleteConditionalFormatRule, patchMoveConditionalFormatRule, patchEditConditionalFormatRule, patchIconSetConditionalFormat, patchCellValueConditionalFormat, patchDuplicateValuesConditionalFormat, patchSheetName, patchAddSheet, patchDeleteSheet, patchMoveSheet, translateFormulaReferences, transformStructure } = require('../src/xlsx');
+const { analyze, calculateChartPreviews, formatCellValue, inspectZip, patchCell, patchCells, patchColumnWidths, patchRowHeights, patchRowHeightValues, patchPrintSettings, patchPrintArea, patchDefinedName, patchPrintTitles, patchHeaderFooter, patchPageBreaks, patchAutoFilters, patchFilterVisibility, patchHiddenRows, patchHiddenColumns, patchOutlineGroups, patchFreezePanes, patchMergedCells, patchAddTable, patchTableStyles, patchTableRanges, patchTableTotals, patchAddChart, patchChartMetadata, patchChartPlacement, patchChartSource, patchDeleteChart, patchClearConditionalFormats, patchDeleteConditionalFormatRule, patchMoveConditionalFormatRule, patchEditConditionalFormatRule, patchIconSetConditionalFormat, patchCellValueConditionalFormat, patchDuplicateValuesConditionalFormat, patchSheetName, patchAddSheet, patchDeleteSheet, patchMoveSheet, translateFormulaReferences, transformStructure } = require('../src/xlsx');
 const { createFormulaCalculator, evaluateFormula } = require('../src/formula');
 const { chartPrintGeometry } = require('../src/chart-print');
 const { ICON_SET_LENGTHS } = require('../src/auto-filter');
@@ -66,14 +66,68 @@ test('기본 수식 계산은 연산자 우선순위·셀 참조·범위 집계�
   assert.equal(evaluateFormula('Z9', context), 0);
   assert.equal(evaluateFormula('SUM(A1:B2)', context), 14);
   assert.equal(evaluateFormula('TEXT(1234.5,"#,##0.00")'), '1,234.50');
+  assert.equal(evaluateFormula('TEXT(1234.5,"#,##0.##")'), '1,234.5', 'optional decimal places trim insignificant zeros');
+  assert.equal(evaluateFormula('TEXT(12,"0.##")'), '12', 'optional decimal places do not force a decimal separator');
+  assert.equal(evaluateFormula('TEXT(12.3,"0.0#")'), '12.3');
+  assert.equal(evaluateFormula('TEXT(1234,"0.00E+00")'), '1.23E+03', 'scientific TEXT formats scale the mantissa and pad the exponent');
+  assert.equal(evaluateFormula('TEXT(999.9,"0.0E+00")'), '1.0E+03', 'scientific mantissa rounding carries into the exponent');
+  assert.equal(evaluateFormula('TEXT(0.00123,"0.00E+00")'), '1.23E-03');
+  assert.equal(evaluateFormula('TEXT(-1234,"0.00E+00")'), '-1.23E+03');
+  assert.equal(evaluateFormula('TEXT(-1234,"0.00E+00;(0.00E+00)")'), '(1.23E+03)', 'negative sections format the absolute scientific value');
+  assert.equal(evaluateFormula('TEXT(0,"0.0E-00")'), '0.0E00', 'scientific zero uses exponent zero and does not force a positive sign');
+  assert.equal(evaluateFormula('TEXT(1234,"0.00e+0")'), '1.23e+3', 'scientific formats preserve marker case and requested exponent width');
+  assert.equal(evaluateFormula('TEXT(1E308,"0.00E+00")'), '1.00E+308', 'scientific formatting handles the largest finite magnitudes');
+  assert.equal(evaluateFormula('TEXT(5E-324,"0.00E+00")'), '4.94E-324', 'scientific formatting handles subnormal magnitudes without underflow');
+  assert.equal(evaluateFormula('TEXT(-12.5,"0.00;(0.00);""-""")'), '(12.50)', 'negative sections format the absolute value with their own literals');
+  assert.equal(evaluateFormula('TEXT(0,"0.00;(0.00);""-""")'), '-', 'zero sections can provide a literal result');
+  assert.equal(evaluateFormula('TEXT(1234.5,"""USD ""#,##0.00")'), 'USD 1,234.50', 'quoted format literals are preserved');
+  assert.equal(evaluateFormula('TEXT(-1234.5,"#,##0.00;-""USD ""#,##0.00")'), '-USD 1,234.50');
+  assert.equal(evaluateFormula('TEXT(100,"[>=100]0.00;[<100]0.0;""none""")'), '100.00', 'the first matching numeric condition selects its section');
+  assert.equal(evaluateFormula('TEXT(99.9,"[>=100]0.00;[<100]0.0;""none""")'), '99.9');
+  assert.equal(evaluateFormula('TEXT(0,"[>=100]0.00;[<0]0.0;""none""")'), 'none', 'an unmatched conditional format uses its unconditional fallback');
+  assert.equal(evaluateFormula('TEXT(-5,"0.0;""negative;value""")'), 'negative;value', 'quoted semicolons stay inside their format section');
+  assert.equal(evaluateFormula('TEXT(5,"[Red]0")'), '#VALUE!', 'unsupported bracket directives are rejected');
+  assert.equal(evaluateFormula('TEXT(5,"0;0;[<0]0")'), '#VALUE!', 'conditions are limited to the first two numeric sections');
   assert.equal(evaluateFormula('TEXT(0.25,"0.0%")'), '25.0%');
   assert.equal(evaluateFormula('TEXT(1234,"$#,##0")'), '$1,234');
   assert.equal(evaluateFormula('TEXT(45292,"yyyy-mm-dd")'), '2024-01-01');
   assert.equal(evaluateFormula('TEXT(45292,"m/d/yy")'), '1/1/24');
   assert.equal(evaluateFormula('TEXT(45292,"dd mmm yyyy")'), '01 Jan 2024');
+  assert.equal(evaluateFormula('TEXT(45292,"ddd, mmmm d, yyyy")'), 'Mon, January 1, 2024', 'date TEXT formats support localized weekday names and flexible separators');
+  assert.equal(evaluateFormula('TEXT(45292,"dddd")'), 'Monday', 'date TEXT formats can return a weekday alone');
+  assert.equal(evaluateFormula('TEXT(45292,"mmmmm")'), 'J', 'date TEXT formats support a one-letter month name');
+  assert.equal(evaluateFormula('TEXT(45292,"dddd, mmmm d, yyyy")', { locale: 'ko-KR' }), '월요일, 1월 1, 2024', 'weekday and month names follow the active locale');
+  assert.equal(evaluateFormula('TEXT(45292,"d ""days""")'), '1 days', 'quoted date-format literals are preserved');
+  assert.equal(evaluateFormula('TEXT(45292,"d ""m""")'), '1 m', 'date tokens inside quoted literals are not expanded');
+  assert.equal(evaluateFormula('TEXT(45292.5,"yyyy-mm-dd ""at"" h:mm")'), '2024-01-01 at 12:00', 'quoted date-time literals remain between date and time fields');
+  assert.equal(evaluateFormula('TEXT(45292.5,"yyyy-mm-dd ""at"" h:mm A/P")'), '2024-01-01 at 12:00 P', 'quoted literals are preserved when splitting date and time formats');
   assert.equal(evaluateFormula('TEXT(0.5,"h:mm AM/PM")'), '12:00 PM');
+  assert.equal(evaluateFormula('TEXT(0,"h:mm A/P")'), '12:00 A', 'short meridiem format distinguishes midnight');
+  assert.equal(evaluateFormula('TEXT(0.5,"h:mm A/P")'), '12:00 P', 'short meridiem format distinguishes noon');
+  assert.equal(evaluateFormula('TEXT(0.5,"h:mm a/p")'), '12:00 p', 'short meridiem format preserves token case');
+  assert.equal(evaluateFormula('TEXT(45292.5,"yyyy-mm-dd h:mm A/P")'), '2024-01-01 12:00 P', 'short meridiem format combines with a date');
+  assert.equal(evaluateFormula('TEXT(0.5,"h:mm ""AM/PM""")'), '12:00 AM/PM', 'quoted meridiem-looking text remains a literal');
+  assert.equal(evaluateFormula('TEXT(0.5,"h:mm ""hours""")'), '12:00 hours', 'quoted time-format words remain literal');
+  assert.equal(evaluateFormula('TEXT(0.5006944444444444,"mm:ss")'), '01:00', 'time TEXT formats support minute and second fields without an hour');
+  assert.equal(evaluateFormula('TEXT(0.5006944444444444,"m:ss")'), '1:00', 'time TEXT formats preserve unpadded minute fields');
+  assert.equal(evaluateFormula('TEXT(0.5006944444444444,"ss")'), '00', 'time TEXT formats can return seconds alone');
+  assert.equal(evaluateFormula('TEXT(45292.500694444444,"yyyy-mm-dd mm:ss")'), '2024-01-01 01:00', 'date and minute-second TEXT formats can be combined');
+  assert.equal(evaluateFormula('TEXT(1.5,"[h]")'), '36', 'elapsed hour formats do not wrap at 24 hours');
+  assert.equal(evaluateFormula('TEXT(1.5,"[h]:mm:ss")'), '36:00:00', 'elapsed hours retain subordinate minute and second fields');
+  assert.equal(evaluateFormula('TEXT(1.5,"[m]:ss")'), '2160:00', 'elapsed minutes do not wrap at one hour');
+  assert.equal(evaluateFormula('TEXT(1.5,"[s]")'), '129600', 'elapsed seconds show the full duration');
+  assert.equal(evaluateFormula('TEXT(-1.5,"[h]:mm:ss")'), '-36:00:00', 'elapsed time formats preserve negative durations');
+  assert.equal(evaluateFormula('TEXT(0.5,"hh:mm:ss.000")'), '12:00:00.000', 'time TEXT formats support fractional second placeholders');
+  assert.equal(evaluateFormula('TEXT(0.5000000115740741,"hh:mm:ss.000")'), '12:00:00.001', 'fractional seconds round at the displayed precision');
+  assert.equal(evaluateFormula('TEXT(0.9999999,"hh:mm:ss.000")'), '23:59:59.991', 'fractional seconds retain the final milliseconds before midnight');
+  assert.equal(evaluateFormula('TEXT(1.5,"[h]:mm:ss.00")'), '36:00:00.00', 'elapsed time formats support fractional second placeholders');
+  assert.equal(evaluateFormula('TEXT(1.234567/86400,"[s].000")'), '1.235', 'elapsed seconds support fractional precision');
+  assert.equal(evaluateFormula('TEXT(59.9996/86400,"[s].000")'), '60.000', 'elapsed second rounding carries into the next minute without wrapping');
+  assert.equal(evaluateFormula('TEXT(45292.9999999999,"yyyy-mm-dd hh:mm:ss.000")'), '2024-01-02 00:00:00.000', 'fractional second rounding carries into the next date');
   assert.equal(evaluateFormula('TEXT(45292.5,"yyyy-mm-dd h:mm")'), '2024-01-01 12:00');
-  assert.equal(evaluateFormula('TEXT(0.999999,"hh:mm:ss")'), '00:00:00');
+  assert.equal(evaluateFormula('ISTEXT(TEXT(45292,"yyyy-mm-dd"))'), true, 'date-formatted TEXT results remain text');
+  assert.equal(evaluateFormula('TEXT(0.999999,"hh:mm:ss")'), '23:59:59', 'time TEXT output truncates displayed seconds rather than rounding into the next day');
+  assert.equal(evaluateFormula('TEXT(1.999999,"[h]:mm:ss")'), '47:59:59', 'elapsed time output does not round a partial second into the next hour');
   assert.equal(evaluateFormula('TEXT(2,"unsupported")'), '#VALUE!');
   assert.equal(evaluateFormula('VALUE("$1,234.50")'), 1234.5);
   assert.equal(evaluateFormula('VALUE("25%")'), 0.25);
@@ -303,6 +357,16 @@ assert.equal(evaluateFormula('MINIFS(B1:B2,A1:A2,">2")', context), 5);
   assert.equal(evaluateFormula('N("42")'), 0);
   assert.equal(evaluateFormula('ISERROR(1/0)'), true);
   assert.equal(evaluateFormula('ISERR(1/0)'), true);
+  assert.equal(evaluateFormula('ISERROR("#N/A")'), false, 'error-like text remains text in error predicates');
+  assert.equal(evaluateFormula('ISERR("#DIV/0!")'), false, 'quoted error-like text is not an error value');
+  assert.equal(evaluateFormula('ISNA("#N/A")'), false, 'quoted #N/A remains text');
+  assert.equal(evaluateFormula('N("#DIV/0!")'), 0, 'N ignores quoted error-like text as text');
+  assert.equal(evaluateFormula('VALUE("#DIV/0!")'), '#VALUE!', 'VALUE parses quoted error-like text instead of propagating it as an error');
+  assert.equal(evaluateFormula('ABS("#N/A")'), '#VALUE!', 'numeric functions parse quoted error-like text as text');
+  assert.equal(evaluateFormula('LEFT("#N/A",2)'), '#N', 'text functions accept strings that resemble errors');
+  assert.equal(evaluateFormula('INDIRECT("#N/A")'), '#REF!', 'INDIRECT parses quoted error-like text as a reference string');
+  assert.equal(evaluateFormula('ROWS("#N/A")'), 1, 'ROWS treats quoted error-like text as a scalar');
+  assert.equal(evaluateFormula('SWITCH("#N/A","#N/A","matched","other")'), 'matched', 'SWITCH compares quoted error-like text as text');
   assert.equal(evaluateFormula('ISNA(A1)', { getCell: () => '#N/A' }), true);
   assert.equal(evaluateFormula('ISNONTEXT(A1)', { getCell: () => 42 }), true);
   assert.equal(evaluateFormula('ISNONTEXT("text")'), false);
@@ -315,6 +379,7 @@ assert.equal(evaluateFormula('MINIFS(B1:B2,A1:A2,">2")', context), 5);
   assert.equal(evaluateFormula('NA(1)'), '#VALUE!');
   assert.equal(evaluateFormula('ISERR(A1)', { getCell: () => '#N/A' }), false);
   assert.equal(evaluateFormula('ERROR.TYPE(1/0)'), 2);
+  assert.equal(evaluateFormula('ERROR.TYPE("#DIV/0!")'), '#N/A', 'ERROR.TYPE does not classify text that resembles an error');
   assert.equal(evaluateFormula('ERROR.TYPE(#N/A!)'), 7, 'the #N/A! alias has the same error type as #N/A');
   assert.equal(evaluateFormula('ERROR.TYPE(#SPILL!)'), 9, 'Excel assigns error type 9 to spill errors');
   assert.equal(evaluateFormula('ERROR.TYPE(#CALC!)'), 14, 'Excel assigns error type 14 to calculation errors');
@@ -380,8 +445,24 @@ assert.equal(evaluateFormula('YEARFRAC(DATE(2024,1,1),DATE(2025,1,1))'), 1);
 assert.equal(evaluateFormula('DATEVALUE("2024-02-29")'), evaluateFormula('DATE(2024,2,29)'));
 assert.equal(evaluateFormula('DATEVALUE("2024년 2월 29일")'), evaluateFormula('DATE(2024,2,29)'));
 assert.equal(evaluateFormula('DATEVALUE("2/29/2024")'), evaluateFormula('DATE(2024,2,29)'));
+assert.equal(evaluateFormula('DATEVALUE("2/3/2024")', { locale: 'en-US' }), evaluateFormula('DATE(2024,2,3)'), 'US dates interpret the first component as the month');
+assert.equal(evaluateFormula('DATEVALUE("2/3/2024")', { locale: 'en-GB' }), evaluateFormula('DATE(2024,3,2)'), 'British dates interpret the first component as the day');
+assert.equal(evaluateFormula('DATEVALUE("2/3/2024")', { locale: 'de-DE' }), evaluateFormula('DATE(2024,3,2)'), 'day-first system locales interpret the first component as the day');
+assert.equal(evaluateFormula('DATEVALUE("2024. 2. 29.")', { locale: 'ko-KR' }), evaluateFormula('DATE(2024,2,29)'), 'Korean dotted dates are recognized');
+for (const [locale, expectedDate] of [['en-GB', 'DATE(2024,3,2)'], ['en-US', 'DATE(2024,2,3)']]) {
+  const cells = new Map([['A1', { address: 'A1', row: 0, column: 0, value: '', kind: 'number', formula: 'DATEVALUE("2/3/2024")', hasFormula: true }]]);
+  const calculator = createFormulaCalculator({ locale, state: { sheets: [{ name: 'Data', cells, mergedCells: [], tables: [] }] }, getCell: (row, column) => cells.get(String.fromCharCode(65 + column) + (row + 1)) || null });
+  assert.equal(calculator.value(0, 0, 0), evaluateFormula(expectedDate), `document locale ${locale} is used by workbook formula calculation`);
+}
 assert.equal(evaluateFormula('DATEVALUE("Feb 29, 2024")'), evaluateFormula('DATE(2024,2,29)'));
 assert.equal(evaluateFormula('DATEVALUE("2024-02-29T12:30:00")'), evaluateFormula('DATE(2024,2,29)'));
+const dateValueNow = new Date(2024, 1, 29, 12);
+assert.equal(evaluateFormula('DATEVALUE("1/1")', { now: dateValueNow }), evaluateFormula('DATE(2024,1,1)'), 'DATEVALUE uses the current year when a numeric date omits it');
+assert.equal(evaluateFormula('DATEVALUE("Jan 1")', { now: dateValueNow }), evaluateFormula('DATE(2024,1,1)'), 'month-name dates may omit the year');
+assert.equal(evaluateFormula('DATEVALUE("1 January")', { now: dateValueNow }), evaluateFormula('DATE(2024,1,1)'), 'day-first month-name dates may omit the year');
+assert.equal(evaluateFormula('DATEVALUE("Feb 29")', { now: dateValueNow }), evaluateFormula('DATE(2024,2,29)'), 'an omitted year uses the current leap year');
+assert.equal(evaluateFormula('DATEVALUE("Feb 29")', { now: new Date(2023, 1, 28) }), '#VALUE!', 'an omitted year still validates the resulting calendar date');
+assert.equal(evaluateFormula('DATEVALUE("1/1")', { date1904: true, now: dateValueNow }), evaluateFormula('DATE(2024,1,1)', { date1904: true }), 'omitted-year dates follow the workbook date system');
 assert.equal(evaluateFormula('DATEVALUE("2024-02-30")'), '#VALUE!');
 assert.equal(evaluateFormula('DATEVALUE(45352)'), '#VALUE!');
 assert.equal(evaluateFormula('YEARFRAC(DATE(2024,1,1),DATE(2025,1,1),1)'), 1);
@@ -415,6 +496,9 @@ assert.equal(evaluateFormula('MATCH("A~*S?ar",A1:A3,0)', lookupContext), 3, 'MAT
 assert.equal(evaluateFormula('XMATCH("Beta",A1:A3)', lookupContext), 2);
 assert.equal(evaluateFormula('XMATCH("A~*S?ar",A1:A3,2)', lookupContext), 3, 'XMATCH wildcard mode honors escaped wildcard characters');
 assert.equal(evaluateFormula('XMATCH("Beta",A1:A3,0,-1)', lookupContext), 2, 'XMATCH can search backwards');
+for (const formula of ['MATCH(2,A1:A3,NA())', 'MATCH(2,NA(),0)', 'XMATCH(2,A1:A3,NA(),1)', 'XMATCH(2,A1:A3,0,NA())']) {
+  assert.equal(evaluateFormula(formula, { getCell: row => [1, 2, 3][row] ?? null }), '#N/A', `${formula} propagates direct argument errors`);
+}
 const sortedLookupContext = { getCell: row => [10, 20, 30, 40][row] };
 assert.equal(evaluateFormula('XMATCH(25,A1:A4,1)', sortedLookupContext), 3, 'XMATCH returns the next larger item');
 assert.equal(evaluateFormula('XMATCH(25,A1:A4,-1)', sortedLookupContext), 2, 'XMATCH returns the next smaller item');
@@ -425,6 +509,7 @@ assert.equal(evaluateFormula('XMATCH(99,A1:A4)', sortedLookupContext), '#N/A');
 assert.equal(evaluateFormula('XMATCH(1,A1:A4,3)', sortedLookupContext), '#VALUE!');
 assert.equal(evaluateFormula('VLOOKUP("B?ta",A1:B3,2,FALSE)', lookupContext), 20, 'VLOOKUP exact mode supports wildcards');
   assert.equal(evaluateFormula('VLOOKUP("B~?ta",A1:B3,2,FALSE)', lookupContext), '#N/A', 'tilde-escaped wildcard characters are matched literally');
+
   assert.equal(evaluateFormula('COUNTBLANK(A1:A2)', { getCell: (row, column) => [null, '', 0][row] }), 2);
   assert.equal(evaluateFormula('COUNTBLANK(A1)', { getCell: () => null }), 1);
   assert.equal(evaluateFormula('A1', { getCell: () => null }), 0, 'a blank cell reference evaluates to zero when returned directly');
@@ -434,6 +519,48 @@ assert.equal(evaluateFormula('VLOOKUP("B?ta",A1:B3,2,FALSE)', lookupContext), 20
   assert.equal(evaluateFormula('COUNTA(A1)', { getCell: () => null }), 0, 'COUNTA excludes a truly blank cell reference');
   const averageAContext = { getCell: row => [2, true, false, 'text', null][row] ?? null };
   assert.equal(evaluateFormula('AVERAGEA(A1:A5)', averageAContext), 0.75, 'AVERAGEA includes logical and text cells but skips blanks');
+  assert.equal(evaluateFormula('AVERAGEA("2",2)'), 2, 'AVERAGEA counts numeric text typed directly as an argument');
+  const mixedAggregateContext = { getCell: row => [1, true, 3, '2', null][row] ?? null };
+  assert.equal(evaluateFormula('MEDIAN(A1:A5)', mixedAggregateContext), 2, 'MEDIAN ignores logical and text cells in a reference');
+  assert.equal(evaluateFormula('MEDIAN(TRUE,2,4)'), 2, 'MEDIAN counts directly supplied logical values');
+  assert.equal(evaluateFormula('MEDIAN("2",4)'), 3, 'MEDIAN converts numeric text supplied directly');
+  assert.equal(evaluateFormula('MEDIAN("text",2)'), '#VALUE!', 'MEDIAN rejects nonnumeric text supplied directly');
+  assert.equal(evaluateFormula('MIN(A1:A3)', { getCell: row => [5, true, 3][row] }), 3, 'MIN ignores logical values in a reference');
+  assert.equal(evaluateFormula('MAX(A1:A3)', { getCell: row => [5, false, 3][row] }), 5, 'MAX ignores logical values in a reference');
+  assert.equal(evaluateFormula('PRODUCT(A1:A3)', { getCell: row => [2, false, 3][row] }), 6, 'PRODUCT ignores logical values in a reference');
+  const stdevRangeContext = {
+    getCell: row => [1, 3, true, 'text', '#N/A'][row] ?? null,
+    getCellKind: row => row === 4 ? 'error' : row === 3 ? 'string' : row === 2 ? 'boolean' : 'number'
+  };
+  assert.equal(evaluateFormula('STDEV.P(A1:A5)', stdevRangeContext), 1, 'STDEV.P ignores text, logical, and error values in a reference');
+  assert.equal(evaluateFormula('VAR.P(A1:A5)', stdevRangeContext), 1, 'VAR.P uses only numeric reference values');
+  assert.ok(Math.abs(evaluateFormula('STDEV.S(A1:A5)', stdevRangeContext) - Math.sqrt(2)) < 1e-12);
+  assert.equal(evaluateFormula('VAR.S(A1:A5)', stdevRangeContext), 2);
+  assert.ok(Math.abs(evaluateFormula('VAR.P(1,"2",TRUE)') - 2 / 9) < 1e-12, 'VAR.P counts direct logical and numeric text arguments');
+  assert.equal(evaluateFormula('STDEV.S(1/0,2)'), '#DIV/0!', 'STDEV.S propagates direct argument errors');
+const legacyStatisticContext = {
+  getCell: row => [1, 3, true, 'text', '#N/A'][row] ?? null,
+  getCellKind: row => row === 2 ? 'boolean' : row === 3 ? 'string' : row === 4 ? 'error' : 'number'
+};
+assert.equal(evaluateFormula('SUMSQ(A1:A5)', legacyStatisticContext), 10, 'SUMSQ ignores reference text, logical, and error values');
+assert.equal(evaluateFormula('DEVSQ(A1:A5)', legacyStatisticContext), '#N/A', 'DEVSQ propagates reference errors');
+assert.equal(evaluateFormula('DEVSQ(A1:A4)', legacyStatisticContext), 2, 'DEVSQ ignores reference text and logical values');
+assert.equal(evaluateFormula('AVEDEV(A1:A4)', legacyStatisticContext), 1, 'AVEDEV ignores reference text and logical values');
+assert.ok(Math.abs(evaluateFormula('GEOMEAN(A1:A4)', legacyStatisticContext) - Math.sqrt(3)) < 1e-12);
+assert.equal(evaluateFormula('HARMEAN(A1:A4)', legacyStatisticContext), 1.5);
+assert.ok(Math.abs(evaluateFormula('DEVSQ("2",TRUE,4)') - 14 / 3) < 1e-12, 'DEVSQ counts direct logical and numeric text arguments');
+assert.equal(evaluateFormula('SUMSQ(2,TRUE,"3")'), 14, 'SUMSQ counts direct logical and numeric text arguments');
+assert.equal(evaluateFormula('GEOMEAN("2",TRUE,4)'), 2, 'GEOMEAN counts direct logical and numeric text arguments');
+assert.ok(Math.abs(evaluateFormula('HARMEAN("2",TRUE,4)') - 12 / 7) < 1e-12, 'HARMEAN counts direct logical and numeric text arguments');
+assert.equal(evaluateFormula('DEVSQ("text",1)'), '#VALUE!', 'DEVSQ rejects direct text that cannot be converted');
+  assert.equal(evaluateFormula('MINA("2",3)'), 2, 'MINA converts numeric text typed directly as an argument');
+  assert.equal(evaluateFormula('MAXA("2",1)'), 2, 'MAXA converts numeric text typed directly as an argument');
+  assert.equal(evaluateFormula('MINA("text",2)'), 0, 'MINA treats nonnumeric direct text as zero');
+  assert.equal(evaluateFormula('MAXA("text",-2)'), 0, 'MAXA treats nonnumeric direct text as zero');
+  const minaReferenceTextContext = { getCell: row => [2, 'text'][row], getCellKind: () => 'string' };
+  const maxaReferenceTextContext = { getCell: row => [-2, 'text'][row], getCellKind: () => 'string' };
+  assert.equal(evaluateFormula('MINA(A1:A2)', minaReferenceTextContext), 2, 'MINA ignores text in a reference range');
+  assert.equal(evaluateFormula('MAXA(A1:A2)', maxaReferenceTextContext), -2, 'MAXA ignores text in a reference range');
   assert.equal(evaluateFormula('MAXA(A1:A5)', averageAContext), 2);
   assert.equal(evaluateFormula('MINA(A1:A5)', averageAContext), 0);
   assert.equal(evaluateFormula('AVERAGEA(2,TRUE,"text")'), 1);
@@ -441,6 +568,11 @@ assert.equal(evaluateFormula('VLOOKUP("B?ta",A1:B3,2,FALSE)', lookupContext), 20
   assert.equal(evaluateFormula('AVERAGEA(A1:A2)', { getCell: () => null }), '#DIV/0!');
   assert.equal(evaluateFormula('MAXA(A1:A2)', { getCell: () => null }), 0);
   assert.equal(evaluateFormula('MAXA(SEQUENCE(100,100))'), 10000, 'large arrays are aggregated without argument spreading');
+  const areaErrorContext = { getCell: row => row === 0 ? '#N/A' : 2, getCellKind: row => row === 0 ? 'error' : 'number' };
+  for (const name of ['AVERAGEA', 'MINA', 'MAXA']) {
+    assert.equal(evaluateFormula(`IFERROR(${name}(A1:A2),"caught")`, areaErrorContext), 'caught', `${name} propagates errors from reference ranges`);
+    assert.equal(evaluateFormula(`IFERROR(${name}(HSTACK(1,NA())),"caught")`), 'caught', `${name} propagates errors from arrays`);
+  }
   assert.equal(evaluateFormula('AVERAGEA(1E308,1E308)'), '#NUM!', 'overflow is reported as a spreadsheet error');
   assert.equal(evaluateFormula('SUM(1E308,1E308)'), '#NUM!', 'SUM reports numeric overflow instead of returning Infinity');
   assert.equal(evaluateFormula('AVERAGE(1E308,1E308)'), '#NUM!', 'AVERAGE reports an overflowing intermediate sum');
@@ -532,6 +664,13 @@ assert.equal(evaluateFormula('VLOOKUP("B?ta",A1:B3,2,FALSE)', lookupContext), 20
   assert.equal(evaluateFormula('RANK.EQ(3,A1:B2,1)', context), 2, 'ascending rank reverses the order');
   assert.equal(evaluateFormula('RANK.EQ(3,A1:B2,1,2)', context), '#VALUE!');
   assert.equal(evaluateFormula('RANK.AVG(3,A1:B2)', { getCell: (row, column) => [[5, 3], [3, 1]][row][column] }), 2.5);
+  const rankMixedContext = {
+    getCell: row => [5, true, 3, 'text', '#N/A'][row] ?? null,
+    getCellKind: row => row === 1 ? 'boolean' : row === 3 ? 'string' : row === 4 ? 'error' : 'number'
+  };
+  assert.equal(evaluateFormula('RANK.EQ(3,A1:A4)', rankMixedContext), 2, 'RANK.EQ ignores logical and text values in a reference');
+  assert.equal(evaluateFormula('RANK.EQ(3,A1:A5)', rankMixedContext), '#N/A', 'RANK.EQ propagates actual reference errors');
+  assert.equal(evaluateFormula('RANK.AVG(3,A1:A4)', rankMixedContext), 2, 'RANK.AVG ignores logical and text values in a reference');
   assert.equal(evaluateFormula('RANK.EQ(9,A1:B2)', context), '#N/A');
   assert.equal(evaluateFormula('PERCENTRANK.INC(A1:A4,2)', { getCell: row => [1, 2, 3, 4][row] ?? null }), 0.333);
   assert.equal(evaluateFormula('PERCENTRANK.INC(A1:A4,2.5)', { getCell: row => [1, 2, 3, 4][row] ?? null }), 0.5);
@@ -574,11 +713,15 @@ assert.equal(evaluateFormula('PERCENTRANK.INC(A1:A2,0)', extremePercentileContex
   assert.equal(evaluateFormula('STDEV.P(-1E308,1E308)'), 1E308, 'standard deviation can remain finite when variance exceeds numeric range');
   assert.equal(evaluateFormula('VAR.P(-1E308,1E308)'), '#NUM!', 'variance reports a result beyond numeric range');
   const statisticsAContext = { getCell: row => [2, true, false, 'text', null][row] ?? null };
-  assert.equal(evaluateFormula('VARA(A1:A5)', statisticsAContext), 11 / 12);
-  assert.equal(evaluateFormula('VARPA(A1:A5)', statisticsAContext), 11 / 16);
-  assert.equal(evaluateFormula('STDEVA(A1:A5)', statisticsAContext), Math.sqrt(11 / 12));
-  assert.equal(evaluateFormula('STDEVPA(A1:A5)', statisticsAContext), Math.sqrt(11 / 16));
-  assert.equal(evaluateFormula('VARA(2,TRUE,FALSE,"text")'), 11 / 12);
+assert.equal(evaluateFormula('VARA(A1:A5)', statisticsAContext), 1, 'VARA ignores text in a reference and counts referenced logical values');
+assert.equal(evaluateFormula('VARPA(A1:A5)', statisticsAContext), 2 / 3);
+assert.equal(evaluateFormula('STDEVA(A1:A5)', statisticsAContext), 1);
+assert.equal(evaluateFormula('STDEVPA(A1:A5)', statisticsAContext), Math.sqrt(2 / 3));
+assert.equal(evaluateFormula('VARA(2,TRUE,FALSE,"text")'), '#VALUE!', 'VARA rejects direct nonnumeric text');
+assert.equal(evaluateFormula('VARA("2",TRUE,FALSE)'), 1, 'VARA converts direct numeric text and counts direct logical values');
+assert.equal(evaluateFormula('STDEVA(1/0,2)'), '#DIV/0!', 'STDEVA propagates direct argument errors');
+const statisticsErrorContext = { getCell: row => [1, 3, '#DIV/0!'][row] ?? null, getCellKind: row => row === 2 ? 'error' : 'number' };
+assert.equal(evaluateFormula('VARPA(A1:A3)', statisticsErrorContext), '#DIV/0!', 'VARPA propagates referenced errors');
 assert.equal(evaluateFormula('VARA(1E308,1E308)'), 0);
 assert.equal(evaluateFormula('STDEVA(1E308,1E308)'), 0);
 assert.equal(evaluateFormula('STDEVA(-1E308,1E308)'), Math.SQRT2 * 1E308);
@@ -639,11 +782,39 @@ assert.equal(evaluateFormula('VARPA(-1E308,1E308)'), '#NUM!');
   const modeContext = { getCell: row => [9, 9, 2, 2, 3][row] ?? null };
   assert.equal(evaluateFormula('MODE.SNGL(A1:A5)', modeContext), 9, 'single mode returns the first tied value');
   assert.deepEqual(evaluateFormula('MODE.MULT(A1:A5)', { ...modeContext, allowArrayResult: true }), [[9], [2]], 'multiple modes spill vertically in first-occurrence order');
+  assert.equal(evaluateFormula('MODE.SNGL(1,1,2)'), 1, 'MODE.SNGL accepts separate numeric arguments');
+  assert.deepEqual(evaluateFormula('MODE.MULT(9,9,2,2)', { allowArrayResult: true }), [[9], [2]], 'MODE.MULT accepts separate numeric arguments');
+  assert.equal(evaluateFormula('MODE.SNGL("2",2)'), 2, 'MODE.SNGL converts numeric text passed directly');
+  assert.equal(evaluateFormula('MODE.SNGL("text",2,2)'), '#VALUE!', 'MODE.SNGL rejects direct text that cannot be converted to a number');
+  assert.equal(evaluateFormula(`MODE.SNGL(${Array(254).fill('1').join(',')})`), 1, 'MODE.SNGL accepts Excel’s 254 argument limit');
+  assert.equal(evaluateFormula(`MODE.SNGL(${Array(255).fill('1').join(',')})`), '#VALUE!', 'MODE.SNGL rejects more than 254 arguments');
   assert.equal(evaluateFormula('MODE.SNGL(A1:A3)', { getCell: row => row + 1 }), '#N/A');
   assert.equal(evaluateFormula('MODE.MULT(A1:A3)', { getCell: row => row + 1, allowArrayResult: true }), '#N/A');
+  const modeErrorContext = {
+    getCell: row => [9, '#DIV/0!', 9][row] ?? null,
+    getCellKind: row => row === 1 ? 'error' : 'number'
+  };
+  assert.equal(evaluateFormula('MODE.SNGL(A1:A3)', modeErrorContext), '#DIV/0!', 'MODE.SNGL propagates errors in a referenced array');
+  assert.equal(evaluateFormula('MODE.MULT(A1:A3)', { ...modeErrorContext, allowArrayResult: true }), '#DIV/0!', 'MODE.MULT propagates errors in a referenced array');
+  assert.equal(evaluateFormula('MODE.SNGL(9,1/0,9)'), '#DIV/0!', 'MODE.SNGL propagates direct argument errors');
+  assert.equal(evaluateFormula('MODE.SNGL(A1:A3)', {
+    getCell: row => [9, '#DIV/0!', 9][row] ?? null,
+    getCellKind: row => row === 1 ? 'string' : 'number'
+  }), 9, 'error-looking text in a reference is ignored as text');
   const frequencyContext = { getCell: (row, column) => ({ '0:0': 1, '1:0': 2, '2:0': 2, '3:0': 3, '4:0': 4, '5:0': 5, '6:0': 'text', '0:1': 2, '1:1': 3, '2:1': 4 })[row + ':' + column] ?? null, allowArrayResult: true };
   assert.deepEqual(evaluateFormula('FREQUENCY(A1:A7,B1:B3)', frequencyContext), [[3], [1], [1], [1]], 'each bin includes its upper boundary and the final bucket counts larger values');
   assert.deepEqual(evaluateFormula('FREQUENCY(A1:A7,C1:C1)', { ...frequencyContext, getCell: (row, column) => column === 2 && row === 0 ? null : frequencyContext.getCell(row, column) }), [[6]], 'an empty bin range returns one overflow bucket');
+  const frequencyErrorContext = {
+    getCell: (row, column) => ({ '0:0': 1, '1:0': '#DIV/0!', '2:0': 2, '0:1': 2, '1:1': '#N/A' })[row + ':' + column] ?? null,
+    getCellKind: (row, column) => row === 1 && column === 0 ? 'error' : row === 1 && column === 1 ? 'error' : 'number'
+  };
+  assert.equal(evaluateFormula('FREQUENCY(A1:A3,B1:B1)', frequencyErrorContext), '#DIV/0!', 'FREQUENCY propagates errors in its data array');
+  assert.equal(evaluateFormula('FREQUENCY(A1:A1,B1:B2)', frequencyErrorContext), '#N/A', 'FREQUENCY propagates errors in its bins array');
+  assert.deepEqual(evaluateFormula('FREQUENCY(A1:A3,B1:B1)', {
+    ...frequencyErrorContext,
+    allowArrayResult: true,
+    getCellKind: (row, column) => row === 1 && column === 0 ? 'string' : frequencyErrorContext.getCellKind(row, column)
+  }), [[2], [0]], 'error-looking text in the data array is ignored as text');
   assert.equal(evaluateFormula('FREQUENCY(1)'), '#VALUE!');
   const frequencyCells = new Map([
     ['A1', { address: 'A1', row: 0, column: 0, value: '', kind: 'number', formula: 'FREQUENCY(B1:B5,C1:C2)', hasFormula: true }],
@@ -760,7 +931,11 @@ assert.equal(evaluateFormula('VARPA(-1E308,1E308)'), '#NUM!');
   assert.equal(evaluateFormula('SWITCH(4,1,"one",2,"two")'), '#N/A');
   assert.equal(evaluateFormula('SWITCH(4,1,"one",2,"two",0)'), 0);
   assert.equal(evaluateFormula('IFERROR(1/0,9)'), 9);
+  assert.equal(evaluateFormula('IFERROR("#N/A","fallback")'), '#N/A', 'IFERROR preserves quoted text that resembles an error');
+  assert.equal(evaluateFormula('SUM("#N/A")'), '#VALUE!', 'SUM reports nonnumeric quoted error-like text as a value error');
+  assert.equal(evaluateFormula('COUNT("#N/A")'), 0, 'COUNT ignores quoted error-like text');
   assert.equal(evaluateFormula('IFNA(MATCH(999,A1:A1,0),"missing")', { getCell: () => 1 }), 'missing');
+  assert.equal(evaluateFormula('IFNA("#N/A","fallback")'), '#N/A', 'IFNA only handles the #N/A error value, not matching text');
   assert.equal(evaluateFormula('IFNA(1/0,"missing")'), '#DIV/0!', 'IFNA handles only #N/A and leaves other errors unchanged');
   assert.equal(evaluateFormula('IFNA(7,"missing")'), 7);
   assert.equal(evaluateFormula('IFNA(1)'), '#VALUE!');
@@ -782,6 +957,15 @@ assert.equal(evaluateFormula('NOT(FALSE)'), true);
   assert.equal(evaluateFormula('HOUR(TIME(25,2,3))'), 1);
   assert.equal(evaluateFormula('MINUTE(TIME(25,2,3))'), 2);
   assert.equal(evaluateFormula('SECOND(TIME(25,2,3))'), 3);
+  assert.equal(evaluateFormula('TIME(-1,0,0)'), '#NUM!', 'negative hours are invalid in TIME');
+  assert.equal(evaluateFormula('TIME(0,-1,0)'), '#NUM!', 'negative minutes are invalid in TIME');
+  assert.equal(evaluateFormula('TIME(0,0,-1)'), '#NUM!', 'negative seconds are invalid in TIME');
+  assert.equal(evaluateFormula('TIME(32768,0,0)'), '#NUM!', 'TIME hours are limited to 32767');
+  assert.equal(evaluateFormula('TIME(0,32768,0)'), '#NUM!', 'TIME minutes are limited to 32767');
+  assert.equal(evaluateFormula('TIME(0,0,32768)'), '#NUM!', 'TIME seconds are limited to 32767');
+  assert.equal(evaluateFormula('TIME(32767,0,0)'), 7 / 24, 'the maximum TIME hour remains valid and wraps within the day');
+  assert.equal(evaluateFormula('TIME(0,32767,0)'), 1087 / 1440, 'the maximum TIME minute remains valid and wraps within the day');
+  assert.equal(evaluateFormula('TIME(0,0,32767)'), 32767 / 86400, 'the maximum TIME second remains valid and normalizes');
   assert.equal(evaluateFormula('COUNTIF(A1:B2,">3")', context), 2);
   assert.equal(evaluateFormula('SUMIF(A1:B2,">3")', context), 9);
   assert.equal(evaluateFormula('AVERAGEIF(A1:B2,">3")', context), 4.5);
@@ -795,11 +979,58 @@ assert.equal(evaluateFormula('NOT(FALSE)'), true);
   assert.equal(evaluateFormula('COUNTIF(A1:A6,"0")', criterionTypeContext), 3, 'numeric zero criteria use spreadsheet comparison semantics for numeric, logical, and numeric-text cells');
   assert.equal(evaluateFormula('COUNTIF(A1:A6,"=")', criterionTypeContext), 2, 'an empty criterion matches physically blank and empty-text cells');
   assert.equal(evaluateFormula('COUNTIF(A1:A6,"<>0")', criterionTypeContext), 3, 'not-equal criteria include blank and empty-text cells');
+  const blankCriterionContext = {
+    getCell: (row, column) => column === 25 && row === 0 ? null : [[0, 10], [0, 20], [null, 30], [1, 40]][row]?.[column] ?? null,
+    getCellKind: (row, column) => column === 25 && row === 0 || row === 2 && column === 0 ? 'blank' : 'number'
+  };
+  for (const formula of [
+    'COUNTIF(A1:A4,Z1)', 'COUNTIFS(A1:A4,Z1)',
+    'COUNTIFS(A1:A4,Z1,A1:A4,0)',
+    'SUMIF(A1:A4,Z1,B1:B4)', 'SUMIFS(B1:B4,A1:A4,Z1)',
+    'AVERAGEIF(A1:A4,Z1,B1:B4)', 'AVERAGEIFS(B1:B4,A1:A4,Z1)',
+    'MAXIFS(B1:B4,A1:A4,Z1)', 'MINIFS(B1:B4,A1:A4,Z1)'
+  ]) {
+    const expected = formula.startsWith('COUNT') ? 2
+      : formula.startsWith('SUM') ? 30
+      : formula.startsWith('AVERAGE') ? 15
+      : formula.startsWith('MAXIFS') ? 20 : 10;
+    assert.equal(evaluateFormula(formula, blankCriterionContext), expected, `${formula} treats a referenced empty criterion as zero`);
+  }
+  const emptyTextCriterionContext = {
+    ...blankCriterionContext,
+    getCell: (row, column) => column === 25 && row === 0 ? '' : blankCriterionContext.getCell(row, column),
+    getCellKind: (row, column) => column === 25 && row === 0 ? 'string' : blankCriterionContext.getCellKind(row, column)
+  };
+  assert.equal(evaluateFormula('COUNTIF(A1:A4,Z1)', emptyTextCriterionContext), 1, 'a reference to empty text remains distinct from a truly blank cell');
+  assert.equal(evaluateFormula('COUNTIFS(A1:A4,"")', blankCriterionContext), 1, 'an explicit empty-string criterion remains text, not zero');
   const escapedWildcardContext = { getCell: (row, column) => [['a*'], ['abc'], ['a?']][row]?.[column] ?? null };
   assert.equal(evaluateFormula('COUNTIF(A1:A3,"a~*")', escapedWildcardContext), 1, 'tilde escapes a wildcard in criteria');
   const wildcardTypeContext = { getCell: (row, column) => [['#N/A'], [42], [true], ['text']][row]?.[column] ?? null };
   assert.equal(evaluateFormula('COUNTIF(A1:A4,"*")', wildcardTypeContext), 1, 'wildcard criteria match text only, not errors, numbers, or logical values');
   assert.equal(evaluateFormula('COUNTIF(A1:A4,"<>*")', wildcardTypeContext), 2, 'negative wildcard criteria count nonblank numeric and logical values');
+  const errorCriteriaContext = { getCell: row => ['#N/A', '#N/A', '#DIV/0!', '#N/A'][row], getCellKind: row => ['error', 'string', 'error', 'string'][row] };
+  assert.equal(evaluateFormula('COUNTIF(A1:A3,"#N/A")', errorCriteriaContext), 2, 'an error-text criterion matches matching errors and text cells');
+  assert.equal(evaluateFormula('COUNTIF(A1:A3,"=#N/A")', errorCriteriaContext), 2, 'an explicit equality criterion matches matching errors and text cells');
+  assert.equal(evaluateFormula('COUNTIF(A1:A3,A4)', errorCriteriaContext), 2, 'a referenced error-like text criterion retains its text type');
+  assert.equal(evaluateFormula('COUNTIF(A1:A3,NA())', errorCriteriaContext), '#N/A', 'an actual error used as the criterion propagates');
+  assert.equal(evaluateFormula('COUNTIFS(A1:A3,"#N/A")', errorCriteriaContext), 2, 'COUNTIFS preserves error-text criterion typing');
+  assert.equal(evaluateFormula('COUNTIFS(A1:A3,NA())', errorCriteriaContext), '#N/A', 'COUNTIFS propagates an actual error criterion');
+  const sumErrorCells = new Map([
+    ['A1', { address: 'A1', row: 0, column: 0, value: '#N/A', kind: 'error' }],
+    ['A2', { address: 'A2', row: 1, column: 0, value: '#N/A', kind: 'string' }],
+    ['B1', { address: 'B1', row: 0, column: 1, value: '#DIV/0!', kind: 'error' }],
+    ['B2', { address: 'B2', row: 1, column: 1, value: '5', kind: 'number' }],
+    ['C1', { address: 'C1', row: 0, column: 2, value: '', kind: 'error', formula: 'SUMIF(A1:A2,"#N/A",B1:B2)', hasFormula: true }]
+  ]);
+  const sumErrorCalculator = createFormulaCalculator({ state: { formulas: true, sheets: [{ name: 'Data', cells: sumErrorCells, mergedCells: [], tables: [] }] }, getCell: (row, column) => [...sumErrorCells.values()].find(cell => cell.row === row && cell.column === column) || null });
+  assert.equal(sumErrorCalculator.value(0, 0, 2), '#DIV/0!', 'SUMIF selects matching error cells and propagates errors in the sum range');
+const referencedCriterionContext = {
+  getCell: (row, column) => row === 0 && column === 1 ? '>1' : column === 0 ? [1, 2, 3][row] ?? null : null,
+  getCellKind: (row, column) => row === 0 && column === 1 ? 'string' : column === 0 && row < 3 ? 'number' : null
+};
+assert.equal(evaluateFormula('COUNTIF(A1:A3,B1)', referencedCriterionContext), 2, 'COUNTIF parses comparison operators from referenced criteria');
+assert.equal(evaluateFormula('SUMIF(A1:A3,B1,A1:A3)', referencedCriterionContext), 5, 'SUMIF parses comparison operators from referenced criteria');
+assert.equal(evaluateFormula('COUNTIFS(A1:A3,B1)', referencedCriterionContext), 2, 'COUNTIFS parses comparison operators from referenced criteria');
   const multiConditionContext = { getCell: (row, column) => [
     ['East', 'Apples', 100], ['East', 'Pears', 200], ['West', 'Apples', 150], ['East', 'Apples', 'text']
   ][row]?.[column] ?? null };
@@ -807,6 +1038,17 @@ assert.equal(evaluateFormula('NOT(FALSE)'), true);
   assert.equal(evaluateFormula('SUMIFS(C1:C4,A1:A4,"East",B1:B4,"Apples")', multiConditionContext), 100);
   assert.equal(evaluateFormula('AVERAGEIFS(C1:C4,A1:A4,"East",B1:B4,"Apples")', multiConditionContext), 100);
   assert.equal(evaluateFormula('COUNTIFS(A1:A4,"East",B1:B3,"Apples")', multiConditionContext), '#VALUE!');
+  const maxCriteriaArguments = Array.from({ length: 126 }, () => ['A1', '5']).flat();
+  const tooManyMaxCriteriaArguments = [...maxCriteriaArguments, 'A1', '5'];
+  const maxCriteriaFormula = (name, criteriaArguments) => `${name}(A1,${criteriaArguments.join(',')})`;
+  assert.equal(evaluateFormula(maxCriteriaFormula('MAXIFS', maxCriteriaArguments), { getCell: () => 5 }), 5, 'MAXIFS accepts the documented 126 criteria pairs');
+  assert.equal(evaluateFormula(maxCriteriaFormula('MINIFS', maxCriteriaArguments), { getCell: () => 5 }), 5, 'MINIFS accepts the documented 126 criteria pairs');
+  assert.equal(evaluateFormula(maxCriteriaFormula('MAXIFS', tooManyMaxCriteriaArguments), { getCell: () => 5 }), '#VALUE!', 'MAXIFS rejects more than 126 criteria pairs');
+  assert.equal(evaluateFormula(maxCriteriaFormula('MINIFS', tooManyMaxCriteriaArguments), { getCell: () => 5 }), '#VALUE!', 'MINIFS rejects more than 126 criteria pairs');
+  const criteriaOnlyFormula = `COUNTIFS(${maxCriteriaArguments.join(',')})`;
+  assert.equal(evaluateFormula(criteriaOnlyFormula, { getCell: () => 5 }), 1, 'COUNTIFS accepts the documented 127 criteria pairs');
+  assert.equal(evaluateFormula(maxCriteriaFormula('SUMIFS', maxCriteriaArguments), { getCell: () => 5 }), 5, 'SUMIFS accepts the documented 127 criteria pairs');
+  assert.equal(evaluateFormula(maxCriteriaFormula('AVERAGEIFS', maxCriteriaArguments), { getCell: () => 5 }), 5, 'AVERAGEIFS accepts the documented 127 criteria pairs');
   const overflowingCriteriaContext = { getCell: (row, column) => [[1, 1E308], [1, 1E308]][row]?.[column] ?? null };
   for (const formula of [
     'SUMIF(A1:A2,">0",B1:B2)', 'AVERAGEIF(A1:A2,">0",B1:B2)',
@@ -822,9 +1064,42 @@ assert.equal(evaluateFormula('NOT(FALSE)'), true);
   const productErrorContext = { getCell: (row, column) => row === 1 ? '#N/A' : 2 };
   assert.equal(evaluateFormula('SUMPRODUCT(A1:A2,B1:B2)', productErrorContext), '#N/A');
   const tableContext = { getCell: (row, column) => [[101, 'Ada'], [102, 'Bo'], [103, 'Cy']][row]?.[column] ?? null };
+  const mixedLookupContext = { getCell: (row, column) => [['1', 'text'], [1, 'number']][row]?.[column] ?? null };
+  assert.equal(evaluateFormula('MATCH(1,A1:A2,0)', mixedLookupContext), 2, 'exact MATCH distinguishes a number from numeric text');
+  assert.equal(evaluateFormula('MATCH("1",A1:A2,0)', mixedLookupContext), 1, 'exact MATCH finds text without coercing it to a number');
+  assert.equal(evaluateFormula('XMATCH(1,A1:A2)', mixedLookupContext), 2, 'exact XMATCH distinguishes a number from numeric text');
+  assert.equal(evaluateFormula('XMATCH("1",A1:A2)', mixedLookupContext), 1, 'exact XMATCH finds text without coercing it to a number');
+  assert.equal(evaluateFormula('VLOOKUP(1,A1:B2,2,FALSE)', mixedLookupContext), 'number', 'exact VLOOKUP distinguishes a number from numeric text');
+  assert.equal(evaluateFormula('VLOOKUP("1",A1:B2,2,FALSE)', mixedLookupContext), 'text', 'exact VLOOKUP finds text without coercing it to a number');
+  const mixedHorizontalLookupContext = { getCell: (row, column) => row === 0 ? ['1', 1][column] ?? null : ['text', 'number'][column] ?? null };
+  assert.equal(evaluateFormula('HLOOKUP(1,A1:B2,2,FALSE)', mixedHorizontalLookupContext), 'number', 'exact HLOOKUP distinguishes a number from numeric text');
+  assert.equal(evaluateFormula('HLOOKUP("1",A1:B2,2,FALSE)', mixedHorizontalLookupContext), 'text', 'exact HLOOKUP finds text without coercing it to a number');
+  assert.equal(evaluateFormula('XLOOKUP(1,A1:A2,B1:B2)', mixedLookupContext), 'number', 'exact XLOOKUP distinguishes a number from numeric text');
+  assert.equal(evaluateFormula('XLOOKUP("1",A1:A2,B1:B2)', mixedLookupContext), 'text', 'exact XLOOKUP finds text without coercing it to a number');
+  assert.equal(evaluateFormula('XLOOKUP(1,A1:A2,B1:B2,"missing",0,2)', { getCell: (row, column) => [[1, 'number'], ['1', 'text']][row]?.[column] ?? null }), 'number', 'exact binary XLOOKUP retains number/text type distinctions');
   assert.equal(evaluateFormula('VLOOKUP(102,A1:B3,2,FALSE)', tableContext), 'Bo');
   assert.equal(evaluateFormula('VLOOKUP(102,A1:B3,2)', tableContext), 'Bo');
   assert.equal(evaluateFormula('HLOOKUP(102,A1:C2,2,FALSE)', { getCell: (row, column) => [[101, 102, 103], ['Ada', 'Bo', 'Cy']][row]?.[column] ?? null }), 'Bo');
+const rangeLookupCoercionContext = { getCell: (row, column) => [[1, 'one'], [2, 'two'], [3, 'three']][row]?.[column] ?? null };
+assert.equal(evaluateFormula('VLOOKUP(2.5,A1:B3,2)', rangeLookupCoercionContext), 'two', 'an omitted VLOOKUP range_lookup defaults to approximate matching');
+assert.equal(evaluateFormula('VLOOKUP(2.5,A1:B3,2,)', rangeLookupCoercionContext), '#N/A', 'an explicitly empty VLOOKUP range_lookup selects exact matching');
+assert.equal(evaluateFormula('VLOOKUP(2.5,A1:B3,2,"FALSE")', rangeLookupCoercionContext), '#N/A', 'VLOOKUP converts the text logical FALSE to exact-match mode');
+assert.equal(evaluateFormula('VLOOKUP(2.5,A1:B3,2,"0")', rangeLookupCoercionContext), '#N/A', 'VLOOKUP converts numeric text zero to exact-match mode');
+assert.equal(evaluateFormula('VLOOKUP(2.5,A1:B3,2,"1")', rangeLookupCoercionContext), 'two', 'VLOOKUP converts nonzero numeric text to approximate mode');
+assert.equal(evaluateFormula('VLOOKUP(2.5,A1:B3,2,D1)', rangeLookupCoercionContext), '#N/A', 'a blank cell reference in VLOOKUP range_lookup selects exact matching');
+assert.equal(evaluateFormula('VLOOKUP(2.5,A1:B3,2,"")', rangeLookupCoercionContext), '#VALUE!', 'VLOOKUP rejects empty-text range_lookup');
+assert.equal(evaluateFormula('VLOOKUP(2.5,A1:B3,2,"not logical")', rangeLookupCoercionContext), '#VALUE!', 'VLOOKUP rejects invalid range_lookup text');
+const horizontalRangeLookupContext = { getCell: (row, column) => [[1, 2, 3], ['one', 'two', 'three']][row]?.[column] ?? null };
+assert.equal(evaluateFormula('HLOOKUP(2.5,A1:C2,2)', horizontalRangeLookupContext), 'two', 'an omitted HLOOKUP range_lookup defaults to approximate matching');
+assert.equal(evaluateFormula('HLOOKUP(2.5,A1:C2,2,)', horizontalRangeLookupContext), '#N/A', 'an explicitly empty HLOOKUP range_lookup selects exact matching');
+assert.equal(evaluateFormula('HLOOKUP(2.5,A1:C2,2,"FALSE")', { getCell: (row, column) => [[1, 2, 3], ['one', 'two', 'three']][row]?.[column] ?? null }), '#N/A', 'HLOOKUP converts the text logical FALSE to exact-match mode');
+assert.equal(evaluateFormula('HLOOKUP(2.5,A1:C2,2,D1)', horizontalRangeLookupContext), '#N/A', 'a blank cell reference in HLOOKUP range_lookup selects exact matching');
+assert.equal(evaluateFormula('HLOOKUP(2.5,A1:C2,2,"")', horizontalRangeLookupContext), '#VALUE!', 'HLOOKUP rejects empty-text range_lookup');
+assert.equal(evaluateFormula('HLOOKUP(2.5,A1:C2,2,"not logical")', horizontalRangeLookupContext), '#VALUE!', 'HLOOKUP rejects invalid range_lookup text');
+for (const formula of [
+  'VLOOKUP(NA(),A1:B2,2,FALSE)', 'VLOOKUP(1,A1:B2,NA(),FALSE)', 'VLOOKUP(1,A1:B2,2,NA())', 'VLOOKUP(1,NA(),2,FALSE)',
+  'HLOOKUP(NA(),A1:B2,2,FALSE)', 'HLOOKUP(1,A1:B2,NA(),FALSE)', 'HLOOKUP(1,A1:B2,2,NA())', 'HLOOKUP(1,NA(),2,FALSE)'
+]) assert.equal(evaluateFormula(formula, { getCell: (row, column) => [[1, 10], [2, 20]][row]?.[column] ?? null }), '#N/A', `${formula} propagates errors from direct arguments`);
   const duplicateApproximateContext = { getCell: (row, column) => [[1, 'one'], [2, 'first'], [2, 'last'], [3, 'three']][row]?.[column] ?? null };
   assert.equal(evaluateFormula('MATCH(2,A1:A4,1)', duplicateApproximateContext), 3, 'ascending approximate MATCH returns the last duplicate key');
   assert.equal(evaluateFormula('VLOOKUP(2,A1:B4,2)', duplicateApproximateContext), 'last', 'approximate VLOOKUP returns the last duplicate key');
@@ -844,8 +1119,22 @@ assert.equal(evaluateFormula('LOOKUP(1,A1:A3,B1:B2)', tableContext), '#VALUE!', 
 assert.equal(evaluateFormula('LOOKUP(1,A1:B2,B1:B2)', tableContext), '#VALUE!', 'LOOKUP vectors must be one-dimensional');
   assert.equal(evaluateFormula('MATCH(102,A1:A3,0)', tableContext), 2);
   assert.equal(evaluateFormula('INDEX(B1:B3,2)', tableContext), 'Bo');
+const indexArrayContext = { getCell: (row, column) => [[1, 2, 3], [4, 5, 6], [7, 8, 9]][row]?.[column] ?? null, allowArrayResult: true };
+assert.deepEqual(evaluateFormula('INDEX(A1:C3,0,2)', indexArrayContext), [[2], [5], [8]], 'INDEX row_num zero returns the selected column as an array');
+assert.deepEqual(evaluateFormula('INDEX(A1:C3,2,0)', indexArrayContext), [[4, 5, 6]], 'INDEX column_num zero returns the selected row as an array');
+assert.deepEqual(evaluateFormula('INDEX(A1:C3,0,0)', indexArrayContext), [[1, 2, 3], [4, 5, 6], [7, 8, 9]], 'INDEX two zero coordinates returns the full array');
+assert.deepEqual(evaluateFormula('INDEX(A1:C3,,2)', indexArrayContext), [[2], [5], [8]], 'INDEX permits row_num omission when column_num is specified');
+assert.equal(evaluateFormula('INDEX(A1:C3,2)', indexArrayContext), 4, 'INDEX defaults omitted column_num to the first column');
+for (const formula of ['INDEX(NA(),1)', 'INDEX(B1:B3,NA())', 'INDEX(B1:B3,1,NA())']) {
+  assert.equal(evaluateFormula(formula, tableContext), '#N/A', `${formula} propagates direct argument errors`);
+}
   assert.equal(evaluateFormula('VLOOKUP(999,A1:B3,2,FALSE)', tableContext), '#N/A');
   assert.equal(evaluateFormula('XLOOKUP(102,A1:A3,B1:B3)', tableContext), 'Bo');
+assert.equal(evaluateFormula('XLOOKUP(102,A1:A3,B1:B3,"missing",NA(),1)', tableContext), '#N/A', 'XLOOKUP propagates match_mode errors');
+assert.equal(evaluateFormula('XLOOKUP(102,A1:A3,B1:B3,"missing",0,NA())', tableContext), '#N/A', 'XLOOKUP propagates search_mode errors');
+  const errorLikeTextLookupContext = { getCell: (row, column) => [['#N/A', 'matched'], ['other', 'fallback']][row]?.[column] ?? null };
+  assert.equal(evaluateFormula('XLOOKUP("#N/A",A1:A2,B1:B2)', errorLikeTextLookupContext), 'matched', 'quoted error-like lookup text remains a text key');
+  assert.equal(evaluateFormula('XLOOKUP("key",A1,"#N/A")', { getCell: () => 'key' }), '#N/A', 'quoted error-like return text remains text');
   assert.equal(evaluateFormula('XLOOKUP(2,B1,A1)', { getCell: (row, column) => row === 0 ? column === 0 ? 9 : column === 1 ? 2 : null : null }), 9, 'single-cell lookup and return references remain valid');
   assert.equal(evaluateFormula('XLOOKUP(104,A1:A3,B1:B3,"missing",-1)', tableContext), 'Cy');
   assert.equal(evaluateFormula('XLOOKUP(100,A1:A3,B1:B3,"missing",1)', tableContext), 'Ada');
@@ -877,6 +1166,10 @@ const wildcardContext = { getCell: (row, column) => [['apple', 'apricot', 'pear'
   assert.equal(evaluateFormula('UPPER("JinSheet")'), 'JINSHEET');
   assert.equal(evaluateFormula('CONCAT("Jin",TRUE,1)'), 'JinTRUE1');
   assert.equal(evaluateFormula('CONCATENATE("Jin","Sheet")'), 'JinSheet');
+  assert.equal(evaluateFormula('CONCAT(' + Array(254).fill('"x"').join(',') + ')'), '#VALUE!', 'CONCAT enforces Excel’s 253 argument limit');
+  assert.equal(evaluateFormula('CONCATENATE(' + Array(256).fill('"x"').join(',') + ')'), '#VALUE!', 'CONCATENATE enforces its 255 argument limit');
+  assert.equal(evaluateFormula('CONCAT("' + 'x'.repeat(32768) + '")'), '#VALUE!', 'CONCAT enforces Excel’s cell text length limit');
+  assert.equal(Array.from(evaluateFormula('CONCAT("' + '😀'.repeat(32767) + '")')).length, 32767, 'CONCAT counts supplementary Unicode characters consistently with TEXTJOIN');
   assert.equal(evaluateFormula('TEXTJOIN("-",TRUE,"a","","b")'), 'a-b');
   assert.equal(evaluateFormula('TEXTJOIN("/",FALSE,A1:A3)', { getCell: (row, column) => [null, 'x', 2][row] }), '/x/2');
   assert.equal(evaluateFormula('TEXTJOIN(",",1,"a",FALSE)'), 'a,FALSE');
@@ -889,8 +1182,43 @@ const wildcardContext = { getCell: (row, column) => [['apple', 'apricot', 'pear'
   assert.equal(evaluateFormula('RIGHT("text",1.5)'), 't');
   assert.equal(evaluateFormula('MID("text",2.9,1.8)'), 'e');
   assert.equal(evaluateFormula('CONCAT("ok",1/0)'), '#DIV/0!');
+  const typedTextRange = { getCell: row => row === 0 ? '#N/A' : '#DIV/0!', getCellKind: row => row === 0 ? 'string' : 'error' };
+  const rangeCells = new Map([
+    ['A1', { address: 'A1', row: 0, column: 0, value: '#N/A', kind: 'string' }],
+    ['A2', { address: 'A2', row: 1, column: 0, value: '#DIV/0!', kind: 'error' }],
+    ['B1', { address: 'B1', row: 0, column: 1, value: '', kind: 'string', formula: 'CONCAT(A1:A2)', hasFormula: true }],
+    ['B2', { address: 'B2', row: 1, column: 1, value: '', kind: 'string', formula: 'TEXTJOIN("-",TRUE,A1:A2)', hasFormula: true }],
+    ['B3', { address: 'B3', row: 2, column: 1, value: '', kind: 'string', formula: 'CONCAT(A1:A1)', hasFormula: true }],
+    ['B4', { address: 'B4', row: 3, column: 1, value: '', kind: 'string', formula: 'TEXTJOIN("",TRUE,A1:A1)', hasFormula: true }]
+  ]);
+  const rangeCalculator = createFormulaCalculator({
+    state: { formulas: true, sheets: [{ name: 'Data', cells: rangeCells, mergedCells: [], tables: [] }] },
+    getCell: (row, column) => [...rangeCells.values()].find(cell => cell.row === row && cell.column === column) || null
+  });
+  assert.equal(rangeCalculator.value(0, 0, 1), '#DIV/0!', 'CONCAT flattens ranges and propagates actual cell errors');
+  assert.equal(rangeCalculator.value(0, 1, 1), '#DIV/0!', 'TEXTJOIN propagates actual errors inside ranges');
+  assert.equal(rangeCalculator.value(0, 2, 1), '#N/A', 'CONCAT preserves error-looking text from string cells');
+  assert.equal(rangeCalculator.cell(0, 2, 1).kind, 'string');
+  assert.equal(rangeCalculator.value(0, 3, 1), '#N/A', 'TEXTJOIN preserves error-looking text from string cells');
+  assert.equal(rangeCalculator.cell(0, 3, 1).kind, 'string');
   assert.equal(evaluateFormula('1/0'), '#DIV/0!');
   assert.equal(evaluateFormula('UNKNOWN(1)'), '#NAME?');
+});
+
+test('정확 lookup은 중복 키의 검색 방향과 wildcard 순서를 보존한다', () => {
+  const values = [['#N/A', 'error'], [2, 'first'], [2, 'last'], [3, 'other'], ['alpha', 'wild-first'], ['alpine', 'wild-last']];
+  const context = { getCell: (row, column) => values[row]?.[column] ?? null };
+
+  assert.equal(evaluateFormula('MATCH(2,A1:A4,0)', context), 2, 'exact MATCH returns the first duplicate like the Calc reference');
+  assert.equal(evaluateFormula('VLOOKUP(2,A1:B4,2,FALSE())', context), 'first', 'exact VLOOKUP returns the first duplicate like the Calc reference');
+  assert.equal(evaluateFormula('XMATCH(2,A1:A4,0)', context), 2, 'XMATCH defaults to the first duplicate');
+  assert.equal(evaluateFormula('XMATCH(2,A1:A4,0,-1)', context), 3, 'reverse XMATCH returns the last duplicate');
+  assert.equal(evaluateFormula('XLOOKUP(2,A1:A4,B1:B4)', context), 'first', 'XLOOKUP defaults to the first duplicate');
+  assert.equal(evaluateFormula('XLOOKUP(2,A1:A4,B1:B4,"missing",0,-1)', context), 'last', 'reverse XLOOKUP returns the last duplicate');
+  assert.equal(evaluateFormula('XMATCH("al*",A1:A6,2)', context), 5, 'wildcard XMATCH searches forward by default');
+  assert.equal(evaluateFormula('XMATCH("al*",A1:A6,2,-1)', context), 6, 'wildcard XMATCH honors reverse search');
+  assert.equal(evaluateFormula('XLOOKUP("al*",A1:A6,B1:B6,"missing",2)', context), 'wild-first', 'wildcard XLOOKUP searches forward by default');
+  assert.equal(evaluateFormula('XLOOKUP("al*",A1:A6,B1:B6,"missing",2,-1)', context), 'wild-last', 'wildcard XLOOKUP honors reverse search');
 });
 
 test('XMATCH 근사 이진 검색은 오름차순·내림차순 경계와 중복 키에서 선형 결과를 유지한다', () => {
@@ -948,6 +1276,88 @@ test('수식 계산기는 통합문서 시트명을 기준으로 공백·아포�
   assert.equal(calculator.value(0, 0, 3), 7, 'an unselected IF branch does not leak its circular-reference error');
   assert.equal(calculator.value(0, 1, 4), 12, 'ROW/COLUMN use the formula cell and ROWS/COLUMNS report range dimensions');
   assert.equal(calculator.value(0, 1, 5), '$F$2', 'ADDRESS composes the current formula cell coordinates');
+});
+
+test('수식 참조와 범위는 오류 모양 문자열 셀과 실제 오류 셀을 구분한다', () => {
+  const cells = new Map();
+  const add = (address, row, column, value, kind = 'string', formula = null) => cells.set(address, {
+    address, row, column, value: String(value), kind, formula, hasFormula: Boolean(formula)
+  });
+  add('A1', 0, 0, '#N/A', 'string');
+  add('A2', 1, 0, '#N/A', 'error');
+  add('B1', 0, 1, 'text', 'string');
+  add('B2', 1, 1, 'error result', 'string');
+  add('C1', 0, 2, '', 'boolean', 'ISERROR(A1)');
+  add('C2', 1, 2, '', 'boolean', 'ISERROR(A2)');
+  add('C3', 2, 2, '', 'number', 'COUNTIF(A1:A2,"*")');
+  add('C4', 3, 2, '', 'string', 'XLOOKUP("#N/A",A1:A2,B1:B2)');
+  add('C5', 4, 2, '', 'error', 'SUM(A1:A2)');
+  add('C6', 5, 2, '', 'boolean', 'ISNA(A1)');
+  add('C7', 6, 2, '', 'string', 'VALUE(A1)');
+  add('C8', 7, 2, '', 'string', 'A1');
+  add('C9', 8, 2, '', 'number', 'SUM(A1:A1)');
+  add('C10', 9, 2, '', 'boolean', 'ISTEXT(A1)');
+  add('C11', 10, 2, '', 'string', 'IFNA(A2,"fallback")');
+  add('C12', 11, 2, '', 'string', 'IFNA(A1,"fallback")');
+  const document = {
+    state: { formulas: true, sheets: [{ name: 'Data', cells, mergedCells: [], tables: [] }] },
+    getCell: (row, column) => [...cells.values()].find(cell => cell.row === row && cell.column === column) || null
+  };
+  const calculator = createFormulaCalculator(document);
+  assert.equal(calculator.value(0, 0, 2), false, 'an error-looking string cell is not an error');
+  assert.equal(calculator.value(0, 1, 2), true, 'an error-kind cell remains an error');
+  assert.equal(calculator.value(0, 2, 2), 1, 'wildcard criteria match text cells and exclude actual errors');
+  assert.equal(calculator.value(0, 3, 2), 'text', 'lookup keys distinguish text from error cells');
+  assert.equal(calculator.value(0, 4, 2), '#N/A', 'actual errors in ranges continue to propagate');
+  assert.equal(calculator.value(0, 5, 2), false, 'ISNA does not classify text cells as errors');
+  assert.equal(calculator.value(0, 6, 2), '#VALUE!', 'numeric conversion treats error-looking text as text');
+  assert.equal(calculator.value(0, 7, 2), '#N/A', 'a direct reference preserves its string cell kind');
+  assert.equal(calculator.cell(0, 7, 2).kind, 'string', 'the public cell result keeps the original text kind');
+  assert.equal(calculator.value(0, 8, 2), 0, 'SUM ignores text cells in a range');
+  assert.equal(calculator.value(0, 9, 2), true, 'ISTEXT recognizes an error-looking string cell');
+  assert.equal(calculator.value(0, 10, 2), 'fallback', 'IFNA handles a typed error cell');
+  assert.equal(calculator.value(0, 11, 2), '#N/A', 'IFNA preserves an error-looking string cell');
+});
+
+test('수식이 만들어 낸 오류 모양 텍스트는 문자열 종류를 유지한다', () => {
+  const cells = new Map();
+  const add = (address, row, column, formula, kind = 'string') => cells.set(address, {
+    address, row, column, value: '', kind, formula, hasFormula: true
+  });
+  const outputs = [
+    'CONCAT("#N/A")', '"#N/A"', '"#"&"N/A"', 'IF(TRUE,"#N/A","fallback")',
+    'LEFT("#N/A",4)', 'TEXTJOIN("",TRUE,"#N/A")'
+  ];
+  outputs.forEach((formula, row) => {
+    add(`A${row + 1}`, row, 0, formula);
+    add(`C${row + 1}`, row, 2, `ISERROR(A${row + 1})`, 'boolean');
+  });
+  add('A7', 6, 0, 'TEXTSPLIT("#N/A,x",",")');
+  add('C7', 6, 2, 'ISERROR(A7)', 'boolean');
+  add('D7', 6, 3, 'ISERROR(B7)', 'boolean');
+  const document = {
+    state: { formulas: true, sheets: [{ name: 'Data', cells, mergedCells: [], tables: [] }] },
+    getCell: (row, column) => [...cells.values()].find(cell => cell.row === row && cell.column === column) || null
+  };
+  const calculator = createFormulaCalculator(document);
+  outputs.forEach((_, row) => {
+    assert.equal(calculator.value(0, row, 0), '#N/A');
+    assert.equal(calculator.cell(0, row, 0).kind, 'string', `A${row + 1} is a text result`);
+    assert.equal(calculator.value(0, row, 2), false, `ISERROR(A${row + 1})`);
+  });
+  assert.equal(calculator.cell(0, 6, 0).kind, 'string', 'TEXTSPLIT anchor preserves text kind');
+  assert.equal(calculator.cell(0, 6, 1).kind, 'string', 'TEXTSPLIT spill preserves text kind');
+  assert.equal(calculator.value(0, 6, 2), false, 'the split text anchor is not an error');
+  assert.equal(calculator.value(0, 6, 3), false, 'the split text spill is not an error');
+
+  const saved = patchCells(analyze(fixture()), [{ sheetIndex: 0, address: 'D5', value: '', formula: 'CONCAT("#N/A")' }]);
+  const reopened = analyze(saved.bytes);
+  const reopenedCalculator = createFormulaCalculator({
+    state: reopened,
+    getCell: (row, column, sheetIndex = 0) => reopened.sheets[sheetIndex]?.cells.get(String.fromCharCode(65 + column) + (row + 1)) || null
+  });
+  assert.equal(reopenedCalculator.cell(0, 4, 3).value, '#N/A');
+  assert.equal(reopenedCalculator.cell(0, 4, 3).kind, 'string', 'the result stays text after XLSX serialization and reopening');
 });
 
 test('수식 계산기는 Excel 표의 열·헤더·데이터·현재 행 구조화 참조를 계산한다', () => {
@@ -1085,6 +1495,7 @@ test('TEXTSPLIT은 열·행 구분자, 빈 값, 대소문자 모드와 불균일
   assert.deepEqual(evaluateFormula('TEXTSPLIT("a,b;c,d",",",";")', { allowArrayResult: true }), [['a', 'b'], ['c', 'd']]);
   assert.deepEqual(evaluateFormula('TEXTSPLIT("a,,b",",",,TRUE)', { allowArrayResult: true }), [['a', 'b']]);
   assert.deepEqual(evaluateFormula('TEXTSPLIT("aXb","x",,FALSE,1)', { allowArrayResult: true }), [['a', 'b']]);
+  assert.deepEqual(evaluateFormula('TEXTSPLIT("İx,y",",",,FALSE,1)', { allowArrayResult: true }), [['İx', 'y']], 'case-insensitive splitting keeps source indexes when lowercase conversion expands a character');
   assert.deepEqual(evaluateFormula('TEXTSPLIT("a,b;c",",",";",FALSE,0,"-")', { allowArrayResult: true }), [['a', 'b'], ['c', '-']]);
   assert.deepEqual(evaluateFormula('TEXTSPLIT("a,b;c",HSTACK(",",";"))', { allowArrayResult: true }), [['a', 'b', 'c']]);
   assert.deepEqual(evaluateFormula('TEXTSPLIT("a::b;c",HSTACK(":","::"),";")', { allowArrayResult: true }), [['a', 'b'], ['c', '#N/A']]);
@@ -1095,11 +1506,16 @@ test('TEXTSPLIT은 열·행 구분자, 빈 값, 대소문자 모드와 불균일
 });
 
 test('TEXTSPLIT 결과는 수식 셀에서 행·열로 spill한다', () => {
-  const cells = new Map([['A1', { address: 'A1', row: 0, column: 0, value: '', kind: 'string', formula: 'TEXTSPLIT("a,b;c",",",";")', hasFormula: true }]]);
+  const cells = new Map([
+    ['A1', { address: 'A1', row: 0, column: 0, value: '', kind: 'string', formula: 'TEXTSPLIT("a,b;c",",",";")', hasFormula: true }],
+    ['E1', { address: 'E1', row: 0, column: 4, value: '', kind: 'string', formula: 'TEXTSPLIT("İx,y",",",,FALSE,1)', hasFormula: true }]
+  ]);
   const document = { state: { formulas: true, sheets: [{ name: 'Data', cells, mergedCells: [], tables: [] }] }, getCell: (row, column) => [...cells.values()].find(cell => cell.row === row && cell.column === column) || null };
   const calculator = createFormulaCalculator(document);
   assert.deepEqual([[calculator.cell(0, 0, 0).value, calculator.cell(0, 0, 1).value], [calculator.cell(0, 1, 0).value, calculator.cell(0, 1, 1).value]], [['a', 'b'], ['c', '#N/A']]);
   assert.equal(calculator.cell(0, 1, 1).isSpill, true);
+  assert.deepEqual([calculator.cell(0, 0, 4).value, calculator.cell(0, 0, 5).value], ['İx', 'y']);
+  assert.equal(calculator.cell(0, 0, 5).isSpill, true);
 });
 
 test('UNICHAR와 UNICODE는 BMP·보충 평면 문자를 왕복하고 잘못된 코드 포인트를 거부한다', () => {
@@ -1141,6 +1557,29 @@ test('SEQUENCE는 동적 배열 값을 만들고 점유 셀에서는 spill 오�
   assert.equal(createFormulaCalculator(document).value(0, 0, 0), '#SPILL!');
   assert.equal(evaluateFormula('SEQUENCE(0)'), '#VALUE!');
   assert.equal(evaluateFormula('SEQUENCE(101,100)'), '#NUM!', 'array dimensions are bounded');
+});
+
+test('INDEX의 0 인수 배열 결과가 셀과 스필 참조로 이어진다', () => {
+  const cells = new Map();
+  const add = (address, row, column, value, formula = null) => cells.set(address, {
+    address, row, column, value: String(value), kind: 'number', formula, hasFormula: Boolean(formula)
+  });
+  [[1, 2, 3], [4, 5, 6], [7, 8, 9]].forEach((line, row) => line.forEach((value, column) => {
+    add(`${String.fromCharCode(65 + column)}${row + 1}`, row, column, value);
+  }));
+  add('E1', 0, 4, 0, 'INDEX(A1:C3,2,0)');
+  add('I1', 0, 8, 0, 'INDEX(A1:C3,0,2)');
+  add('K1', 0, 10, 0, 'SUM(I1#)');
+  add('M1', 0, 12, 0, 'INDEX(A1:C3,0,0)');
+  const document = {
+    state: { sheets: [{ name: 'Data', cells, mergedCells: [], tables: [] }] },
+    getCell: (row, column) => [...cells.values()].find(cell => cell.row === row && cell.column === column) || null
+  };
+  const calculator = createFormulaCalculator(document);
+  assert.deepEqual([4, 5, 6].map((_, offset) => calculator.cell(0, 0, 4 + offset).cachedValue), [4, 5, 6], 'row_num 0 spills a selected row');
+  assert.deepEqual([2, 5, 8].map((_, offset) => calculator.cell(0, offset, 8).cachedValue), [2, 5, 8], 'column_num 0 spills a selected column');
+  assert.equal(calculator.value(0, 0, 10), 15, 'the spill operator reads an INDEX array');
+  assert.deepEqual([[1, 2, 3], [4, 5, 6], [7, 8, 9]].map((line, row) => line.map((_, column) => calculator.cell(0, row, 12 + column).cachedValue)), [[1, 2, 3], [4, 5, 6], [7, 8, 9]], 'two zero coordinates spill the full selected array');
 });
 
 test('XLOOKUP은 일치 행의 여러 반환 열을 동적 배열로 spill한다', () => {
@@ -1370,12 +1809,77 @@ test('SUBTOTAL은 필터된 행과 범위 안의 중첩 SUBTOTAL을 제외한다
   assert.equal(evaluateFormula('SUBTOTAL(12,1,2)'), '#VALUE!');
 });
 
+test('AGGREGATE는 옵션에 따라 숨김 행·오류·중첩 집계를 제외한다', () => {
+  const cell = (address, row, column, value, kind = 'number', formula = null) => ({ address, row, column, value: String(value), kind, formula });
+  const cells = new Map([
+    ['A1', cell('A1', 0, 0, 1)], ['A2', cell('A2', 1, 0, 2)], ['A3', cell('A3', 2, 0, '#N/A', 'error')], ['A4', cell('A4', 3, 0, 4)],
+    ['C1', cell('C1', 0, 2, 10)], ['C2', cell('C2', 1, 2, 20)], ['C3', cell('C3', 2, 2, '', 'number', 'SUBTOTAL(9,C1:C2)')],
+    ['E1', cell('E1', 0, 4, '', 'number', 'AGGREGATE(9,3,A1:A4)')],
+    ['E2', cell('E2', 1, 4, '', 'number', 'AGGREGATE(9,6,A1:A4)')],
+    ['E3', cell('E3', 2, 4, '', 'error', 'AGGREGATE(9,0,A1:A4)')],
+    ['E4', cell('E4', 3, 4, '', 'number', 'AGGREGATE(14,6,A1:A4,2)')],
+    ['E5', cell('E5', 4, 4, '', 'number', 'AGGREGATE(9,0,C1:C3)')],
+    ['E6', cell('E6', 5, 4, '', 'number', 'AGGREGATE(9,4,C1:C3)')],
+    ['E7', cell('E7', 6, 4, '', 'error', 'AGGREGATE(16,6,A1:A4,0.5)')],
+    ['E8', cell('E8', 7, 4, '', 'error', 'AGGREGATE(9,8,A1:A4)')],
+    ['E9', cell('E9', 8, 4, '', 'number', 'AGGREGATE(14,0,C1:C3,2)')],
+    ['E10', cell('E10', 9, 4, '', 'number', 'AGGREGATE(14,4,C1:C3,2)')]
+  ]);
+  const document = {
+    state: { sheets: [{ name: 'Data', cells, hiddenRows: [1], mergedCells: [], tables: [] }] },
+    getCell: (row, column) => [...cells.values()].find(item => item.row === row && item.column === column) || null
+  };
+  const calculator = createFormulaCalculator(document);
+  assert.equal(calculator.value(0, 0, 4), 5, 'option 3 ignores hidden rows and errors');
+  assert.equal(calculator.value(0, 1, 4), 7, 'option 6 ignores errors but includes hidden rows');
+  assert.equal(calculator.value(0, 2, 4), '#N/A', 'option 0 propagates errors');
+  assert.equal(calculator.value(0, 3, 4), 2, 'function 14 delegates to LARGE with its rank');
+  assert.equal(calculator.value(0, 4, 4), 30, 'option 0 ignores nested SUBTOTAL formulas');
+  assert.equal(calculator.value(0, 5, 4), 60, 'option 4 includes nested SUBTOTAL results');
+  assert.equal(calculator.value(0, 6, 4), 2, 'function 16 delegates to PERCENTILE.INC');
+  assert.equal(calculator.value(0, 7, 4), '#VALUE!', 'options outside 0 through 7 are rejected');
+  assert.equal(calculator.value(0, 8, 4), 10, 'array-form functions ignore nested subtotals for options 0 through 3');
+  assert.equal(calculator.value(0, 9, 4), 20, 'option 4 includes nested subtotals for array-form functions');
+});
+
+test('AGGREGATE 함수 번호 1–19는 해당 통계 함수로 계산한다', () => {
+  const context = { getCell: row => [1, 2, 3, 4][row] ?? null };
+  const expected = [2.5, 4, 4, 4, 1, 24, Math.sqrt(5 / 3), Math.sqrt(1.25), 10, 5 / 3, 1.25, 2.5, '#N/A', 3, 2, 2.5, 2.5, 2.5, 2.5];
+  expected.forEach((value, index) => {
+    const functionNumber = index + 1;
+    const formula = functionNumber <= 13
+      ? `AGGREGATE(${functionNumber},4,A1:A4)`
+      : `AGGREGATE(${functionNumber},6,A1:A4,${[14, 15].includes(functionNumber) ? 2 : [17, 19].includes(functionNumber) ? 2 : 0.5})`;
+    assert.equal(evaluateFormula(formula, context), value, `function number ${functionNumber}`);
+  });
+  assert.equal(evaluateFormula('AGGREGATE(9,6,1/0,2)'), 2, 'error-ignore options apply to direct values');
+  assert.equal(evaluateFormula('AGGREGATE(9,4,1/0,2)'), '#DIV/0!', 'error-propagation options preserve direct errors');
+  assert.equal(evaluateFormula('AGGREGATE(14,6,A1:A4)'), '#VALUE!', 'array-form functions require a rank');
+  assert.equal(evaluateFormula(`AGGREGATE(9,4,${Array(253).fill('1').join(',')})`), 253, 'reference form accepts all 253 numeric arguments');
+  assert.equal(evaluateFormula(`AGGREGATE(9,4,${Array(254).fill('1').join(',')})`), '#VALUE!', 'reference form stays within Excel’s 255 total argument limit');
+});
+
+test('AGGREGATE는 Microsoft 공식 예제의 오류 무시와 복수 참조 결과를 재현한다', () => {
+  const data = [
+    ['#DIV/0!', 82], [72, 65], [30, 95], ['#NUM!', 63], [31, 53], [96, 71], [32, 55], [81, 83], [33, 100], [53, 91], [34, 89]
+  ];
+  const context = { getCell: (row, column) => data[row]?.[column] ?? null };
+  assert.equal(evaluateFormula('AGGREGATE(4,6,A1:A11)', context), 96);
+  assert.equal(evaluateFormula('AGGREGATE(14,6,A1:A11,3)', context), 72);
+  assert.equal(evaluateFormula('AGGREGATE(15,6,A1:A11)', context), '#VALUE!');
+  assert.equal(evaluateFormula('AGGREGATE(12,6,A1:A11,B1:B11)', context), 68);
+});
+
 test('수식 계산기는 희소 셀만 순회해 전체 행·열 참조를 집계한다', () => {
   const cells = new Map([
     ['A1', { address: 'A1', row: 0, column: 0, value: '2', kind: 'number' }],
     ['B1', { address: 'B1', row: 0, column: 1, value: '3', kind: 'number' }],
+    ['D1', { address: 'D1', row: 0, column: 3, value: '>0', kind: 'string' }],
+    ['F1', { address: 'F1', row: 0, column: 5, value: '#N/A', kind: 'string' }],
     ['A1000000', { address: 'A1000000', row: 999999, column: 0, value: '7', kind: 'number' }],
     ['B1000000', { address: 'B1000000', row: 999999, column: 1, value: '4', kind: 'number' }],
+    ['E1000000', { address: 'E1000000', row: 999999, column: 4, value: '#N/A', kind: 'error' }],
+    ['E1000001', { address: 'E1000001', row: 1000000, column: 4, value: '#N/A', kind: 'string' }],
     ['C2', { address: 'C2', row: 1, column: 2, value: '', kind: 'number', formula: 'SUM(A:A)' }],
     ['D2', { address: 'D2', row: 1, column: 3, value: '', kind: 'number', formula: 'SUM(1:1)' }],
     ['E2', { address: 'E2', row: 1, column: 4, value: '', kind: 'number', formula: 'COUNTBLANK(A:A)' }],
@@ -1390,7 +1894,16 @@ test('수식 계산기는 희소 셀만 순회해 전체 행·열 참조를 집�
     ['N2', { address: 'N2', row: 1, column: 13, value: '', kind: 'number', formula: 'COUNTIFS(A:A,">0",B:B,">3")' }],
     ['O2', { address: 'O2', row: 1, column: 14, value: '', kind: 'number', formula: 'COUNTIFS(A:A,"",B:B,"")' }],
     ['P2', { address: 'P2', row: 1, column: 15, value: '', kind: 'number', formula: 'SUMIF(A:A,"",B:B)' }],
-    ['Q2', { address: 'Q2', row: 1, column: 16, value: '', kind: 'number', formula: 'SUMIF(A:A,">0",B1:B3)' }]
+    ['Q2', { address: 'Q2', row: 1, column: 16, value: '', kind: 'number', formula: 'SUMIF(A:A,">0",B1:B3)' }],
+    ['R2', { address: 'R2', row: 1, column: 17, value: '', kind: 'number', formula: 'COUNTIF(E:E,F1)' }],
+    ['S2', { address: 'S2', row: 1, column: 18, value: '', kind: 'number', formula: 'COUNTIFS(E:E,F1)' }],
+    ['T2', { address: 'T2', row: 1, column: 19, value: '', kind: 'number', formula: 'MAXIFS(B:B,A:A,D1)' }],
+    ['U2', { address: 'U2', row: 1, column: 20, value: '', kind: 'number', formula: 'MINIFS(B:B,A:A,D1)' }],
+    ['V2', { address: 'V2', row: 1, column: 21, value: '', kind: 'number', formula: 'SUM(INDEX(A:A,0))' }],
+    ['W2', { address: 'W2', row: 1, column: 22, value: '', kind: 'number', formula: 'SUM(INDEX(1:1,0,0))' }],
+    ['X2', { address: 'X2', row: 1, column: 23, value: '', kind: 'number', formula: 'SUM(INDEX(B:B,0,1))' }],
+    ['Y2', { address: 'Y2', row: 1, column: 24, value: '', kind: 'number', formula: 'SUM(INDEX(A:B,0,2))' }],
+    ['Z2', { address: 'Z2', row: 1, column: 25, value: '', kind: 'number', formula: 'SUM(INDEX(1:2,1,0))' }]
   ]);
   const document = {
     state: { sheets: [{ name: 'Data', cells }] },
@@ -1417,6 +1930,174 @@ test('수식 계산기는 희소 셀만 순회해 전체 행·열 참조를 집�
   assert.equal(calculator.value(0, 1, 14), 1048574, 'COUNTIFS counts rows blank in every sparse full-column criteria range');
   assert.equal(calculator.value(0, 1, 15), 0, 'SUMIF does not shift sums onto nonmatching blank criterion rows');
   assert.equal(calculator.value(0, 1, 16), 3, 'SUMIF aligns a bounded sum range to a full-column criteria range without enumerating the entire column');
+  assert.equal(calculator.value(0, 1, 17), 2, 'COUNTIF preserves a referenced error-like text criterion in a sparse full column');
+  assert.equal(calculator.value(0, 1, 18), 2, 'COUNTIFS preserves a referenced error-like text criterion in a sparse full column');
+  assert.equal(calculator.value(0, 1, 19), 4, 'MAXIFS parses a referenced comparison criterion in sparse full columns');
+  assert.equal(calculator.value(0, 1, 20), 3, 'MINIFS parses a referenced comparison criterion in sparse full columns');
+  assert.equal(calculator.value(0, 1, 21), 9, 'INDEX preserves a sparse full-column reference inside SUM');
+  assert.equal(calculator.value(0, 1, 22), 5, 'INDEX preserves a sparse full-row reference inside SUM');
+  assert.equal(calculator.value(0, 1, 23), 7, 'INDEX selects a sparse full-column reference without materializing it');
+  assert.equal(calculator.value(0, 1, 24), 7, 'INDEX selects one column from a sparse multi-column reference');
+  assert.equal(calculator.value(0, 1, 25), 5, 'INDEX selects one row from a sparse multi-row reference');
+});
+
+test('조건부 집계는 셀 수가 같아도 행·열 모양이 다른 배열 범위를 거부한다', () => {
+  const row = 'HSTACK(1,2,3,4)';
+  const matrix = 'VSTACK(HSTACK(1,2),HSTACK(3,4))';
+  const formulas = [
+    'COUNTIFS(' + row + ',">0",' + matrix + ',">0")',
+    'SUMIFS(' + row + ',' + matrix + ',">0")',
+    'AVERAGEIFS(' + row + ',' + matrix + ',">0")',
+    'MAXIFS(' + row + ',' + matrix + ',">0")',
+    'MINIFS(' + row + ',' + matrix + ',">0")'
+  ];
+  for (const formula of formulas) assert.equal(evaluateFormula(formula), '#VALUE!', `${formula} must reject differently shaped ranges`);
+  assert.equal(evaluateFormula('COUNTIFS(' + matrix + ',">0",' + matrix + ',">0")'), 4, 'matching two-dimensional ranges remain valid');
+});
+
+test('SUMPRODUCT는 전체 행·열의 희소 셀 참조를 계산한다', () => {
+  const cells = new Map([
+    ['A1', { address: 'A1', row: 0, column: 0, value: '1', kind: 'number' }],
+    ['B1', { address: 'B1', row: 0, column: 1, value: '4', kind: 'number' }],
+    ['A2', { address: 'A2', row: 1, column: 0, value: '2', kind: 'number' }],
+    ['B2', { address: 'B2', row: 1, column: 1, value: '7', kind: 'number' }],
+    ['A3', { address: 'A3', row: 2, column: 0, value: '#N/A', kind: 'string' }],
+    ['B3', { address: 'B3', row: 2, column: 1, value: '100', kind: 'number' }],
+    ['C4', { address: 'C4', row: 3, column: 2, value: '#DIV/0!', kind: 'error' }],
+    ['F1', { address: 'F1', row: 0, column: 5, value: '', kind: 'number', formula: 'SUMPRODUCT(A:A,B:B)' }],
+    ['D3', { address: 'D3', row: 2, column: 3, value: '', kind: 'number', formula: 'SUMPRODUCT(1:1,2:2)' }],
+    ['E3', { address: 'E3', row: 2, column: 4, value: '', kind: 'error', formula: 'SUMPRODUCT(A:A,1)' }],
+    ['G3', { address: 'G3', row: 2, column: 6, value: '', kind: 'error', formula: 'SUMPRODUCT(C:C,D:D)' }]
+  ]);
+  const document = { state: { sheets: [{ name: 'Data', cells, mergedCells: [], tables: [] }] }, getCell: (row, column) => cells.get(String.fromCharCode(65 + column) + (row + 1)) || null };
+  const calculator = createFormulaCalculator(document);
+  assert.equal(calculator.value(0, 0, 5), 18, 'whole-column ranges ignore text and blank cells as zero');
+  assert.equal(calculator.value(0, 2, 3), 30, 'whole-row ranges preserve corresponding column positions');
+  assert.equal(calculator.value(0, 2, 4), '#VALUE!', 'a scalar does not match a whole-column array dimension');
+  assert.equal(calculator.value(0, 2, 6), '#DIV/0!', 'errors in sparse ranges propagate even when another range has a missing cell at that position');
+});
+
+test('MATCH와 XMATCH는 희소 전체 행·열에서 원래 위치를 반환한다', () => {
+  const cells = new Map([
+    ['A1', { address: 'A1', row: 0, column: 0, value: '1', kind: 'number' }],
+    ['A2', { address: 'A2', row: 1, column: 0, value: '2', kind: 'number' }],
+    ['A3', { address: 'A3', row: 2, column: 0, value: '7', kind: 'number' }],
+    ['A1000000', { address: 'A1000000', row: 999999, column: 0, value: '42', kind: 'number' }],
+    ['A10', { address: 'A10', row: 9, column: 0, value: '1', kind: 'number' }],
+    ['B10', { address: 'B10', row: 9, column: 1, value: '2', kind: 'number' }],
+    ['C10', { address: 'C10', row: 9, column: 2, value: '7', kind: 'number' }],
+    ['H1', { address: 'H1', row: 0, column: 7, value: '', kind: 'number', formula: 'MATCH("",A:A,0)' }],
+    ['I1', { address: 'I1', row: 0, column: 8, value: '', kind: 'number', formula: 'XMATCH("",A:A,0,-1)' }],
+    ['K1', { address: 'K1', row: 0, column: 10, value: '', kind: 'number', formula: 'INDEX(A:A,1000000)' }],
+    ['C1', { address: 'C1', row: 0, column: 2, value: '', kind: 'number', formula: 'MATCH(7,A:A,0)' }],
+    ['D1', { address: 'D1', row: 0, column: 3, value: '', kind: 'number', formula: 'XMATCH(2,A:A)' }],
+    ['E1', { address: 'E1', row: 0, column: 4, value: '', kind: 'number', formula: 'XMATCH(3,A:A,1)' }],
+    ['F1', { address: 'F1', row: 0, column: 5, value: '', kind: 'number', formula: 'MATCH(42,A:A,0)' }],
+    ['G1', { address: 'G1', row: 0, column: 6, value: '', kind: 'error', formula: 'XMATCH(99,A:A)' }],
+    ['D11', { address: 'D11', row: 10, column: 3, value: '', kind: 'number', formula: 'MATCH(7,10:10,0)' }],
+    ['E11', { address: 'E11', row: 10, column: 4, value: '', kind: 'number', formula: 'XMATCH(2,10:10)' }]
+  ]);
+  const document = { state: { sheets: [{ name: 'Data', cells, mergedCells: [], tables: [] }] }, getCell: (row, column) => cells.get(String.fromCharCode(65 + column) + (row + 1)) || null };
+  const calculator = createFormulaCalculator(document);
+  assert.equal(calculator.value(0, 0, 2), 3, 'MATCH returns the populated row index rather than the sparse-cell index');
+  assert.equal(calculator.value(0, 0, 3), 2);
+  assert.equal(calculator.value(0, 0, 4), 3, 'XMATCH approximate mode uses the next smaller value in a sorted ascending lookup array');
+  assert.equal(calculator.value(0, 0, 5), 1000000, 'whole-column lookup reaches the last worksheet row without allocating every blank cell');
+  assert.equal(calculator.value(0, 0, 6), '#N/A');
+  assert.equal(calculator.value(0, 0, 7), 4, 'exact MATCH finds the first implicit blank in a sparse column');
+  assert.equal(calculator.value(0, 0, 8), 1048576, 'reverse exact XMATCH finds the last implicit blank without scanning every row');
+  assert.equal(calculator.value(0, 0, 10), 42, 'INDEX finds a distant populated cell in the sorted sparse range');
+  assert.equal(calculator.value(0, 10, 3), 3, 'MATCH also preserves column positions in a sparse whole-row array');
+  assert.equal(calculator.value(0, 10, 4), 2);
+});
+
+test('XLOOKUP은 희소 전체 행·열을 materialize하지 않고 조회한다', () => {
+  const cells = new Map([
+    ['A1', { address: 'A1', row: 0, column: 0, value: '1', kind: 'number' }],
+    ['A2', { address: 'A2', row: 1, column: 0, value: '2', kind: 'number' }],
+    ['A1000000', { address: 'A1000000', row: 999999, column: 0, value: '42', kind: 'number' }],
+    ['B1', { address: 'B1', row: 0, column: 1, value: 'first', kind: 'string' }],
+    ['B1000000', { address: 'B1000000', row: 999999, column: 1, value: 'last', kind: 'string' }],
+    ['C1', { address: 'C1', row: 0, column: 2, value: '', kind: 'string', formula: 'XLOOKUP(42,A:A,B:B,"missing")' }],
+    ['D1', { address: 'D1', row: 0, column: 3, value: '', kind: 'string', formula: 'XLOOKUP(99,A:A,B:B,"missing")' }],
+    ['E1', { address: 'E1', row: 0, column: 4, value: '', kind: 'string', formula: 'XLOOKUP("two",1:1,2:2,"missing")' }],
+    ['G1', { address: 'G1', row: 0, column: 6, value: '', kind: 'string', formula: 'XLOOKUP(42,A:A,B1:C1)' }]
+  ]);
+  const document = {
+    state: { sheets: [{ name: 'Data', cells, mergedCells: [], tables: [] }] },
+    getCell: (row, column) => [...cells.values()].find(cell => cell.row === row && cell.column === column) || null
+  };
+  const calculator = createFormulaCalculator(document);
+  assert.equal(calculator.value(0, 0, 2), 'last', 'full-column lookup reaches the final row');
+  assert.equal(calculator.value(0, 0, 3), 'missing', 'not-found values work with sparse references');
+  assert.equal(calculator.value(0, 0, 4), 'missing', 'whole-row lookup retains original column positions');
+  assert.equal(calculator.value(0, 0, 6), '#VALUE!', 'lookup and return dimensions still have to align');
+});
+
+test('VLOOKUP과 HLOOKUP은 희소 전체 열·행 표를 조회한다', () => {
+  const cells = new Map([
+    ['A1', { address: 'A1', row: 0, column: 0, value: '1', kind: 'number' }],
+    ['A2', { address: 'A2', row: 1, column: 0, value: '2', kind: 'number' }],
+    ['A1000000', { address: 'A1000000', row: 999999, column: 0, value: '42', kind: 'number' }],
+    ['B1', { address: 'B1', row: 0, column: 1, value: 'first', kind: 'string' }],
+    ['B2', { address: 'B2', row: 1, column: 1, value: 'second', kind: 'string' }],
+    ['B1000000', { address: 'B1000000', row: 999999, column: 1, value: 'last', kind: 'string' }],
+    ['D1', { address: 'D1', row: 0, column: 3, value: '1', kind: 'number' }],
+    ['E1', { address: 'E1', row: 0, column: 4, value: '2', kind: 'number' }],
+    ['XFD1', { address: 'XFD1', row: 0, column: 16383, value: '42', kind: 'number' }],
+    ['D2', { address: 'D2', row: 1, column: 3, value: 'first', kind: 'string' }],
+    ['E2', { address: 'E2', row: 1, column: 4, value: 'second', kind: 'string' }],
+    ['XFD2', { address: 'XFD2', row: 1, column: 16383, value: 'last', kind: 'string' }],
+    ['C1', { address: 'C1', row: 0, column: 2, value: '', kind: 'string', formula: 'VLOOKUP(42,A:B,2,FALSE)' }],
+    ['C2', { address: 'C2', row: 1, column: 2, value: '', kind: 'string', formula: 'VLOOKUP(99,A:B,2,FALSE)' }],
+    ['C3', { address: 'C3', row: 2, column: 2, value: '', kind: 'string', formula: 'HLOOKUP(42,1:2,2,FALSE)' }],
+    ['C4', { address: 'C4', row: 3, column: 2, value: '', kind: 'string', formula: 'VLOOKUP(40,A:B,2)' }],
+    ['C5', { address: 'C5', row: 4, column: 2, value: '', kind: 'string', formula: 'HLOOKUP(40,1:2,2)' }],
+    ['C6', { address: 'C6', row: 5, column: 2, value: '', kind: 'error', formula: 'VLOOKUP(42,A:B,3,FALSE)' }],
+    ['C7', { address: 'C7', row: 6, column: 2, value: '', kind: 'number', formula: 'VLOOKUP("",A:B,2,FALSE)' }],
+    ['C8', { address: 'C8', row: 7, column: 2, value: '', kind: 'number', formula: 'HLOOKUP("",1:2,2,FALSE)' }]
+  ]);
+  const document = {
+    state: { sheets: [{ name: 'Data', cells, mergedCells: [], tables: [] }] },
+    getCell: (row, column) => [...cells.values()].find(cell => cell.row === row && cell.column === column) || null
+  };
+  const calculator = createFormulaCalculator(document);
+  assert.equal(calculator.value(0, 0, 2), 'last', 'VLOOKUP reaches the last worksheet row');
+  assert.equal(calculator.value(0, 1, 2), '#N/A');
+  assert.equal(calculator.value(0, 2, 2), 'last', 'HLOOKUP reaches the last worksheet column');
+  assert.equal(calculator.value(0, 3, 2), 'second', 'approximate VLOOKUP finds the preceding sparse key');
+  assert.equal(calculator.value(0, 4, 2), 'second', 'approximate HLOOKUP finds the preceding sparse key');
+  assert.equal(calculator.value(0, 5, 2), '#REF!', 'lookup index remains bounded by the table dimensions');
+  assert.equal(calculator.value(0, 6, 2), 0, 'exact VLOOKUP can find an implicit blank key');
+  assert.equal(calculator.value(0, 7, 2), 0, 'exact HLOOKUP can find an implicit blank key');
+});
+
+test('LOOKUP은 희소 전체 열·행 벡터에서 원래 위치에 대응하는 값을 반환한다', () => {
+  const cells = new Map([
+    ['A1', { address: 'A1', row: 0, column: 0, value: '1', kind: 'number' }],
+    ['A2', { address: 'A2', row: 1, column: 0, value: '2', kind: 'number' }],
+    ['A1000000', { address: 'A1000000', row: 999999, column: 0, value: '42', kind: 'number' }],
+    ['B1', { address: 'B1', row: 0, column: 1, value: 'first', kind: 'string' }],
+    ['B2', { address: 'B2', row: 1, column: 1, value: 'second', kind: 'string' }],
+    ['B1000000', { address: 'B1000000', row: 999999, column: 1, value: 'last', kind: 'string' }],
+    ['D10', { address: 'D10', row: 9, column: 3, value: '1', kind: 'number' }],
+    ['E10', { address: 'E10', row: 9, column: 4, value: '2', kind: 'number' }],
+    ['XFD10', { address: 'XFD10', row: 9, column: 16383, value: '42', kind: 'number' }],
+    ['D11', { address: 'D11', row: 10, column: 3, value: 'first', kind: 'string' }],
+    ['E11', { address: 'E11', row: 10, column: 4, value: 'second', kind: 'string' }],
+    ['XFD11', { address: 'XFD11', row: 10, column: 16383, value: 'last', kind: 'string' }],
+    ['C1', { address: 'C1', row: 0, column: 2, value: '', kind: 'string', formula: 'LOOKUP(41,A:A,B:B)' }],
+    ['C2', { address: 'C2', row: 1, column: 2, value: '', kind: 'string', formula: 'LOOKUP(41,10:10,11:11)' }],
+    ['C3', { address: 'C3', row: 2, column: 2, value: '', kind: 'string', formula: 'LOOKUP(42,A:A)' }]
+  ]);
+  const document = {
+    state: { sheets: [{ name: 'Data', cells, mergedCells: [], tables: [] }] },
+    getCell: (row, column) => [...cells.values()].find(cell => cell.row === row && cell.column === column) || null
+  };
+  const calculator = createFormulaCalculator(document);
+  assert.equal(calculator.value(0, 0, 2), 'second', 'full-column lookup maps approximate matches to the original row');
+  assert.equal(calculator.value(0, 1, 2), 'second', 'full-row lookup maps approximate matches to the original column');
+  assert.equal(calculator.value(0, 2, 2), 42, 'omitting the result vector returns the matched lookup value');
 });
 
 function fixture({ formula = false, extra = undefined, workbookXml = undefined, formatted = false, columnDefinitions = '', sheetViews = '', cellExtension = '', autoFilter = '' } = {}) {
@@ -1835,10 +2516,14 @@ test('워크시트 삭제는 수식 참조를 #REF로 바꾸고 유효성 참조
   assert.doesNotMatch(new TextDecoder().decode(deleted.model.files['xl/workbook.xml']), /LocalRef/);
   assert.throws(() => patchDeleteSheet(deleted.model, 0), /마지막 시트/);
   const dependentFiles = Object.fromEntries(Object.entries(unzipSync(fixture())).map(([path, bytes]) => [path, new TextDecoder().decode(bytes)]));
+  dependentFiles['xl/workbook.xml'] = dependentFiles['xl/workbook.xml'].replace('</workbook>', '<calcPr calcMode="manual"/></workbook>');
   dependentFiles['xl/worksheets/sheet2.xml'] = dependentFiles['xl/worksheets/sheet2.xml'].replace('</sheetData>', '<row r="2"><c r="A2"><f>Data!A1</f><v>42</v></c></row></sheetData>');
   const dependent = analyze(zipSync(Object.fromEntries(Object.entries(dependentFiles).map(([path, value]) => [path, new TextEncoder().encode(value)]))));
   const deletedReference = patchDeleteSheet(dependent, 0);
   assert.match(new TextDecoder().decode(deletedReference.model.files['xl/worksheets/sheet2.xml']), /<f>#REF!<\/f>/);
+  assert.equal(deletedReference.model.sheets[0].cells.get('A2').cachedValue, '#REF!', 'manual calculation cache follows deleted-sheet references');
+  assert.equal(deletedReference.model.sheets[0].cells.get('A2').kind, 'error');
+  assert.match(new TextDecoder().decode(deletedReference.model.files['xl/workbook.xml']), /calcMode="manual"/);
   const validationFiles = Object.fromEntries(Object.entries(unzipSync(fixture())).map(([path, bytes]) => [path, new TextDecoder().decode(bytes)]));
   validationFiles['xl/worksheets/sheet2.xml'] = validationFiles['xl/worksheets/sheet2.xml'].replace('</worksheet>', '<dataValidations count="1"><dataValidation type="list" sqref="A1"><formula1>Data!$A$1:$A$3</formula1></dataValidation></dataValidations></worksheet>');
   const validationModel = analyze(zipSync(Object.fromEntries(Object.entries(validationFiles).map(([path, value]) => [path, new TextEncoder().encode(value)]))));
@@ -3214,6 +3899,35 @@ test('지원되는 차트가 있는 XLSX는 원본 셀 편집 시 차트 캐시�
   assert.deepEqual(Buffer.from(edited.files['xl/drawings/drawing1.xml']), Buffer.from(model.files['xl/drawings/drawing1.xml']));
 });
 
+test('차트 미리보기는 필터·숨김 행을 제외하고 숨김 데이터 표시 옵션을 따른다', () => {
+  const makeModel = plotVisibleOnly => {
+    const files = unzipSync(fixtureWithCachedChart());
+    files['xl/worksheets/sheet1.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/worksheets/sheet1.xml'])
+      .replace('ref="A1:C1"', 'ref="A1:C3"')
+      .replace('</sheetData>', '<row r="2"><c r="A2" t="inlineStr"><is><t>Jan</t></is></c><c r="B2"><v>4</v></c></row><row r="3" hidden="1"><c r="A3" t="inlineStr"><is><t>Feb</t></is></c><c r="B3"><v>6</v></c></row></sheetData>'));
+    const chartPath = 'xl/charts/chart1.xml';
+    if (plotVisibleOnly !== undefined) files[chartPath] = new TextEncoder().encode(new TextDecoder().decode(files[chartPath]).replace('</c:chart>', '<c:plotVisOnly val="' + (plotVisibleOnly ? '1' : '0') + '"/></c:chart>'));
+    return analyze(zipSync(files));
+  };
+  const preview = model => calculateChartPreviews(model, 0, createFormulaCalculator({ state: model, getCell: (row, column, sheetIndex = 0) => model.sheets[sheetIndex]?.cells.get(String.fromCharCode(65 + column) + (row + 1)) || null }), (row, column, sheetIndex = 0) => model.sheets[sheetIndex]?.cells.get(String.fromCharCode(65 + column) + (row + 1)) || null, []);
+
+  const visibleOnly = makeModel(true);
+  assert.equal(visibleOnly.writable, true, visibleOnly.readOnlyReason);
+  assert.deepEqual(visibleOnly.sheets[0].nativeHiddenRows, [2]);
+  assert.deepEqual(visibleOnly.sheets[0].charts[0].series[0].values, [4, 6], 'the source chart cache remains complete');
+  assert.deepEqual(preview(visibleOnly)[0].series[0].categories, ['Jan', '']);
+  assert.deepEqual(preview(visibleOnly)[0].series[0].values, [4, null], 'the hidden point is omitted only from the preview');
+
+  const unsaved = calculateChartPreviews(visibleOnly, 0, createFormulaCalculator({ state: visibleOnly }), (row, column, sheetIndex = 0) => {
+    const cell = visibleOnly.sheets[sheetIndex]?.cells.get(String.fromCharCode(65 + column) + (row + 1));
+    return row === 1 && column === 1 ? { ...cell, value: '9', kind: 'number' } : cell || null;
+  }, [{ sheetIndex: 0, row: 1, column: 1 }]);
+  assert.deepEqual(unsaved[0].series[0].values, [9, null], 'unsaved visible changes recalculate while filtered rows remain hidden');
+
+  const showHidden = makeModel(false);
+  assert.deepEqual(preview(showHidden)[0].series[0].values, [4, 6], 'plotVisOnly=false keeps hidden row data in the preview');
+});
+
 test('XLSX 행·열 삽입과 삭제는 차트 원본 수식·캐시와 셀 기준 배치를 함께 갱신한다', () => {
   for (const editAs of ['twoCell', 'oneCell', 'absolute']) {
     const original = analyze(fixtureWithPositionedChart(editAs));
@@ -3373,7 +4087,7 @@ test('수식 통합문서는 일반 셀 편집을 허용하고 수식 셀·수�
   const insertedWithFormulas = transformStructure(formulaStructure, { sheetIndex: 0, axis: 'row', action: 'insert', index: 0 });
   const formulaReopened = analyze(insertedWithFormulas.bytes);
   assert.equal(formulaReopened.sheets[0].cells.get('A3').formula, 'SUM(A2:B2)');
-  assert.equal(formulaReopened.sheets[0].cells.get('A3').cachedValue, '');
+  assert.equal(formulaReopened.sheets[0].cells.get('A3').cachedValue, '42');
   assert.equal(formulaReopened.sheets[1].cells.get('B2').formula, 'Data!A2');
   assert.equal(formulaReopened.writable, true, formulaReopened.readOnlyReason);
   assert.match(new TextDecoder().decode(formulaReopened.files['xl/workbook.xml']), /fullCalcOnLoad="1"/);
@@ -3392,7 +4106,7 @@ test('수식 통합문서는 일반 셀 편집을 허용하고 수식 셀·수�
     for (const [address, formula] of expected) {
       assert.equal(transformedSheet.cells.get(address).formula, formula);
       assert.equal(transformedSheet.cells.get(address).formulaType, null);
-      assert.equal(transformedSheet.cells.get(address).cachedValue, '');
+      assert.notEqual(transformedSheet.cells.get(address).cachedValue, '', 'supported translated formulas have a calculated cache');
     }
     const letters = column => String.fromCharCode(65 + column);
     const calculator = createFormulaCalculator({
@@ -3433,7 +4147,7 @@ test('수식 통합문서는 일반 셀 편집을 허용하고 수식 셀·수�
   const errorFormula = analyze(zipSync(errorFiles));
   assert.equal(errorFormula.writable, true);
   assert.equal(errorFormula.sheets[0].cells.get('A2').kind, 'error');
-  assert.equal(patchCell(errorFormula, 0, 'A1', 'ordinary edit').model.sheets[0].cells.get('A2').value, '#N/A');
+  assert.equal(patchCell(errorFormula, 0, 'A1', 'ordinary edit').model.sheets[0].cells.get('A2').value, '2');
   assert.throws(() => patchCell(errorFormula, 0, 'A2', 'blocked'), /기존의 단순 값 셀만 수정/);
   const calcFiles = unzipSync(fixture({ formula: true }));
   calcFiles['xl/workbook.xml'] = new TextEncoder().encode(new TextDecoder().decode(calcFiles['xl/workbook.xml']).replace('</workbook>', '<calcPr calcId="191029" calcMode="manual"/></workbook>'));
@@ -3447,6 +4161,192 @@ test('수식 통합문서는 일반 셀 편집을 허용하고 수식 셀·수�
   assert.equal(pastedFormula.formulas, true);
   assert.equal(pastedFormula.sheets[0].cells.get('D3').formula, 'A1+$B$1');
   assert.match(new TextDecoder().decode(pastedFormula.files['xl/workbook.xml']), /fullCalcOnLoad="1"/);
+});
+
+test('수동 계산 모드에서 확실히 계산되는 수식 캐시를 갱신하고 미지원 수식 캐시는 보존한다', () => {
+  const files = unzipSync(fixture({ formula: true }));
+  files['xl/workbook.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/workbook.xml']).replace('</workbook>', '<calcPr calcMode="manual" calcId="191029"/></workbook>'));
+  let sheet = new TextDecoder().decode(files['xl/worksheets/sheet1.xml'])
+    .replace('ref="A1:C1"', 'ref="A1:D2"')
+    .replace('<row r="2"><c r="A2"><f>1+1</f><v>2</v></c></row>', '<row r="2"><c r="A2"><f>A1+1</f><v>2</v></c><c r="B2" t="str"><f>UNKNOWN(A1)</f><v>99</v></c><c r="C2" t="b"><f>A1&gt;0</f><v>0</v></c><c r="D2" t="str"><f>TEXT(A1,&quot;0&quot;)</f><v>old</v></c></row>');
+  files['xl/worksheets/sheet1.xml'] = new TextEncoder().encode(sheet);
+
+  const original = analyze(zipSync(files));
+  assert.equal(original.writable, true, original.readOnlyReason);
+  const saved = patchCell(original, 0, 'A1', '5');
+  const reopened = analyze(saved.bytes);
+  sheet = new TextDecoder().decode(reopened.files['xl/worksheets/sheet1.xml']);
+  assert.equal(reopened.sheets[0].cells.get('A2').cachedValue, '6');
+  assert.equal(reopened.sheets[0].cells.get('B2').cachedValue, '99', 'unknown functions keep their original cache');
+  assert.equal(reopened.sheets[0].cells.get('C2').cachedValue, 'TRUE');
+  assert.equal(reopened.sheets[0].cells.get('D2').cachedValue, '5');
+  assert.match(sheet, /<c r="A2"[^>]*><f>A1\+1<\/f><v>6<\/v><\/c>/);
+  assert.match(sheet, /<c r="B2" t="str"><f>UNKNOWN\(A1\)<\/f><v>99<\/v><\/c>/);
+  assert.match(sheet, /<c r="C2" t="b"><f>A1&gt;0<\/f><v>1<\/v><\/c>/);
+  assert.match(sheet, /<c r="D2" t="str"><f>TEXT\(A1,&quot;0&quot;\)<\/f><v>5<\/v><\/c>/);
+  const workbook = new TextDecoder().decode(reopened.files['xl/workbook.xml']);
+  assert.match(workbook, /calcMode="manual"/);
+  assert.match(workbook, /fullCalcOnLoad="1"[^>]*forceFullCalc="1"/);
+});
+
+test('수동 계산 모드에서 행 삭제로 바뀐 수식 참조와 캐시를 함께 갱신한다', () => {
+  const files = unzipSync(fixture({ formula: true }));
+  files['xl/workbook.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/workbook.xml']).replace('</workbook>', '<calcPr calcMode="manual"/></workbook>'));
+  files['xl/worksheets/sheet1.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/worksheets/sheet1.xml'])
+    .replace('<c r="A1" t="inlineStr"><is><t>before</t></is></c>', '<c r="A1"><v>2</v></c>')
+    .replace('<f>1+1</f><v>2</v>', '<f>A1+1</f><v>3</v>'));
+  const original = analyze(zipSync(files));
+  assert.equal(original.writable, true, original.readOnlyReason);
+  const deleted = transformStructure(original, { sheetIndex: 0, axis: 'row', action: 'delete', index: 0 });
+  const reopened = analyze(deleted.bytes);
+  assert.equal(reopened.sheets[0].cells.get('A1').formula, '#REF!+1');
+  assert.equal(reopened.sheets[0].cells.get('A1').cachedValue, '#REF!');
+  assert.equal(reopened.sheets[0].cells.get('A1').kind, 'error');
+  assert.match(new TextDecoder().decode(reopened.files['xl/workbook.xml']), /calcMode="manual"/);
+});
+
+test('수동 계산 모드에서 필터로 숨긴 행을 SUBTOTAL 캐시에 반영한다', () => {
+  const files = unzipSync(fixture());
+  files['xl/workbook.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/workbook.xml']).replace('</workbook>', '<calcPr calcMode="manual"/></workbook>'));
+  files['xl/worksheets/sheet1.xml'] = new TextEncoder().encode('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:E3"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Group</t></is></c><c r="B1" t="inlineStr"><is><t>Value</t></is></c><c r="D1"><f>SUBTOTAL(9,B2:B3)</f><v>30</v></c><c r="E1"><f>AGGREGATE(9,5,B2:B3)</f><v>30</v></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>keep</t></is></c><c r="B2"><v>10</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>hide</t></is></c><c r="B3"><v>20</v></c></row></sheetData></worksheet>');
+  const original = analyze(zipSync(files));
+  assert.equal(original.writable, true, original.readOnlyReason);
+  const filtered = patchAutoFilters(original, [{ sheetIndex: 0, filter: { top: 0, bottom: 2, left: 0, right: 1, columns: [{ column: 0, values: ['keep'], blanks: false }] } }]);
+  const reopened = analyze(filtered.bytes);
+  assert.deepEqual(reopened.sheets[0].nativeHiddenRows, [2]);
+  assert.equal(reopened.sheets[0].cells.get('D1').cachedValue, '10');
+  assert.equal(reopened.sheets[0].cells.get('E1').cachedValue, '10', 'AGGREGATE option 5 excludes filter-hidden rows');
+  assert.match(new TextDecoder().decode(reopened.files['xl/workbook.xml']), /calcMode="manual"/);
+});
+
+test('수동 계산 모드에서 수동 숨김 행을 SUBTOTAL 캐시에 반영한다', () => {
+  const files = unzipSync(fixture());
+  files['xl/workbook.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/workbook.xml']).replace('</workbook>', '<calcPr calcMode="manual"/></workbook>'));
+  files['xl/worksheets/sheet1.xml'] = new TextEncoder().encode('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:E3"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Group</t></is></c><c r="B1" t="inlineStr"><is><t>Value</t></is></c><c r="D1"><f>SUBTOTAL(109,B2:B3)</f><v>30</v></c><c r="E1"><f>AGGREGATE(9,5,B2:B3)</f><v>30</v></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>keep</t></is></c><c r="B2"><v>10</v></c></row><row r="3"><c r="A3" t="inlineStr"><is><t>hide</t></is></c><c r="B3"><v>20</v></c></row></sheetData></worksheet>');
+  files['xl/worksheets/sheet2.xml'] = new TextEncoder().encode('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><f>SUBTOTAL(109,Data!B2:B3)</f><v>30</v></c><c r="B1"><f>AGGREGATE(9,5,Data!B2:B3)</f><v>30</v></c></row></sheetData></worksheet>');
+  const original = analyze(zipSync(files));
+  const hidden = patchHiddenRows(original, [{ sheetIndex: 0, rows: [2], hidden: true }]);
+  const reopened = analyze(hidden.bytes);
+  assert.deepEqual(reopened.sheets[0].hiddenRows, [2]);
+  assert.equal(reopened.sheets[0].cells.get('D1').cachedValue, '10');
+  assert.equal(reopened.sheets[0].cells.get('E1').cachedValue, '10', 'AGGREGATE option 5 excludes manually hidden rows');
+  assert.equal(reopened.sheets[1].cells.get('A1').cachedValue, '10', 'cross-sheet SUBTOTAL cache follows manual row visibility');
+  assert.equal(reopened.sheets[1].cells.get('B1').cachedValue, '10', 'cross-sheet AGGREGATE cache follows manual row visibility');
+  assert.match(new TextDecoder().decode(reopened.files['xl/workbook.xml']), /calcMode="manual"/);
+  assert.match(new TextDecoder().decode(reopened.files['xl/workbook.xml']), /fullCalcOnLoad="1"[^>]*forceFullCalc="1"/);
+});
+
+test('수동 계산 모드 XLSX는 AGGREGATE 계산 결과를 셀 캐시에 저장한다', () => {
+  const files = unzipSync(fixture({ formula: true }));
+  files['xl/workbook.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/workbook.xml']).replace('</workbook>', '<calcPr calcMode="manual"/></workbook>'));
+  files['xl/worksheets/sheet1.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/worksheets/sheet1.xml']).replace('<f>1+1</f><v>2</v>', '<f>AGGREGATE(9,6,B1:B1)</f><v>42</v>'));
+  const original = analyze(zipSync(files));
+  const saved = patchCell(original, 0, 'B1', '50');
+  const reopened = analyze(saved.bytes);
+  assert.equal(reopened.sheets[0].cells.get('A2').cachedValue, '50');
+  assert.equal(reopened.sheets[0].cells.get('A2').formula, 'AGGREGATE(9,6,B1:B1)');
+});
+
+test('AGGREGATE 캐시 재계산은 저장된 숨김 행·오류·중첩 SUBTOTAL을 함께 반영한다', () => {
+  const files = unzipSync(fixture());
+  files['xl/workbook.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/workbook.xml']).replace('</workbook>', '<calcPr calcMode="manual"/></workbook>'));
+  files['xl/worksheets/sheet1.xml'] = new TextEncoder().encode('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B4"/><sheetData><row r="1"><c r="A1"><f>AGGREGATE(9,3,B1:B4)</f><v>0</v></c><c r="B1"><v>10</v></c></row><row r="2" hidden="1"><c r="A2" t="e"><f>AGGREGATE(9,0,B1:B4)</f><v>#N/A</v></c><c r="B2"><v>20</v></c></row><row r="3"><c r="A3"><f>AGGREGATE(9,4,B1:B2)</f><v>30</v></c><c r="B3" t="e"><v>#N/A</v></c></row><row r="4"><c r="A4"><f>AGGREGATE(9,1,B1:B2)</f><v>10</v></c><c r="B4"><f>SUBTOTAL(9,B1:B2)</f><v>30</v></c></row></sheetData></worksheet>');
+  const original = analyze(zipSync(files));
+  assert.equal(original.writable, true, original.readOnlyReason);
+  assert.deepEqual(original.sheets[0].hiddenRows, [1]);
+  const saved = patchCell(original, 0, 'B1', '11');
+  const reopened = analyze(saved.bytes), cells = reopened.sheets[0].cells;
+  assert.equal(cells.get('A1').cachedValue, '11', 'option 3 skips the hidden row, error, and nested subtotal result');
+  assert.equal(cells.get('A2').cachedValue, '#N/A', 'option 0 propagates a referenced error');
+  assert.equal(cells.get('A2').kind, 'error');
+  assert.equal(cells.get('A3').cachedValue, '31', 'option 4 includes a hidden row');
+  assert.equal(cells.get('A4').cachedValue, '11', 'option 1 excludes a hidden row');
+  assert.equal(cells.get('B4').cachedValue, '31', 'the nested SUBTOTAL itself recalculates');
+  assert.deepEqual(reopened.sheets[0].hiddenRows, [1], 'saving preserves the hidden row');
+});
+
+test('수식 캐시 갱신은 자동·수동 계산 모드에서 지원 수식을 갱신하고 미지원 오류와 서식 전용 캐시는 보존한다', () => {
+  const makeManual = () => {
+    const files = unzipSync(fixture({ formula: true }));
+    files['xl/workbook.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/workbook.xml']).replace('</workbook>', '<calcPr calcMode="manual"/></workbook>'));
+    files['xl/worksheets/sheet1.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/worksheets/sheet1.xml'])
+      .replace('<row r="2"><c r="A2"><f>1+1</f><v>2</v></c></row>', '<row r="2"><c r="A2" t="e"><f>1/0</f><v>#N/A</v></c><c r="B2" t="e"><f>NA()</f><v>#N/A</v></c></row>'));
+    return analyze(zipSync(files));
+  };
+  const manual = makeManual();
+  const updated = patchCell(manual, 0, 'A1', 'changed');
+  const cells = updated.model.sheets[0].cells;
+  assert.equal(cells.get('A2').kind, 'error');
+  assert.equal(cells.get('A2').cachedValue, '#DIV/0!');
+  assert.equal(cells.get('B2').cachedValue, '#N/A', 'unsupported value errors retain the previous cache');
+  assert.match(updated.model.sheets[0].xml, /<c r="A2" t="e"><f>1\/0<\/f><v>#DIV\/0!<\/v><\/c>/);
+
+  const automaticFiles = unzipSync(fixture({ formula: true }));
+  automaticFiles['xl/worksheets/sheet1.xml'] = new TextEncoder().encode(new TextDecoder().decode(automaticFiles['xl/worksheets/sheet1.xml'])
+    .replace('<c r="A1" t="inlineStr"><is><t>before</t></is></c>', '<c r="A1"><v>1</v></c>')
+    .replace('<row r="2"><c r="A2"><f>1+1</f><v>2</v></c></row>', '<row r="2"><c r="A2"><f>A1+1</f><v>2</v></c><c r="C2"><f>UNKNOWN(A1)</f><v>99</v></c></row>'));
+  const automatic = analyze(zipSync(automaticFiles));
+  const autoSaved = patchCells(automatic, [{ sheetIndex: 0, address: 'A1', value: '5', kind: 'number' }]);
+  assert.equal(autoSaved.model.sheets[0].cells.get('A2').cachedValue, '6', 'automatic mode stores the recalculated supported formula cache');
+  assert.equal(autoSaved.model.sheets[0].cells.get('C2').cachedValue, '99', 'unsupported formula errors retain the previous cache');
+
+  const styledFiles = unzipSync(fixture({ formula: true, formatted: true }));
+  styledFiles['xl/workbook.xml'] = new TextEncoder().encode(new TextDecoder().decode(styledFiles['xl/workbook.xml']).replace('</workbook>', '<calcPr calcMode="manual"/></workbook>'));
+  styledFiles['xl/worksheets/sheet1.xml'] = new TextEncoder().encode(new TextDecoder().decode(styledFiles['xl/worksheets/sheet1.xml']).replace('</row><row r="2"><c r="A2"><f>1+1</f><v>2</v></c></row>', '</row><row r="2"><c r="A2"><f>1+1</f><v>2</v></c></row>'));
+  const styled = patchCells(analyze(zipSync(styledFiles)), [{ sheetIndex: 0, address: 'B1', value: '45292', kind: 'number', numberFormatId: 14 }]);
+  assert.equal(styled.model.sheets[0].cells.get('A2').cachedValue, '2', 'format-only edits do not trigger calculation cache refresh');
+  assert.match(styled.model.sheets[0].xml, /<c r="A2"><f>1\+1<\/f><v>2<\/v><\/c>/);
+});
+
+test('수동 계산 캐시 갱신은 다른 시트 참조와 공유 수식의 각 셀 결과를 저장한다', () => {
+  const files = unzipSync(sharedFormulaFixture());
+  files['xl/workbook.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/workbook.xml'])
+    .replace('<sheets>', '<sheets>')
+    .replace('</sheets>', '<sheet name="Other" sheetId="3" r:id="rId3"/></sheets>')
+    .replace('</workbook>', '<calcPr calcMode="manual"/></workbook>'));
+  files['xl/_rels/workbook.xml.rels'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/_rels/workbook.xml.rels'])
+    .replace('</Relationships>', '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/></Relationships>'));
+  files['[Content_Types].xml'] = new TextEncoder().encode(new TextDecoder().decode(files['[Content_Types].xml'])
+    .replace('</Types>', '<Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>'));
+  files['xl/worksheets/sheet1.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/worksheets/sheet1.xml'])
+    .replace('<dimension ref="A1:C3"/>', '<dimension ref="A1:C3"/>')
+    .replace('</sheetData>', '<row r="4"><c r="B4"><f>Other!A1*2</f><v>0</v></c></row></sheetData>'));
+  files['xl/worksheets/sheet3.xml'] = new TextEncoder().encode('<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>3</v></c></row></sheetData></worksheet>');
+  const model = analyze(zipSync(files));
+  assert.equal(model.writable, true, model.readOnlyReason);
+  const saved = patchCell(model, 0, 'B1', '10');
+  const reopened = analyze(saved.bytes);
+  assert.equal(reopened.sheets[0].cells.get('A2').cachedValue, '11', 'shared formula anchor uses the updated value on its own sheet');
+  assert.equal(reopened.sheets[0].cells.get('A3').formula, 'B2+1');
+  assert.equal(reopened.sheets[0].cells.get('A3').cachedValue, '1', 'shared formula member uses its translated relative reference');
+  assert.equal(reopened.sheets[0].cells.get('B4').cachedValue, '6', 'qualified references calculate against the named worksheet');
+});
+
+test('지원하지 않는 통합 문서 보호·공유 메타데이터는 편집 전에 읽기 전용으로 보호한다', () => {
+  for (const [name, metadata] of [
+    ['통합문서 보호', '<workbookProtection lockStructure="1"/>'],
+    ['파일 공유', '<fileSharing readOnlyRecommended="1"/>'],
+    ['사용자 지정 보기', '<customWorkbookViews><customWorkbookView name="Legacy"/></customWorkbookViews>'],
+    ['확장 메타데이터', '<extLst><ext uri="urn:test"/></extLst>']
+  ]) {
+    const files = unzipSync(fixture({ formula: true }));
+    const workbook = new TextDecoder().decode(files['xl/workbook.xml']).replace('<sheets>', metadata + '<sheets>');
+    files['xl/workbook.xml'] = new TextEncoder().encode(workbook);
+    const model = analyze(zipSync(files));
+    assert.equal(model.writable, true, name + ': recognized metadata remains editable');
+    const edited = patchCell(model, 0, 'A1', 'changed');
+    assert.ok(new TextDecoder().decode(edited.model.files['xl/workbook.xml']).includes(metadata), name + ': original metadata is preserved');
+  }
+
+  const unknownFiles = unzipSync(fixture({ formula: true }));
+  unknownFiles['xl/workbook.xml'] = new TextEncoder().encode(new TextDecoder().decode(unknownFiles['xl/workbook.xml']).replace('<sheets>', '<futureWorkbookFeature enabled="1"/><sheets>'));
+  const unknown = analyze(zipSync(unknownFiles));
+  assert.equal(unknown.writable, false);
+  assert.match(unknown.readOnlyReason, /지원하지 않는 통합 문서 메타데이터/);
+  assert.throws(() => patchCell(unknown, 0, 'A1', 'changed'), /통합 문서 메타데이터/);
+
+  const supported = analyze(fixture({ formula: true, workbookXml: '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" conformance="transitional"><workbookPr date1904="1"/><bookViews><workbookView activeTab="0"/></bookViews><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Hidden" sheetId="2" state="hidden" r:id="rId2"/></sheets><calcPr calcId="191029" calcMode="manual"/></workbook>' }));
+  assert.equal(supported.writable, true, supported.readOnlyReason);
 });
 
 test('XLSX 공유 수식은 각 셀의 상대 참조로 계산하고 저장 중 원본 그룹을 보존한다', () => {
@@ -3858,6 +4758,122 @@ test('LibreOffice Calc가 저장한 복합 XLSX의 표·유효성·조건부 서
   assert.deepEqual(reopened.sheets[0].freezePane, { rows: 1, columns: 1 });
 });
 
+test('LibreOffice 복합 XLSX는 필터된 행에 행 삽입 후 되돌려도 연결된 기능을 보존한다', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const source = analyze(fs.readFileSync(path.join(__dirname, 'fixtures', 'LibreOffice-Mixed-Features-Roundtrip.xlsx')));
+  assert.equal(source.writable, true, source.readOnlyReason);
+  const originalSheet = source.sheets[0];
+
+  const inserted = transformStructure(source, { sheetIndex: 0, axis: 'row', action: 'insert', index: 1 }).model;
+  assert.equal(inserted.writable, true, inserted.readOnlyReason);
+  assert.deepEqual(inserted.sheets[0].tables[0].range, { top: 0, bottom: 4, left: 0, right: 2 });
+  assert.deepEqual(inserted.sheets[0].nativeHiddenRows, [1, 3], 'the filter continues hiding the inserted blank row and nonmatching data row');
+  assert.equal(inserted.sheets[0].cells.get('D1').formula, 'SUM(B3:B4)');
+  assert.deepEqual(inserted.sheets[0].conditionalFormats[0].ranges, [{ top: 2, bottom: 3, left: 1, right: 2 }]);
+  assert.deepEqual(inserted.sheets[0].dataValidations[0].ranges, [{ top: 2, bottom: 3, left: 1, right: 1 }]);
+  assert.deepEqual(inserted.sheets[0].charts[0].series[0].values, [12, 7]);
+  const calculator = createFormulaCalculator({ state: inserted, getCell: (row, column, sheetIndex = 0) => inserted.sheets[sheetIndex]?.cells.get(String.fromCharCode(65 + column) + (row + 1)) || null });
+  const preview = calculateChartPreviews(inserted, 0, calculator, (row, column, sheetIndex = 0) => inserted.sheets[sheetIndex]?.cells.get(String.fromCharCode(65 + column) + (row + 1)) || null, []);
+  assert.deepEqual(preview[0].series[0].categories, ['사과', '']);
+  assert.deepEqual(preview[0].series[0].values, [12, null], 'the filtered chart point stays hidden after its source rows shift');
+  assert.deepEqual(inserted.sheets[0].mergedCells.map(({ top, bottom, left, right }) => ({ top, bottom, left, right })), [{ top: 0, bottom: 0, left: 4, right: 5 }]);
+  assert.deepEqual(inserted.sheets[0].freezePane, { rows: 1, columns: 1 });
+
+  const restored = analyze(transformStructure(inserted, { sheetIndex: 0, axis: 'row', action: 'delete', index: 1 }).bytes);
+  assert.equal(restored.writable, true, restored.readOnlyReason);
+  assert.deepEqual(restored.sheets[0].tables[0].range, originalSheet.tables[0].range);
+  assert.deepEqual(restored.sheets[0].nativeHiddenRows, originalSheet.nativeHiddenRows);
+  assert.equal(restored.sheets[0].cells.get('D1').formula, originalSheet.cells.get('D1').formula);
+  assert.deepEqual(restored.sheets[0].conditionalFormats[0].ranges, originalSheet.conditionalFormats[0].ranges);
+  assert.deepEqual(restored.sheets[0].dataValidations[0].ranges, originalSheet.dataValidations[0].ranges);
+  assert.deepEqual(restored.sheets[0].mergedCells.map(({ top, bottom, left, right }) => ({ top, bottom, left, right })), [{ top: 0, bottom: 0, left: 4, right: 5 }]);
+  assert.deepEqual(restored.sheets[0].freezePane, originalSheet.freezePane);
+});
+
+test('LibreOffice 복합 XLSX는 표 안에 열 삽입·삭제 후 필터·수식·차트 구조를 보존한다', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const source = analyze(fs.readFileSync(path.join(__dirname, 'fixtures', 'LibreOffice-Mixed-Features-Roundtrip.xlsx')));
+  assert.equal(source.writable, true, source.readOnlyReason);
+  const original = source.sheets[0];
+
+  const inserted = analyze(transformStructure(source, { sheetIndex: 0, axis: 'column', action: 'insert', index: 1 }).bytes);
+  assert.equal(inserted.writable, true, inserted.readOnlyReason);
+  const shifted = inserted.sheets[0];
+  assert.deepEqual(shifted.tables[0].range, { top: 0, bottom: 3, left: 0, right: 3 });
+  assert.deepEqual(shifted.tables[0].columns, ['상품', 'Column2', '수량', '단가']);
+  assert.deepEqual(shifted.tables[0].autoFilter.columns, [{ column: 2, values: ['12'], blanks: false }]);
+  assert.equal(shifted.cells.get('E1').formula, 'SUM(C2:C3)');
+  assert.equal(shifted.cells.get('C4').formula, 'SUBTOTAL(109,[[#data],[수량]])');
+  assert.deepEqual(shifted.conditionalFormats[0].ranges, [{ top: 1, bottom: 2, left: 2, right: 3 }]);
+  assert.deepEqual(shifted.dataValidations[0].ranges, [{ top: 1, bottom: 2, left: 2, right: 2 }]);
+  assert.deepEqual(shifted.charts[0].series[0].values, [12, 7]);
+  assert.deepEqual(shifted.charts[0].series[0].categories, ['사과', '배']);
+  const shiftedChartXml = new TextDecoder().decode(inserted.files['xl/charts/chart1.xml']);
+  assert.match(shiftedChartXml, /<c:f>재고!\$A\$2:\$A\$3<\/c:f>/);
+  assert.match(shiftedChartXml, /<c:f>재고!\$C\$2:\$C\$3<\/c:f>/);
+  const getShiftedCell = (row, column) => shifted.cells.get(String.fromCharCode(65 + column) + (row + 1)) || null;
+  const shiftedCalculator = createFormulaCalculator({ state: shifted, getCell: getShiftedCell });
+  const shiftedPreview = calculateChartPreviews(inserted, 0, shiftedCalculator, getShiftedCell, []);
+  assert.deepEqual(shiftedPreview[0].series[0].categories, ['사과', '']);
+  assert.deepEqual(shiftedPreview[0].series[0].values, [12, null], 'the filtered source row stays hidden from the chart preview');
+  assert.deepEqual(shifted.nativeHiddenRows, original.nativeHiddenRows);
+  assert.deepEqual(shifted.mergedCells.map(({ top, bottom, left, right }) => ({ top, bottom, left, right })), [{ top: 0, bottom: 0, left: 5, right: 6 }]);
+  assert.deepEqual(shifted.freezePane, original.freezePane);
+
+  const restored = analyze(transformStructure(inserted, { sheetIndex: 0, axis: 'column', action: 'delete', index: 1 }).bytes);
+  assert.equal(restored.writable, true, restored.readOnlyReason);
+  const finalSheet = restored.sheets[0];
+  assert.deepEqual(finalSheet.tables[0].range, original.tables[0].range);
+  assert.deepEqual(finalSheet.tables[0].columns, original.tables[0].columns);
+  assert.deepEqual(finalSheet.tables[0].autoFilter.columns, original.tables[0].autoFilter.columns);
+  assert.equal(finalSheet.cells.get('D1').formula, original.cells.get('D1').formula);
+  assert.deepEqual(finalSheet.conditionalFormats[0].ranges, original.conditionalFormats[0].ranges);
+  assert.deepEqual(finalSheet.dataValidations[0].ranges, original.dataValidations[0].ranges);
+  const restoredChartXml = new TextDecoder().decode(restored.files['xl/charts/chart1.xml']);
+  assert.match(restoredChartXml, /<c:f>재고!\$A\$2:\$A\$3<\/c:f>/);
+  assert.match(restoredChartXml, /<c:f>재고!\$B\$2:\$B\$3<\/c:f>/);
+  const getRestoredCell = (row, column, sheetIndex = 0) => finalSheet.cells.get(String.fromCharCode(65 + column) + (row + 1)) || null;
+  const restoredCalculator = createFormulaCalculator({ state: restored, getCell: getRestoredCell });
+  const restoredPreview = calculateChartPreviews(restored, 0, restoredCalculator, getRestoredCell, []);
+  assert.deepEqual(restoredPreview[0].series[0].categories, ['사과', '']);
+  assert.deepEqual(restoredPreview[0].series[0].values, [12, null]);
+  assert.deepEqual(finalSheet.nativeHiddenRows, original.nativeHiddenRows);
+  assert.deepEqual(finalSheet.mergedCells.map(({ top, bottom, left, right }) => ({ top, bottom, left, right })), original.mergedCells.map(({ top, bottom, left, right }) => ({ top, bottom, left, right })));
+  assert.deepEqual(finalSheet.freezePane, original.freezePane);
+});
+
+test('LibreOffice 복합 XLSX의 수동 계산 모드 편집은 수식 캐시와 차트·표 메타데이터를 함께 갱신한다', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const files = unzipSync(fs.readFileSync(path.join(__dirname, 'fixtures', 'LibreOffice-Mixed-Features-Roundtrip.xlsx')));
+  files['xl/workbook.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/workbook.xml'])
+    .replace('<calcPr ', '<calcPr calcMode="manual" calcId="191029" '));
+  const source = analyze(zipSync(files));
+  assert.equal(source.writable, true, source.readOnlyReason);
+  assert.equal(source.sheets[0].cells.get('D1').formula, 'SUM(B2:B3)');
+  assert.equal(source.sheets[0].cells.get('D1').cachedValue, '19');
+
+  const edited = patchCell(source, 0, 'B2', '13');
+  const reopened = analyze(edited.bytes);
+  assert.equal(reopened.writable, true, reopened.readOnlyReason);
+  assert.equal(reopened.sheets[0].cells.get('B2').value, '13');
+  assert.equal(reopened.sheets[0].cells.get('D1').cachedValue, '20', 'manual calculation cache follows the updated cell value');
+  assert.equal(reopened.sheets[0].tables[0].name, 'Inventory');
+  assert.equal(reopened.sheets[0].dataValidations.length, 1);
+  assert.equal(reopened.sheets[0].conditionalFormats.length, 1);
+  assert.deepEqual(reopened.sheets[0].charts[0].series[0].values, [13, 7]);
+  assert.deepEqual(reopened.sheets[0].freezePane, { rows: 1, columns: 1 });
+  const workbook = new TextDecoder().decode(reopened.files['xl/workbook.xml']);
+  assert.match(workbook, /calcMode="manual"/);
+  assert.match(workbook, /fullCalcOnLoad="1"[^>]*forceFullCalc="1"/);
+  for (const [name, bytes] of Object.entries(source.files)) {
+    if ([source.sheets[0].path, 'xl/workbook.xml', 'xl/charts/chart1.xml'].includes(name)) continue;
+    assert.deepEqual(Buffer.from(reopened.files[name]), Buffer.from(bytes), `untouched LibreOffice package entry changed: ${name}`);
+  }
+});
+
 test('LibreOffice 복합 XLSX의 사용자 지정 문서 속성과 행·열 그룹을 편집 후 보존한다', () => {
   const fs = require('node:fs');
   const path = require('node:path');
@@ -4118,6 +5134,52 @@ test('정의된 이름을 통합 문서 또는 시트 범위로 만들고 수정
   assert.strictEqual(patchDefinedName(duplicate, { ...global, name: 'budget' }).model, duplicate, 'name matching follows Excel case-insensitive semantics');
 });
 
+test('자동 계산 모드에서 정의된 이름 변경과 삭제 후 수식 캐시를 갱신한다', () => {
+  const files = unzipSync(fixture());
+  files['xl/workbook.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/workbook.xml'])
+    .replace('</sheets>', '</sheets><definedNames><definedName name="Input">Data!$B$1</definedName></definedNames>'));
+  files['xl/worksheets/sheet2.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/worksheets/sheet2.xml'])
+    .replace('</sheetData>', '<row r="2"><c r="B2"><f>Input*2</f><v>84</v></c></row></sheetData>'));
+  const original = analyze(zipSync(files));
+  assert.equal(original.writable, true, original.readOnlyReason);
+  const updated = patchDefinedName(original, { action: 'set', name: 'Input', source: { sheetName: 'Hidden', top: 0, bottom: 0, left: 0, right: 0 } });
+  assert.equal(analyze(updated.bytes).sheets[1].cells.get('B2').cachedValue, '18');
+  const deleted = patchDefinedName(updated.model, { action: 'delete', name: 'Input' });
+  const reopened = analyze(deleted.bytes);
+  assert.equal(reopened.sheets[1].cells.get('B2').cachedValue, '#NAME?');
+  assert.match(new TextDecoder().decode(reopened.files['xl/workbook.xml']), /fullCalcOnLoad="1"[^>]*forceFullCalc="1"/);
+});
+
+test('수동 계산 모드에서 정의된 이름 변경 후 수식 캐시를 새 범위로 갱신한다', () => {
+  const files = unzipSync(fixture());
+  files['xl/workbook.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/workbook.xml'])
+    .replace('</sheets>', '</sheets><definedNames><definedName name="Input">Data!$B$1</definedName></definedNames><calcPr calcMode="manual"/>'));
+  files['xl/worksheets/sheet2.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/worksheets/sheet2.xml'])
+    .replace('</sheetData>', '<row r="2"><c r="B2"><f>Input*2</f><v>84</v></c></row></sheetData>'));
+  const original = analyze(zipSync(files));
+  assert.equal(original.writable, true, original.readOnlyReason);
+  const updated = patchDefinedName(original, { action: 'set', name: 'Input', source: { sheetName: 'Hidden', top: 0, bottom: 0, left: 0, right: 0 } });
+  const reopened = analyze(updated.bytes);
+  assert.deepEqual(reopened.definedNames.find(item => item.name === 'Input').source, { sheetName: 'Hidden', top: 0, bottom: 0, left: 0, right: 0 });
+  assert.equal(reopened.sheets[1].cells.get('B2').cachedValue, '18');
+  assert.match(new TextDecoder().decode(reopened.files['xl/workbook.xml']), /calcMode="manual"/);
+});
+
+test('수동 계산 모드에서 삭제된 정의된 이름을 참조하는 수식에 #NAME? 캐시를 저장한다', () => {
+  const files = unzipSync(fixture());
+  files['xl/workbook.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/workbook.xml'])
+    .replace('</sheets>', '</sheets><definedNames><definedName name="Input">Data!$B$1</definedName></definedNames><calcPr calcMode="manual"/>'));
+  files['xl/worksheets/sheet2.xml'] = new TextEncoder().encode(new TextDecoder().decode(files['xl/worksheets/sheet2.xml'])
+    .replace('</sheetData>', '<row r="2"><c r="B2"><f>Input*2</f><v>84</v></c><c r="C2"><f>1+1</f><v>2</v></c></row></sheetData>'));
+  const original = analyze(zipSync(files));
+  const deleted = patchDefinedName(original, { action: 'delete', name: 'Input' });
+  const reopened = analyze(deleted.bytes);
+  assert.equal(reopened.sheets[1].cells.get('B2').cachedValue, '#NAME?');
+  assert.equal(reopened.sheets[1].cells.get('B2').kind, 'error');
+  assert.equal(reopened.sheets[1].cells.get('C2').cachedValue, '2', 'unrelated formula cache is recalculated rather than discarded');
+  assert.match(new TextDecoder().decode(reopened.files['xl/workbook.xml']), /calcMode="manual"/);
+});
+
 test('정의된 이름 참조는 행·열 구조 변경에 따라 이동하고 삭제된 이름은 #REF를 보존한다', () => {
   const files = unzipSync(fixture()), encode = value => new TextEncoder().encode(value), decode = name => new TextDecoder().decode(files[name]);
   const definitions = '<definedNames><definedName name="DataRange">Data!$A$1:$B$3</definedName><definedName name="LocalRows" localSheetId="0">$A$1:$A$3</definedName><definedName name="OtherRows" localSheetId="1">$A$1:$A$1</definedName><definedName name="SingleCell">Data!$A$1</definedName></definedNames>';
@@ -4131,7 +5193,7 @@ test('정의된 이름 참조는 행·열 구조 변경에 따라 이동하고 �
   assert.deepEqual(insertedRows.definedNames.find(item => item.name === 'DataRange').source, { sheetName: 'Data', top: 0, bottom: 3, left: 0, right: 1 });
   assert.deepEqual(insertedRows.definedNames.find(item => item.name === 'LocalRows').source, { sheetName: 'Data', top: 0, bottom: 3, left: 0, right: 0 });
   assert.deepEqual(insertedRows.definedNames.find(item => item.name === 'OtherRows').source, { sheetName: 'Hidden', top: 0, bottom: 0, left: 0, right: 0 });
-  assert.equal(insertedRows.sheets[1].cells.get('A2').cachedValue, '');
+  assert.equal(insertedRows.sheets[1].cells.get('A2').cachedValue, '42');
   assert.equal(insertedRows.sheets[1].cells.get('B2').cachedValue, '');
   const columnInsert = transformStructure(insertedRows, { sheetIndex: 0, axis: 'column', action: 'insert', index: 1 }).model;
   assert.deepEqual(columnInsert.definedNames.find(item => item.name === 'DataRange').source, { sheetName: 'Data', top: 0, bottom: 3, left: 0, right: 2 });
@@ -4143,7 +5205,7 @@ test('정의된 이름 참조는 행·열 구조 변경에 따라 이동하고 �
   assert.equal(deleted.writable, true, deleted.readOnlyReason);
   assert.equal(deleted.definedNames.find(item => item.name === 'SingleCell').error, '#REF!');
   assert.match(new TextDecoder().decode(deleted.files['xl/workbook.xml']), /name="SingleCell">#REF!<\/definedName>/);
-  assert.equal(deleted.sheets[1].cells.get('B2').cachedValue, '');
+  assert.equal(deleted.sheets[1].cells.get('B2').cachedValue, '#REF!');
   const calculator = createFormulaCalculator({
     state: { formulas: true, sheets: deleted.sheets, definedNames: deleted.definedNames, date1904: deleted.date1904 },
     getCell: (row, column, sheetIndex = 0) => deleted.sheets[sheetIndex]?.cells.get(String.fromCharCode(65 + column) + (row + 1)) || null

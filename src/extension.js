@@ -4,6 +4,7 @@ const vscode = require('vscode');
 const fs = require('node:fs/promises');
 const crypto = require('node:crypto');
 const path = require('node:path');
+const { unzipSync } = require('../vendor/node_modules/fflate');
 const { applyEdits, encode, extendCells: extendCsvCells, load, parse: parseCsv, quote: quoteCsv, transformStructure: transformCsvStructure } = require('./csv');
 const { LIMITS: XLSX_LIMITS, TABLE_STYLE_NAMES, analyze, calculateChartPreviews, conditionalStyleForCell, formatCellValue, parseRangeReference, patchCells, patchColumnWidths, patchRowHeights, patchRowHeightValues, patchPrintSettings, patchPrintArea, patchDefinedName, patchPrintTitles, validatePrintTitles, patchHeaderFooter, patchPageBreaks, tableFilterRange, patchAutoFilters, patchFilterVisibility, patchHiddenRows, patchHiddenColumns, patchOutlineGroups, patchFreezePanes, patchMergedCells, planTableHeaderEdits, patchTableColumnNames, planTableExpansion, prepareTableExpansion, patchCalculatedColumns, planCalculatedColumn, patchAddTable, patchTableStyles, patchTableRanges, patchTableTotals, totalsFunctionForCell, patchAddChart, patchChartMetadata, patchChartPlacement, patchChartSource, patchDeleteChart, patchMoveConditionalFormatRule, patchSheetVisibility, patchSheetZoom, patchSheetName, patchAddSheet, patchDeleteSheet, patchMoveSheet, translateFormulaReferences, transformStructure: transformXlsxStructure } = require('./xlsx');
 const { createFormulaCalculator, evaluateFormula } = require('./formula');
@@ -79,7 +80,7 @@ function dataValidationValues(document, sheetIndex, validation, calculator, row 
     const indirect = /^INDIRECT\((.+)\)$/i.exec(formula.trim());
     if (!indirect) return [];
     const argument = indirect[1].trim(), literal = /^"((?:[^"]|"")*)"$/.exec(argument);
-    let reference = literal ? literal[1].replaceAll('""', '"') : evaluateFormula(argument, { date1904: document.state.date1904, getCell: (targetRow, targetColumn, sheetName) => {
+    let reference = literal ? literal[1].replaceAll('""', '"') : evaluateFormula(argument, { locale: document.locale, date1904: document.state.date1904, getCell: (targetRow, targetColumn, sheetName) => {
       const targetSheet = sheetName ? document.state.sheets.findIndex(sheet => sheet.name.toLocaleLowerCase() === sheetName.toLocaleLowerCase()) : sheetIndex;
       return targetSheet < 0 ? '#REF!' : calculator.value(targetSheet, targetRow, targetColumn);
     } });
@@ -110,28 +111,28 @@ function dataValidationFormulaLimits(document, sheetIndex, validation, row, colu
   return validation.formulas.map((formula, index) => {
     if (formula === null) return validation.values[index];
     const translated = translateFormulaReferences(formula, row - anchor.top, column - anchor.left);
-    return evaluateFormula(translated, { date1904: document.state.date1904, getCell: (targetRow, targetColumn, sheetName) => {
+    return evaluateFormula(translated, { locale: document.locale, date1904: document.state.date1904, getCell: (targetRow, targetColumn, sheetName) => {
       const targetSheet = sheetName ? document.state.sheets.findIndex(sheet => sheet.name.toLocaleLowerCase() === sheetName.toLocaleLowerCase()) : sheetIndex;
       return targetSheet < 0 ? '#REF!' : calculator.value(targetSheet, targetRow, targetColumn);
     } });
   });
 }
 
-function validationNumber(type, value, date1904 = false) {
+function validationNumber(type, value, date1904 = false, locale = 'en-US') {
   if (type === 'textLength') return Number(value);
   const numeric = typeof value === 'number' || /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(String(value ?? ''));
-  if (type === 'date') return numeric ? Number(value) : parseClipboardDate(String(value ?? ''), 'ko', date1904)?.serial ?? parseClipboardDate(String(value ?? ''), 'en', date1904)?.serial;
+  if (type === 'date') return numeric ? Number(value) : parseClipboardDate(String(value ?? ''), locale, date1904)?.serial;
   if (type === 'time') return numeric ? Number(value) : parseClipboardTime(String(value ?? ''))?.serial;
   return numeric ? Number(value) : NaN;
 }
 
-function dataValidationAllows(validation, value, allowedValues, limits = validation.values, date1904 = false) {
+function dataValidationAllows(validation, value, allowedValues, limits = validation.values, date1904 = false, locale = 'en-US') {
   if (value === '') return validation.allowBlank;
   if (validation.type === 'list') return allowedValues.includes(value);
-  const number = validation.type === 'textLength' ? value.length : validationNumber(validation.type, value, date1904);
+  const number = validation.type === 'textLength' ? value.length : validationNumber(validation.type, value, date1904, locale);
   if (!Number.isFinite(number)) return false;
   if (validation.type === 'whole' && !Number.isInteger(number) || validation.type === 'date' && (number < 0 || number > 2958465 - (date1904 ? 1462 : 0)) || validation.type === 'time' && (number < 0 || number > 1)) return false;
-  const [rawFirst, rawSecond] = limits, first = validationNumber(validation.type, rawFirst, date1904), second = validationNumber(validation.type, rawSecond, date1904);
+  const [rawFirst, rawSecond] = limits, first = validationNumber(validation.type, rawFirst, date1904, locale), second = validationNumber(validation.type, rawSecond, date1904, locale);
   if (!Number.isFinite(first) || ['between', 'notBetween'].includes(validation.operator) && !Number.isFinite(second)) return false;
   return validation.operator === 'equal' ? number === first
     : validation.operator === 'notEqual' ? number !== first
@@ -198,13 +199,13 @@ function validationDateSerial(value, date1904) {
   return serial;
 }
 
-function validationOperand(input, type, date1904) {
+function validationOperand(input, type, date1904, locale = 'en-US') {
   const raw = String(input).trim();
   if (!raw) throw new Error('유효성 기준값을 입력하세요.');
   if (raw.startsWith('=')) {
     const formula = raw.slice(1);
     if (!formula || formula.length > 255) throw new Error('유효성 기준 수식은 255자 이하여야 합니다.');
-    const sample = evaluateFormula(formula, { date1904, getCell: () => 1, getSparseRange: () => [] });
+    const sample = evaluateFormula(formula, { locale, date1904, getCell: () => 1, getSparseRange: () => [] });
     if (typeof sample === 'string' && ['#NAME?', '#VALUE!', '#REF!'].includes(sample) && !(sample === '#REF!' && formula.includes('#REF!'))) throw new Error('유효성 기준 수식을 계산할 수 없습니다.');
     return { value: null, formula };
   }
@@ -231,8 +232,8 @@ function buildDataValidationRule(document, sheetIndex, input) {
   if (type === 'list') return { ...rule, ...parseValidationListInput(input.source, document, sheetIndex) };
   const operators = ['between', 'notBetween', 'equal', 'notEqual', 'greaterThan', 'lessThan', 'greaterThanOrEqual', 'lessThanOrEqual'];
   if (!operators.includes(input.operator)) throw new RangeError('데이터 유효성 비교 연산자가 유효하지 않습니다.');
-  const first = validationOperand(input.first, type, document.state.date1904), needsSecond = ['between', 'notBetween'].includes(input.operator);
-  const second = needsSecond ? validationOperand(input.second, type, document.state.date1904) : null;
+  const first = validationOperand(input.first, type, document.state.date1904, document.locale), needsSecond = ['between', 'notBetween'].includes(input.operator);
+  const second = needsSecond ? validationOperand(input.second, type, document.state.date1904, document.locale) : null;
   return { ...rule, operator: input.operator, values: [first.value, ...(second ? [second.value] : [])], formulas: first.formula || second?.formula ? [first.formula, ...(second ? [second.formula] : [])] : null };
 }
 
@@ -241,6 +242,7 @@ function hash(bytes) { return crypto.createHash('sha256').update(bytes).digest('
 class JinSheetDocument {
   constructor(uri, kind, state, bytes, writable, reason) {
     this.uri = uri;
+    this.locale = Intl.DateTimeFormat().resolvedOptions().locale || 'en-US';
     this.kind = kind;
     this.state = state;
     this.maximumDigitWidth = 7;
@@ -468,7 +470,7 @@ class JinSheetDocument {
           const calculated = hasFormula && typeof formula === 'string' ? (candidateCalculator ||= projectedFormulaCalculator(this, sheetIndex, edits)).value(sheetIndex, row, column) : value;
           const candidate = typeof calculated === 'boolean' ? (calculated ? 'TRUE' : 'FALSE') : calculated === null || calculated === undefined ? '' : String(calculated);
           const limits = dataValidationFormulaLimits(this, sheetIndex, validation, row, column, validationCalculator);
-          if (validation.showErrorMessage !== false && !dataValidationAllows(validation, candidate, allowedValues, limits, this.state.date1904)) {
+          if (validation.showErrorMessage !== false && !dataValidationAllows(validation, candidate, allowedValues, limits, this.state.date1904, this.locale)) {
             const customMessage = [validation.errorTitle, validation.error].filter(Boolean).join(': ');
             const error = new Error(customMessage || (validation.type === 'list' ? '이 셀은 허용 목록의 값만 입력할 수 있습니다.' : '이 셀의 데이터 유효성 조건을 만족하지 않습니다.'));
             error.userMessage = Boolean(customMessage);
@@ -1423,6 +1425,10 @@ class JinSheetDocument {
       const verified = load(output, path.extname(sourcePath), this.state.delimiter);
       if (!sameRows(verified.rows, this.state.rows) || verified.delimiter !== this.state.delimiter) throw new Error('저장 전 CSV 재파싱 검증에 실패했습니다. 원본을 유지했습니다.');
     } else output = this.createOutput();
+    if (!this.dirty && this.kind === 'xlsx' && this.baselineXlsxFiles) {
+      const outputFiles = unzipSync(output), baselineFiles = this.baselineXlsxFiles, names = Object.keys(outputFiles);
+      if (names.length === Object.keys(baselineFiles).length && names.every(name => baselineFiles[name] && Buffer.compare(Buffer.from(outputFiles[name]), Buffer.from(baselineFiles[name])) === 0)) return;
+    }
     if (!this.dirty && Buffer.compare(Buffer.from(output), current) === 0) return;
     if (cancellationToken?.isCancellationRequested) throw new Error('저장이 취소되었습니다.');
     const temporary = `${sourcePath}.jinsheet-${crypto.randomBytes(12).toString('hex')}.tmp`;
@@ -2479,7 +2485,7 @@ class JinSheetProvider {
           const sameWorkbook = isSameWorkbookClipboard(copied, document);
           const styleMatrix = sameWorkbook ? copied.cells.map(line => line.map(({ styleIndex, styleProperties, kind }) => ({ styleIndex, styleProperties, kind }))) : undefined;
           const numberFormatMatrix = !copied && document.kind === 'xlsx' && document.state.stylesPath
-            ? matrix.map(line => line.map(value => parseClipboardDate(value, this.language, document.state.date1904) ?? parseClipboardTime(value) ?? parseClipboardPercentage(value) ?? parseClipboardCurrency(value, this.language, document.state))) : undefined;
+            ? matrix.map(line => line.map(value => parseClipboardDate(value, document.locale, document.state.date1904) ?? parseClipboardTime(value) ?? parseClipboardPercentage(value) ?? parseClipboardCurrency(value, this.language, document.state))) : undefined;
           if (numberFormatMatrix) for (let row = 0; row < matrix.length; row++) for (let column = 0; column < matrix[row].length; column++) {
             const numberFormat = numberFormatMatrix[row][column];
             if (numberFormat === null) continue;
@@ -3781,7 +3787,7 @@ function inferClipboardCellKind(value) {
   return 'string';
 }
 
-function parseClipboardDate(value, language = 'en', date1904 = false) {
+function parseClipboardDate(value, locale = 'en-US', date1904 = false) {
   if (typeof value !== 'string') return null;
   let year, month, day, time = null;
   let match = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?)?$/.exec(value);
@@ -3793,15 +3799,16 @@ function parseClipboardDate(value, language = 'en', date1904 = false) {
     if (match) {
       [, year, month, day] = match;
       if (match[4] !== undefined) time = [Number(match[4]), Number(match[5]), Number(match[6] || 0), Number((match[7] || '').padEnd(3, '0') || 0)];
-    } else if (language === 'ko') {
-      match = /^(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/.exec(value);
-      if (!match) return null;
+    } else if ((match = /^(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/.exec(value))) {
       [, year, month, day] = match;
       if (match[4] !== undefined) time = [Number(match[4]), Number(match[5]), Number(match[6] || 0), 0];
     } else {
       match = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/.exec(value);
       if (!match) return null;
-      [, month, day, year] = match;
+      const [, first, second, rawYear] = match;
+      if (clipboardLocaleUsesDayFirstDates(locale)) { day = first; month = second; }
+      else { month = first; day = second; }
+      year = rawYear;
       if (match[4] !== undefined) time = [Number(match[4]), Number(match[5]), Number(match[6] || 0), 0];
     }
   }
@@ -3818,6 +3825,13 @@ function parseClipboardDate(value, language = 'en', date1904 = false) {
   const serial = utcDays + (date.getTime() >= Date.UTC(1900, 2, 1) ? 1 : 0) - (date1904 ? 1462 : 0);
   if (serial < 0) return null;
   return { serial, numFmtId: time ? 22 : 14 };
+}
+
+function clipboardLocaleUsesDayFirstDates(locale) {
+  try {
+    const parts = new Intl.DateTimeFormat(locale, { day: 'numeric', month: 'numeric', year: 'numeric', timeZone: 'UTC' }).formatToParts(new Date(Date.UTC(2006, 10, 22)));
+    return parts.findIndex(part => part.type === 'day') < parts.findIndex(part => part.type === 'month');
+  } catch { return false; }
 }
 
 function buildDateTimeShortcutEdit(document, row, column, mode, now = new Date()) {
@@ -4719,70 +4733,67 @@ function buildClearEdits(document, row, column, range, sheetIndex = 0, hiddenRow
   return excludeHiddenRowEdits(edits, hiddenRows);
 }
 
+const searchResultCaches = new WeakMap();
+
 function findMatches(document, query, sheetIndex, scope = 'sheet', after = null) {
   scope = document.kind === 'xlsx' && scope === 'workbook' ? 'workbook' : 'sheet';
   const needle = query.toLocaleLowerCase();
   if (!needle) return { type: 'search', query, total: 0, matches: [] };
-  const matches = []; let total = 0;
   const pageSize = 100;
   const compare = (left, right) => (left.sheetIndex ?? sheetIndex) - (right.sheetIndex ?? sheetIndex) || left.row - right.row || left.column - right.column;
   const afterKey = after && Number.isInteger(after.row) && Number.isInteger(after.column)
     ? { row: after.row, column: after.column, sheetIndex: scope === 'workbook' && Number.isInteger(after.sheetIndex) ? after.sheetIndex : sheetIndex }
     : null;
-  let pageHasWrapped = false;
-  const insertMatch = match => {
-    if (afterKey && !pageHasWrapped && compare(match, afterKey) <= 0) return;
-    let low = 0, high = matches.length;
-    while (low < high) { const middle = (low + high) >> 1; if (compare(matches[middle], match) <= 0) low = middle + 1; else high = middle; }
-    matches.splice(low, 0, match);
-    if (matches.length > pageSize) matches.pop();
-  };
-  const calculator = document.kind === 'xlsx' ? createFormulaCalculator(document) : null;
-  const sheetIndexes = scope === 'workbook' ? document.state.sheets.map((_, index) => index) : [sheetIndex];
-  const visit = (currentSheetIndex, row, column, base) => {
-    const cell = document.kind === 'xlsx' ? document.getCell(row, column, currentSheetIndex) : null;
-    const value = document.kind === 'csv' ? (document.drafts.get(`0:${row}:${column}`) ?? base.value)
-      : isFormulaCell(cell) ? calculator.value(currentSheetIndex, row, column)
-        : (document.drafts.get(`${currentSheetIndex}:${base.address}`) ?? base.value);
-    if (String(value).toLocaleLowerCase().includes(needle)) {
-      total++;
-      insertMatch({ row, column, address: base.address || addressFor(row + 1, column + 1), ...(scope === 'workbook' ? { sheetIndex: currentSheetIndex, sheetName: document.state.sheets[currentSheetIndex].name } : {}) });
-    }
-  };
-  for (const currentSheetIndex of sheetIndexes) {
-    if (document.kind === 'csv') document.state.rows?.forEach((cells, row) => cells.forEach((cell, column) => visit(0, row, column, cell)));
-    else {
-      const sheet = document.state.sheets[currentSheetIndex];
-      for (const cell of sheet?.cells.values() || []) visit(currentSheetIndex, cell.row, cell.column, cell);
-      for (const [key] of document.drafts) {
-        const [draftSheet, address] = key.split(':');
-        if (Number(draftSheet) !== currentSheetIndex || sheet?.cells.has(address)) continue;
-        const { row, column } = parseAddress(address);
-        visit(currentSheetIndex, row, column, { row, column, address, value: '' });
-      }
-      for (const [key] of document.formulaDrafts || []) {
-        const [draftSheet, address] = key.split(':');
-        if (Number(draftSheet) !== currentSheetIndex || sheet?.cells.has(address) || document.drafts.has(`${currentSheetIndex}:${address}`)) continue;
-        const { row, column } = parseAddress(address);
-        visit(currentSheetIndex, row, column, { row, column, address, value: '' });
-      }
-    }
-  }
-  if (afterKey && total && !matches.length) {
-    pageHasWrapped = true;
-    const totalBeforeWrap = total;
+  const revision = Number.isInteger(document.renderRevision) ? document.renderRevision : null;
+  const cacheKey = JSON.stringify([needle, scope, sheetIndex]);
+  const cached = revision === null ? null : searchResultCaches.get(document);
+  let result = cached?.revision === revision && cached.key === cacheKey ? cached.result : null;
+  if (!result) {
+    const matches = [];
+    let cacheable = revision !== null;
+    const calculator = document.kind === 'xlsx' ? createFormulaCalculator(document) : null;
+    const sheetIndexes = scope === 'workbook' ? document.state.sheets.map((_, index) => index) : [sheetIndex];
+    const visit = (currentSheetIndex, row, column, base) => {
+      const cell = document.kind === 'xlsx' ? document.getCell(row, column, currentSheetIndex) : null;
+      if (cell?.formula && /\b(?:NOW|TODAY|RAND|RANDBETWEEN|RANDARRAY|INDIRECT|OFFSET|CELL|INFO)\s*\(/i.test(cell.formula)) cacheable = false;
+      const value = document.kind === 'csv' ? (document.drafts.get(`0:${row}:${column}`) ?? base.value)
+        : isFormulaCell(cell) ? calculator.value(currentSheetIndex, row, column)
+          : (document.drafts.get(`${currentSheetIndex}:${base.address}`) ?? base.value);
+      if (String(value).toLocaleLowerCase().includes(needle)) matches.push({ row, column, address: base.address || addressFor(row + 1, column + 1), ...(scope === 'workbook' ? { sheetIndex: currentSheetIndex, sheetName: document.state.sheets[currentSheetIndex].name } : {}) });
+    };
     for (const currentSheetIndex of sheetIndexes) {
-      if (document.kind === 'csv') document.state.rows?.forEach((cells, row) => cells.forEach((cell, column) => visit(currentSheetIndex, row, column, cell)));
+      if (document.kind === 'csv') document.state.rows?.forEach((cells, row) => cells.forEach((cell, column) => visit(0, row, column, cell)));
       else {
         const sheet = document.state.sheets[currentSheetIndex];
         for (const cell of sheet?.cells.values() || []) visit(currentSheetIndex, cell.row, cell.column, cell);
-        for (const [key] of document.drafts) { const [draftSheet, address] = key.split(':'); if (Number(draftSheet) !== currentSheetIndex || sheet?.cells.has(address)) continue; const { row, column } = parseAddress(address); visit(currentSheetIndex, row, column, { row, column, address, value: '' }); }
-        for (const [key] of document.formulaDrafts || []) { const [draftSheet, address] = key.split(':'); if (Number(draftSheet) !== currentSheetIndex || sheet?.cells.has(address) || document.drafts.has(`${currentSheetIndex}:${address}`)) continue; const { row, column } = parseAddress(address); visit(currentSheetIndex, row, column, { row, column, address, value: '' }); }
+        for (const [key] of document.drafts) {
+          const [draftSheet, address] = key.split(':');
+          if (Number(draftSheet) !== currentSheetIndex || sheet?.cells.has(address)) continue;
+          const { row, column } = parseAddress(address);
+          visit(currentSheetIndex, row, column, { row, column, address, value: '' });
+        }
+        for (const [key] of document.formulaDrafts || []) {
+          const [draftSheet, address] = key.split(':');
+          if (Number(draftSheet) !== currentSheetIndex || sheet?.cells.has(address) || document.drafts.has(`${currentSheetIndex}:${address}`)) continue;
+          const { row, column } = parseAddress(address);
+          visit(currentSheetIndex, row, column, { row, column, address, value: '' });
+        }
       }
     }
-    total = totalBeforeWrap;
+    matches.sort(compare);
+    result = { matches, total: matches.length };
+    if (cacheable) searchResultCaches.set(document, { key: cacheKey, revision, result });
+    else searchResultCaches.delete(document);
   }
-  return { type: 'search', query, total, matches, sheetIndex, ...(afterKey ? { wrapped: pageHasWrapped } : {}), ...(scope === 'workbook' ? { scope } : {}) };
+  let start = 0;
+  if (afterKey) {
+    let low = 0, high = result.matches.length;
+    while (low < high) { const middle = (low + high) >> 1; if (compare(result.matches[middle], afterKey) <= 0) low = middle + 1; else high = middle; }
+    start = low;
+  }
+  const wrapped = Boolean(afterKey && result.total && start >= result.total);
+  if (wrapped) start = 0;
+  return { type: 'search', query, total: result.total, matches: result.matches.slice(start, start + pageSize), sheetIndex, ...(afterKey ? { wrapped } : {}), ...(scope === 'workbook' ? { scope } : {}) };
 }
 
 function buildReplaceEdits(document, query, replacement, sheetIndex = 0, target = null, allCells = true) {

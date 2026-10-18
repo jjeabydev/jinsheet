@@ -4016,6 +4016,16 @@ suite('JinSheet Extension Host', () => {
       const cellDeadline = Date.now() + 3000;
       while (Date.now() < cellDeadline && !await evaluate('Boolean(document.querySelector("#cell-1-2"))')) await new Promise(resolve => setTimeout(resolve, 25));
       const original = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      const saveUntil = async predicate => {
+        const deadline = Date.now() + 3000;
+        do {
+          await vscode.commands.executeCommand('workbench.action.files.save');
+          const cell = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+          if (predicate(cell)) return cell;
+          await new Promise(resolve => setTimeout(resolve, 25));
+        } while (Date.now() < deadline);
+        assert.fail('Alignment save did not reach the expected state');
+      };
       const point = await evaluate(`(() => {const r=document.querySelector('#cell-1-2').getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()`);
       await devtools.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x + devtools.frameOffset.x, y: point.y + devtools.frameOffset.y, button: 'left', buttons: 1, clickCount: 1 });
       await devtools.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x + devtools.frameOffset.x, y: point.y + devtools.frameOffset.y, button: 'left', buttons: 0, clickCount: 1 });
@@ -4036,19 +4046,17 @@ suite('JinSheet Extension Host', () => {
       assert.equal(saved.formatCode, original.formatCode);
       assert.deepEqual(saved.styleProperties.borders, original.styleProperties.borders);
       await vscode.commands.executeCommand('jinsheet.undo');
-      await vscode.commands.executeCommand('workbench.action.files.save');
-      saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      saved = await saveUntil(cell => cell.styleProperties.horizontal === 'center' && cell.styleProperties.vertical === original.styleProperties.vertical);
       assert.equal(saved.styleProperties.vertical, original.styleProperties.vertical);
       assert.equal(saved.styleProperties.horizontal, 'center');
       await vscode.commands.executeCommand('jinsheet.undo');
-      await vscode.commands.executeCommand('workbench.action.files.save');
-      saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      saved = await saveUntil(cell => cell.styleProperties.horizontal === original.styleProperties.horizontal);
       assert.equal(saved.styleProperties.horizontal, original.styleProperties.horizontal);
       await vscode.commands.executeCommand('jinsheet.redo');
-      await vscode.commands.executeCommand('jinsheet.redo');
-      await vscode.commands.executeCommand('workbench.action.files.save');
-      saved = analyze(await fs.readFile(file)).sheets[0].cells.get('C2');
+      saved = await saveUntil(cell => cell.styleProperties.horizontal === 'center' && cell.styleProperties.vertical === original.styleProperties.vertical);
       assert.equal(saved.styleProperties.horizontal, 'center');
+      await vscode.commands.executeCommand('jinsheet.redo');
+      saved = await saveUntil(cell => cell.styleProperties.horizontal === 'center' && cell.styleProperties.vertical === 'bottom');
       assert.equal(saved.styleProperties.vertical, 'bottom');
     } finally {
       devtools?.close();

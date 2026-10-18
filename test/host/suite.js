@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { performance } = require('node:perf_hooks');
 const { unzipSync, zipSync } = require('../../vendor/node_modules/fflate');
-const { analyze, createBlankWorkbook, patchColumnWidths, patchOutlineGroups, patchAddSheet, patchSheetVisibility, patchAddChart, patchAddTable, patchAutoFilters, patchPrintArea, patchPrintSettings, patchPrintTitles, patchHeaderFooter } = require('../../src/xlsx');
+const { analyze, createBlankWorkbook, patchCells, patchColumnWidths, patchOutlineGroups, patchAddSheet, patchSheetVisibility, patchAddChart, patchAddTable, patchAutoFilters, patchPrintArea, patchPrintSettings, patchPrintTitles, patchHeaderFooter } = require('../../src/xlsx');
 const { onePagePdf } = require('../helpers/pdf-fixture');
 const { DEFAULT_PRINT_SETTINGS, renderPrintDocument } = require('../../src/printing');
 const { defaultHeaderFooter } = require('../../src/header-footer');
@@ -637,6 +637,78 @@ assert.equal(await evaluate(`document.querySelector('#toolbarCommands details[op
       assert.deepEqual(saved.sheets.map(sheet => sheet.name), ['Sheet3', '재고', 'Sheet2']);
       assert.deepEqual(saved.sheets.map(sheet => sheet.visible), [true, true, false]);
       assert.equal(saved.activeSheetIndex, 1);
+    } finally {
+      devtools?.close();
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test('renaming a worksheet updates cross-sheet formulas through save, reopen and undo', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-sheet-rename-host-'));
+    const file = path.join(directory, 'sheet-rename.xlsx');
+    let model = analyze(createBlankWorkbook());
+    model = patchAddSheet(model).model;
+    model = patchCells(model, [
+      { sheetIndex: 1, address: 'A1', value: '42', kind: 'number' },
+      { sheetIndex: 0, address: 'A1', value: '', formula: 'Sheet2!A1' }
+    ]).model;
+    await fs.writeFile(file, model.bytes);
+    let devtools;
+    try {
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      const evaluate = async expression => {
+        const response = await devtools.send('Runtime.evaluate', { expression, contextId: devtools.contextId, returnByValue: true, awaitPromise: true });
+        if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+        return response.result?.value;
+      };
+      const waitFor = async expression => {
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline && !await evaluate(expression)) await new Promise(resolve => setTimeout(resolve, 25));
+        assert.equal(await evaluate(expression), true, JSON.stringify(await evaluate(`({tabs:[...document.querySelectorAll('#sheets [role="tab"]')].map(tab=>[tab.textContent.trim(),tab.getAttribute('aria-selected')]),value:document.querySelector('#cell-0-0')?.textContent,formula:document.querySelector('#formula')?.value,notice:document.querySelector('#notice')?.textContent})`)));
+      };
+      await waitFor(`document.querySelector('#sheets [data-sheet-index="1"]')?.textContent==='Sheet2'`);
+      await evaluate(`(() => {const tab=document.querySelector('#sheets [data-sheet-index="1"]');tab.dispatchEvent(new MouseEvent('dblclick',{bubbles:true}));const input=tab.querySelector('input');input.value='Inputs Q1';input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}))})()`);
+      await waitFor(`document.querySelector('#sheets [data-sheet-index="1"]')?.textContent==='Inputs Q1'`);
+      await evaluate(`document.querySelector('#sheets [data-sheet-index="0"]').click()`);
+      await waitFor(`document.querySelector('#cell-0-0')?.textContent==='42'&&document.querySelector('#formula')?.value==="='Inputs Q1'!A1"`);
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      let saved = analyze(await fs.readFile(file));
+      assert.deepEqual(saved.sheets.map(sheet => sheet.name), ['Sheet1', 'Inputs Q1']);
+      assert.equal(saved.sheets[0].cells.get('A1').formula, "'Inputs Q1'!A1");
+      assert.equal(saved.sheets[0].cells.get('A1').cachedValue, '42');
+
+      await vscode.commands.executeCommand('jinsheet.undo');
+      await waitFor(`document.querySelector('#sheets [data-sheet-index="1"]')?.textContent==='Sheet2'`);
+      await evaluate(`document.querySelector('#sheets [data-sheet-index="0"]').click()`);
+      await waitFor(`document.querySelector('#cell-0-0')?.textContent==='42'&&document.querySelector('#formula')?.value==='=Sheet2!A1'`);
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      saved = analyze(await fs.readFile(file));
+      assert.deepEqual(saved.sheets.map(sheet => sheet.name), ['Sheet1', 'Sheet2']);
+      assert.equal(saved.sheets[0].cells.get('A1').formula, 'Sheet2!A1');
+      assert.equal(saved.sheets[0].cells.get('A1').cachedValue, '42');
+
+      await vscode.commands.executeCommand('jinsheet.redo');
+      await waitFor(`document.querySelector('#sheets [data-sheet-index="1"]')?.textContent==='Inputs Q1'`);
+      await evaluate(`document.querySelector('#sheets [data-sheet-index="0"]').click()`);
+      await waitFor(`document.querySelector('#cell-0-0')?.textContent==='42'&&document.querySelector('#formula')?.value==="='Inputs Q1'!A1"`);
+      await vscode.commands.executeCommand('workbench.action.files.save');
+      saved = analyze(await fs.readFile(file));
+      assert.deepEqual(saved.sheets.map(sheet => sheet.name), ['Sheet1', 'Inputs Q1']);
+      assert.equal(saved.sheets[0].cells.get('A1').formula, "'Inputs Q1'!A1");
+
+      devtools.close(); devtools = null;
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      await waitFor(`document.querySelector('#sheets [data-sheet-index="1"]')?.textContent==='Inputs Q1'`);
+      await evaluate(`document.querySelector('#sheets [data-sheet-index="0"]').click()`);
+      await waitFor(`document.querySelector('#cell-0-0')?.textContent==='42'&&document.querySelector('#formula')?.value==="='Inputs Q1'!A1"`);
+      saved = analyze(await fs.readFile(file));
+      assert.deepEqual(saved.sheets.map(sheet => sheet.name), ['Sheet1', 'Inputs Q1']);
+      assert.equal(saved.sheets[0].cells.get('A1').formula, "'Inputs Q1'!A1");
+      assert.equal(saved.sheets[0].cells.get('A1').cachedValue, '42');
     } finally {
       devtools?.close();
       await vscode.commands.executeCommand('workbench.action.closeAllEditors');

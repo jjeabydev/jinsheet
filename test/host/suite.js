@@ -395,6 +395,43 @@ suite('JinSheet Extension Host', () => {
     }
   });
 
+  test('Chromium Webview can collapse the command menu while keeping the formula and find controls visible', async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-toolbar-collapse-'));
+    const file = path.join(directory, 'toolbar.csv');
+    await fs.writeFile(file, 'Name,Value\nAlpha,1\n', 'utf8');
+    let devtools;
+    try {
+      await vscode.commands.executeCommand('vscode.openWith', vscode.Uri.file(file), 'jinsheet.editor');
+      devtools = await waitForSpreadsheetWebview();
+      const evaluate = async expression => {
+        const response = await devtools.send('Runtime.evaluate', { expression, contextId: devtools.contextId, returnByValue: true, awaitPromise: true });
+        if (response.exceptionDetails) throw new Error(response.exceptionDetails.text);
+        return response.result?.value;
+      };
+      assert.deepEqual(await evaluate(`(() => ({commandsHidden:document.querySelector('#toolbarCommands').hidden,expanded:document.querySelector('#toggleToolbar').getAttribute('aria-expanded'),label:document.querySelector('#toggleToolbar').textContent.trim()}))()`), {
+        commandsHidden: true, expanded: 'false', label: 'Show menu'
+      }, 'the first view starts with the sheet taking priority over the command menu');
+
+      await evaluate('document.querySelector("#toggleToolbar").click()');
+      assert.deepEqual(await evaluate(`(() => ({commandsHidden:document.querySelector('#toolbarCommands').hidden,expanded:document.querySelector('#toggleToolbar').getAttribute('aria-expanded'),label:document.querySelector('#toggleToolbar').textContent.trim(),formulaVisible:document.querySelector('#formula').getClientRects().length>0,findVisible:document.querySelector('#searchGroup').getClientRects().length>0}))()`), {
+        commandsHidden: false, expanded: 'true', label: 'Hide menu', formulaVisible: true, findVisible: true
+      }, 'expanding the menu keeps the formula bar and find controls available');
+      assert.equal(await evaluate('getComputedStyle(document.querySelector("#toolbarCommands")).display'), 'flex', 'the menu keeps its wrapping layout while expanded');
+
+      await evaluate('document.querySelector("#toggleToolbar").click()');
+      assert.deepEqual(await evaluate(`(() => ({commandsHidden:document.querySelector('#toolbarCommands').hidden,expanded:document.querySelector('#toggleToolbar').getAttribute('aria-expanded'),label:document.querySelector('#toggleToolbar').textContent.trim(),formulaVisible:document.querySelector('#formula').getClientRects().length>0,findVisible:document.querySelector('#searchGroup').getClientRects().length>0}))()`), {
+        commandsHidden: true, expanded: 'false', label: 'Show menu', formulaVisible: true, findVisible: true
+      }, 'collapsing the menu leaves the formula bar and find controls available');
+
+      await evaluate('document.querySelector("#toggleToolbar").click()');
+      assert.equal(await evaluate('!document.querySelector("#toolbarCommands").hidden && document.querySelector("#toggleToolbar").getAttribute("aria-expanded")==="true"'), true, 'the menu can be expanded again');
+    } finally {
+      devtools?.close();
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test('Chromium Webview opens safe external XLSX hyperlinks and navigates internal links', async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'jinsheet-hyperlink-host-')), file = path.join(directory, 'links.xlsx');
     const encode = text => new TextEncoder().encode(text);

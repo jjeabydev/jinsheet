@@ -1535,7 +1535,12 @@ function runGridWebview(html, { rowCount = 2, columnCount = 2, style = null, kin
   document.activeElement = document.body;
   const grid = get('grid'), canvas = get('canvas');
   grid.clientHeight = 300; grid.clientWidth = 500; grid.scrollTop = 0; grid.scrollLeft = 0; grid.scrollHeight = 30 + rowCount * 26; grid.scrollWidth = 52 + columnCount * 144; grid.rect = { left: 0, top: 0, width: 500, height: 300 }; canvas.parentElement = grid;
-  const vscode = { postMessage: message => messages.push(message) };
+  let webviewState;
+  const vscode = {
+    postMessage: message => messages.push(message),
+    getState: () => webviewState,
+    setState: value => { webviewState = value; return webviewState; }
+  };
   const window = { addEventListener: (name, callback) => addListener(windowListeners, name, callback) };
   const script = [...html.matchAll(/<script nonce="[^"]+">([\s\S]*?)<\/script>/g)].at(-1)[1];
   new vm.Script(script).runInNewContext({ acquireVsCodeApi: () => vscode, document, window, Date, setTimeout, clearTimeout, setInterval, clearInterval });
@@ -2226,7 +2231,7 @@ test('사용자 지정 정렬은 선택한 여러 기준과 각 방향을 전달
   first.onmousedown({ shiftKey: false, clientX: 80, clientY: 60, preventDefault() {} });
   last.onmouseenter();
   documentListeners.get('mouseup')();
-  const customSort = elements.get('toolbar').children.find(item => item.id === 'customSort');
+  const customSort = elements.get('toolbarCommands').children.find(item => item.id === 'customSort');
   assert.ok(customSort, 'custom sort button is available in the toolbar');
   customSort.onclick();
   const panel = elements.get('body').children.find(item => item.id === 'sortPanel');
@@ -2257,7 +2262,7 @@ test('한국어 정렬 대화상자는 확장 셀 한도와 큰 범위 대안을
   const { document, documentListeners, elements } = runGridWebview(renderHtml(null, null, null, 'ko-KR'), { rowCount: 3, columnCount: 2 });
   const first = document.querySelector('[data-row="0"][data-column="0"]'), last = document.querySelector('[data-row="1"][data-column="1"]');
   first.onmousedown({ shiftKey: false, clientX: 80, clientY: 60, preventDefault() {} }); last.onmouseenter(); documentListeners.get('mouseup')();
-  elements.get('toolbar').children.find(item => item.id === 'customSort').onclick();
+  elements.get('toolbarCommands').children.find(item => item.id === 'customSort').onclick();
   const panel = elements.get('body').children.find(item => item.id === 'sortPanel');
   assert.match(panel.children[3].children[2].textContent, /10,000셀/);
   assert.match(panel.children[3].children[2].textContent, /이 옵션을 끄세요/);
